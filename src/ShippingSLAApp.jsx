@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ComposedChart, Area, Scatter, Legend } from 'recharts';
-import { Upload, AlertTriangle, TrendingDown, TrendingUp, Package, Truck, MapPin, Clock, Database, Filter, Download, Activity, ChevronRight, ChevronLeft, Brain, Split, DollarSign, Users, Layers, Zap, Mail, Phone, CheckCircle2, XCircle, Lock, Settings, Shield, UserCog, Eye, LogOut, Save, RotateCcw, Anchor, Warehouse, HardHat, Waves, Cpu, Radar, PiggyBank, MessageCircle, Send, X, Menu, Sun, Moon, Search, FileDown, Calendar, FileText, Trash2, Plus, RefreshCw, UserPlus } from 'lucide-react';
+import { Upload, AlertTriangle, TrendingDown, TrendingUp, Package, Truck, MapPin, Clock, Database, Filter, Download, Activity, ChevronRight, ChevronLeft, Brain, Split, DollarSign, Users, Layers, Zap, Mail, Phone, CheckCircle2, XCircle, Lock, Settings, Shield, UserCog, Eye, LogOut, Save, RotateCcw, Anchor, Warehouse, HardHat, Waves, Cpu, Radar, PiggyBank, MessageCircle, Send, X, Menu, Sun, Moon, Search, FileDown, Calendar, FileText, Trash2, Plus, RefreshCw, UserPlus, Star } from 'lucide-react';
 
 // ============================================================
 // MOCK DATA
@@ -4837,6 +4837,16 @@ export default function ShippingSLAApp() {
   const [uploadedData, setUploadedData] = useState(null);
   const [activePage, setActivePage] = useState(initSession?.page || 'exec');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [favorites, setFavorites] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('kdc_favorites')) || []; } catch { return []; }
+  });
+  const toggleFavorite = (id) => {
+    setFavorites(prev => {
+      const next = prev.includes(id) ? prev.filter(f => f !== id) : [...prev, id];
+      localStorage.setItem('kdc_favorites', JSON.stringify(next));
+      return next;
+    });
+  };
   const [filterCause, setFilterCause] = useState('all');
   const [dateRange, setDateRange] = useState('90d');
   const [filterRegion, setFilterRegion] = useState('all');
@@ -5260,25 +5270,64 @@ export default function ShippingSLAApp() {
               { id: 'adminportal', label: 'Access Control', icon: Shield, adminOnly: true },
               { id: 'snowflake', label: 'Snowflake Config', icon: Database, adminOnly: true },
             ]},
-          ].map(group => {
+          ].map((group, _gi, allGroups) => {
             const visibleItems = group.items.filter(tab => userRole.pages.includes(tab.id));
             if (visibleItems.length === 0) return null;
+
+            // Collect all visible items for favorites lookup (only on first group render)
+            const allItems = allGroups.flatMap(g => g.items).filter(t => userRole.pages.includes(t.id));
+
             return (
-              <div key={group.category} className="mb-1">
-                <div className="px-4 pt-3 pb-1 text-[10px] uppercase tracking-[0.12em] font-mono font-semibold" style={{ color: THEME.textMuted }}>{group.category}</div>
-                {visibleItems.map(tab => {
-                  const Icon = tab.icon;
-                  return (
-                    <button key={tab.id} onClick={() => { setActivePage(tab.id); setSidebarOpen(false); }}
-                      className={`w-full flex items-center gap-3 px-4 py-2 text-[13px] font-medium transition-colors ${activePage === tab.id ? 'bg-[#1ABC9C]/10 text-[#1ABC9C] border-r-2 border-[#1ABC9C]' : ''}`}
-                      style={activePage !== tab.id ? { color: THEME.textSecondary } : {}}>
-                      <Icon size={14}/>
-                      <span>{tab.label}</span>
-                      {tab.adminOnly && <Lock size={10} className="text-[#E74C6F] ml-auto"/>}
-                    </button>
+              <React.Fragment key={group.category}>
+                {/* Favorites section — only render once, before first category */}
+                {group.category === 'Executive' && favorites.length > 0 && (
+                  <div className="mb-1">
+                    <div className="px-4 pt-2 pb-1 text-[10px] uppercase tracking-[0.12em] font-mono font-semibold flex items-center gap-1.5" style={{ color: '#f5a623' }}>
+                      <Star size={10} fill="#f5a623"/> Favorites
+                    </div>
+                    {favorites.map(favId => {
+                      const tab = allItems.find(t => t.id === favId);
+                      if (!tab) return null;
+                      const Icon = tab.icon;
+                      return (
+                        <button key={'fav-'+tab.id} onClick={() => { setActivePage(tab.id); setSidebarOpen(false); }}
+                          className={`w-full flex items-center gap-3 px-4 py-2 text-[13px] font-medium transition-colors ${activePage === tab.id ? 'bg-[#1ABC9C]/10 text-[#1ABC9C] border-r-2 border-[#1ABC9C]' : ''}`}
+                          style={activePage !== tab.id ? { color: THEME.textSecondary } : {}}>
+                          <Icon size={14}/>
+                          <span>{tab.label}</span>
+                          <Star size={11} className="ml-auto flex-shrink-0" fill="#f5a623" style={{ color: '#f5a623' }}/>
+                        </button>
+                      );
+                    })}
+                    <div className="mx-4 my-1" style={{ borderBottom: `1px solid ${THEME.border}` }}/>
+                  </div>
+                )}
+
+                <div className="mb-1">
+                  <div className="px-4 pt-3 pb-1 text-[10px] uppercase tracking-[0.12em] font-mono font-semibold" style={{ color: THEME.textMuted }}>{group.category}</div>
+                  {visibleItems.map(tab => {
+                    const Icon = tab.icon;
+                    const isFav = favorites.includes(tab.id);
+                    return (
+                      <div key={tab.id} className="flex items-center">
+                        <button onClick={() => { setActivePage(tab.id); setSidebarOpen(false); }}
+                          className={`flex-1 flex items-center gap-3 px-4 py-2 text-[13px] font-medium transition-colors ${activePage === tab.id ? 'bg-[#1ABC9C]/10 text-[#1ABC9C] border-r-2 border-[#1ABC9C]' : ''}`}
+                          style={activePage !== tab.id ? { color: THEME.textSecondary } : {}}>
+                          <Icon size={14}/>
+                          <span>{tab.label}</span>
+                          {tab.adminOnly && <Lock size={10} className="text-[#E74C6F] ml-auto"/>}
+                        </button>
+                        {!tab.adminOnly && (
+                          <button onClick={(e) => { e.stopPropagation(); toggleFavorite(tab.id); }}
+                            className="px-2 py-2 transition-colors" title={isFav ? 'Remove from favorites' : 'Add to favorites'}>
+                            <Star size={12} fill={isFav ? '#f5a623' : 'none'} style={{ color: isFav ? '#f5a623' : THEME.textMuted }} />
+                          </button>
+                        )}
+                      </div>
                   );
                 })}
               </div>
+            </React.Fragment>
             );
           })}
         </div>
