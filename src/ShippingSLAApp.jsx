@@ -40,13 +40,13 @@ const CHANNELS = [
 
 // Channel group colors (for pills)
 const CHANNEL_GROUP_COLORS = {
-  'CS': '#1ABC9C',
-  'BS': '#2C3E9B',
-  'VIVACE': '#f5a623',
-  'AST': '#2ECC71',
-  'IIO': '#f97316',
-  'KIO': '#06b6d4',
-  'ECOM': '#E74C6F',
+  'CS': '#1ABC9C',       // Hark Turquoise
+  'BS': '#2C3E9B',       // Hark Persian Blue
+  'VIVACE': '#E74C6F',   // Hark Cerise
+  'AST': '#2ECC71',      // Hark Green
+  'IIO': '#3498DB',      // Hark Turquoise +10 (lighter blue)
+  'KIO': '#1B2A4A',      // Hark Blue (dark navy)
+  'ECOM': '#8E44AD',     // Hark Persian Blue +15 (purple shade)
 };
 
 const getChannelGroup = (ch) => {
@@ -217,11 +217,11 @@ const generateMockShipments = () => {
 };
 
 const CAUSE_COLORS = {
-  'UPS': '#E74C6F',
-  'DC': '#f5a623',
-  'Missing': '#2C3E9B',
-  'Damage': '#1ABC9C',
-  'Other': '#8a95a3',
+  'UPS': '#E74C6F',      // Hark Cerise
+  'DC': '#3498DB',       // Hark Turquoise +10 (sky blue)
+  'Missing': '#8E44AD',  // Hark Persian Blue +15 (purple)
+  'Damage': '#1ABC9C',   // Hark Turquoise
+  'Other': '#7F8C8D',    // Hark Blue -15 (muted gray)
 };
 
 const CAUSE_LABELS = {
