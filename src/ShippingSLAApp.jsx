@@ -5304,17 +5304,19 @@ export default function ShippingSLAApp() {
       {/* Top bar */}
       <div className="sticky top-0 z-10" style={{ background: THEME.topBar, borderBottom: theme === 'dark' ? `1px solid ${THEME.border}` : 'none' }}>
         <div className="max-w-[1440px] mx-auto px-3 sm:px-4 md:px-6 py-2.5 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <button onClick={() => setSidebarOpen(true)} className="p-2 rounded transition-colors" style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
+          <div className="flex items-center gap-1.5 sm:gap-3">
+            <button onClick={() => setSidebarOpen(true)} className="p-1.5 sm:p-2 rounded transition-colors" style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
               <Menu size={16}/>
             </button>
-            <div className="flex items-center gap-2.5">
+            <div className="flex items-center gap-2">
               {/* KISS logo */}
-              <img src="/kiss-logo.png" alt="KISS" onClick={() => setActivePage('exec')} className="cursor-pointer" style={{ height: 28, filter: theme === 'light' ? 'brightness(0) invert(1)' : 'none' }}/>
-              <div className="h-5 w-px" style={{ background: theme === 'light' ? 'rgba(255,255,255,0.3)' : THEME.border }}/>
-              <div>
-                <div className="text-sm font-semibold tracking-tight" style={{ color: theme === 'light' ? '#ffffff' : THEME.textPrimary }}>Operations Intelligence</div>
-                <div className="text-[11px] font-mono uppercase tracking-wider" style={{ color: theme === 'light' ? 'rgba(255,255,255,0.7)' : THEME.textMuted }}>KDC · Savannah GA</div>
+              <img src="/kiss-logo.png" alt="KISS" onClick={() => setActivePage('exec')} className="cursor-pointer" style={{ height: 24, filter: theme === 'light' ? 'brightness(0) invert(1)' : 'none' }}/>
+              <div className="hidden sm:flex items-center gap-2">
+                <div className="h-4 w-px" style={{ background: theme === 'light' ? 'rgba(255,255,255,0.3)' : THEME.border }}/>
+                <div>
+                  <div className="text-xs font-semibold tracking-tight" style={{ color: theme === 'light' ? '#ffffff' : THEME.textPrimary }}>Ops Intelligence</div>
+                  <div className="hidden md:block text-[10px] font-mono uppercase tracking-wider" style={{ color: theme === 'light' ? 'rgba(255,255,255,0.7)' : THEME.textMuted }}>KDC · Savannah GA</div>
+                </div>
               </div>
             </div>
           </div>
@@ -5323,11 +5325,11 @@ export default function ShippingSLAApp() {
             <select value={dateRange} onChange={e => setDateRange(e.target.value)}
               className="h-8 px-2 rounded text-[11px] font-mono outline-none appearance-none cursor-pointer"
               style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textPrimary }}>
-              <option value="7d">Last 7 days</option>
-              <option value="30d">Last 30 days</option>
-              <option value="90d">Last 90 days</option>
-              <option value="ytd">Year to date</option>
-              <option value="1y">Last 12 months</option>
+              <option value="7d">7d</option>
+              <option value="30d">30d</option>
+              <option value="90d">90d</option>
+              <option value="ytd">YTD</option>
+              <option value="1y">12m</option>
             </select>
             {/* Data source toggle */}
             <button onClick={handleDataSourceToggle} disabled={isConnecting}
@@ -5404,13 +5406,13 @@ export default function ShippingSLAApp() {
             className="bg-[#232c37] border border-[#2d3744] text-[12px] font-mono px-2 py-1 rounded text-[#e8ecef] focus:border-[#1ABC9C] outline-none">
             {regions.map(r => <option key={r} value={r}>{r === 'all' ? 'All regions' : r}</option>)}
           </select>
-          <div className="ml-auto text-[11px] font-mono text-[#5d6b7a]">
+          <div className="ml-auto text-[11px] font-mono text-[#5d6b7a] hidden sm:block">
             {fmtNum(filtered.length)} / {fmtNum(data.length)} shipments · Apr 1–17, 2026
           </div>
         </div>
 
-        {/* Channel multi-select */}
-        <div className="flex items-center gap-2 flex-wrap">
+        {/* Channel multi-select — hidden on mobile */}
+        <div className="hidden sm:flex items-center gap-2 flex-wrap">
           <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono">
             Channel
           </div>
