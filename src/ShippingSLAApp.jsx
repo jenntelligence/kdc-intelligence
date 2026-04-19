@@ -656,7 +656,7 @@ const GeoPage = ({ filtered }) => {
         </table>
       </SectionCard>
 
-      <div className="grid grid-cols-3 gap-3 mt-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mt-4">
         {/* MAP */}
         <SectionCard title="US Heat Map" subtitle={`Color intensity = % of ${selectedIssue === 'all' ? 'all delays' : CAUSE_LABELS[selectedIssue]} concentrated in each state`} tag="TILE MAP" className="col-span-2">
           <div className="flex flex-col items-center">
@@ -811,7 +811,7 @@ const GeoPage = ({ filtered }) => {
       <div className="mt-3">
         <SectionCard title="Insight" subtitle={`Based on ${selectedIssue === 'all' ? 'all delayed shipments' : CAUSE_LABELS[selectedIssue]}`} tag="AUTO-GENERATED">
           {rankedStates.length > 0 ? (
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
               <div className="bg-[#1a2129] rounded border-l-2 p-3" style={{ borderColor: baseColor }}>
                 <div className="text-[11px] uppercase tracking-wider font-mono mb-1" style={{ color: baseColor }}>Concentration</div>
                 <div className="text-[13px] leading-relaxed">
@@ -956,7 +956,7 @@ const AIRiskPage = ({ filtered, data }) => {
 
   return (
     <>
-      <div className="grid grid-cols-5 gap-3 mb-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
         <KPI label="Orders Scored" value={summary.total} delta="Open orders only" deltaType="neutral" icon={Brain}/>
         <KPI label="High Risk" value={summary.high} delta={`${fmtPct(summary.high/(summary.total||1))} of open`} deltaType="bad" icon={AlertTriangle}/>
         <KPI label="Medium Risk" value={summary.med} delta="Monitor closely" deltaType="neutral" icon={Clock}/>
@@ -1049,7 +1049,7 @@ const AIRiskPage = ({ filtered, data }) => {
               <button onClick={() => setSelectedOrder(null)} className="text-[#8a95a3] hover:text-[#e8ecef]">✕</button>
             </div>
 
-            <div className="grid grid-cols-3 gap-3 mb-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-4">
               <div className="bg-[#232c37] rounded p-3 border-l-2" style={{ borderColor: riskColor(selectedOrder.risk.riskLevel) }}>
                 <div className="text-[10px] uppercase tracking-wider font-mono text-[#5d6b7a]">Risk Level</div>
                 <div className="text-xl font-semibold mt-1" style={{ color: riskColor(selectedOrder.risk.riskLevel) }}>{selectedOrder.risk.riskLevel}</div>
@@ -1185,7 +1185,7 @@ const SplitShipmentPage = ({ filtered }) => {
         </div>
       </div>
 
-      <div className="grid grid-cols-5 gap-3 mb-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
         <KPI label="Split Shipment Rate" value={fmtPct(splitData.splitRate)} delta={`Target: 0.0%`} deltaType="bad" icon={Split}/>
         <KPI label="Orders Split" value={splitData.split.length} delta={`of ${filtered.length} total`} deltaType="bad" icon={Package}/>
         <KPI label="Avg Gap" value={splitData.avgGap.toFixed(1)} unit="days" delta="Between partials" deltaType="bad" icon={Clock}/>
@@ -1193,7 +1193,7 @@ const SplitShipmentPage = ({ filtered }) => {
         <KPI label="Key Acct Impact" value={splitData.customerList.filter(c => c.tier === 'Key').reduce((s,c) => s+c.split, 0)} delta="Split orders to Key" deltaType="bad" icon={Users}/>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 mb-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
         <SectionCard title="Split Rate by Customer" subtitle="Sorted highest violation" tag="VIOLATION LIST">
           <div className="space-y-2">
             {splitData.customerList.map(c => (
@@ -1238,7 +1238,7 @@ const SplitShipmentPage = ({ filtered }) => {
       </div>
 
       <SectionCard title="Split Rate by Distribution Channel" subtitle="ECOM channels typically have zero tolerance for splits" tag="CHANNEL IMPACT" className="mb-4">
-        <div className="grid grid-cols-11 gap-2 mb-3">
+        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-11 gap-2 mb-3">
           {splitData.channelList.map(c => (
             <div key={c.channel} className="bg-[#1a2129] rounded border p-2"
               style={{ borderColor: c.splitRate > 0.2 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2d3744' }}>
@@ -1347,7 +1347,7 @@ const CostsPage = ({ filtered }) => {
 
   return (
     <>
-      <div className="grid grid-cols-5 gap-3 mb-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
         <KPI label="Total Chargebacks" value={`$${fmtNum(costs.total.toFixed(0))}`} delta="17-day window" deltaType="bad" icon={DollarSign}/>
         <KPI label="Annualized" value={`$${(annualized/1000).toFixed(0)}k`} delta="Projected run-rate" deltaType="bad" icon={TrendingUp}/>
         <KPI label="Value at Risk" value={`$${fmtNum(costs.valueAtRisk.toFixed(0))}`} delta="Open at-risk orders" deltaType="bad" icon={AlertTriangle}/>
@@ -1355,7 +1355,7 @@ const CostsPage = ({ filtered }) => {
         <KPI label="Damage Claims $" value={`$${fmtNum(costs.byReason['Damage'].toFixed(0))}`} delta={fmtPct(costs.byReason['Damage']/costs.total)+ ' of total'} deltaType="bad" icon={Package}/>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 mb-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
         <SectionCard title="Chargebacks by Root Cause" subtitle="Dollar impact" tag="BAR">
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={Object.entries(costs.byReason).map(([k,v]) => ({ cause: k, amount: v }))}>
@@ -1397,7 +1397,7 @@ const CostsPage = ({ filtered }) => {
       </div>
 
       <SectionCard title="Chargebacks by Distribution Channel" subtitle="Where the cost is concentrated" tag="CHANNEL COST" className="mb-4">
-        <div className="grid grid-cols-11 gap-2">
+        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-11 gap-2">
           {(() => {
             const byChannel = {};
             filtered.forEach(o => {
@@ -1491,7 +1491,7 @@ const CustomerImpactPage = ({ filtered }) => {
 
   return (
     <>
-      <div className="grid grid-cols-5 gap-3 mb-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
         <KPI label="Customers Tracked" value={impact.length} delta="Active in window" deltaType="neutral" icon={Users}/>
         <KPI label="Critical Health" value={impact.filter(c => c.health < 50).length} delta="Below 50% score" deltaType="bad" icon={AlertTriangle}/>
         <KPI label="Key Accts at Risk" value={impact.filter(c => c.tier === 'Key' && c.health < 75).length} delta="Escalation priority" deltaType="bad" icon={Zap}/>
@@ -1591,7 +1591,7 @@ const SKUProblemPage = ({ filtered }) => {
 
   return (
     <>
-      <div className="grid grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
         <KPI label="SKUs Tracked" value={skuData.length} delta="Active in window" deltaType="neutral" icon={Layers}/>
         <KPI label="Problem SKUs" value={skuData.filter(s => s.issueScore > 20).length} delta="Score > 20" deltaType="bad" icon={AlertTriangle}/>
         <KPI label="Fragile + Issues" value={skuData.filter(s => s.fragile && s.damage > 0).length} delta="Packaging audit" deltaType="bad" icon={Package}/>
@@ -1692,7 +1692,7 @@ const ShiftHeatmapPage = ({ filtered }) => {
 
   return (
     <>
-      <div className="grid grid-cols-3 gap-3 mb-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-4">
         {heatmap.shiftList.map(s => (
           <div key={s.shift} className="bg-[#232c37] border border-[#2d3744] rounded-md p-4">
             <div className="text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono">{s.shift}</div>
@@ -2365,7 +2365,7 @@ const AdminPortalPage = ({ currentUser }) => {
   return (
     <div className="space-y-4 pb-24">
       {/* KPI Row */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <KPI label="Total Users" value={editingUsers.length} delta="Active accounts" deltaType="neutral" icon={Users}/>
         <KPI label="Roles Defined" value={3} delta="Admin, Manager, Viewer" deltaType="neutral" icon={Shield}/>
         <KPI label="Pages Available" value={ALL_PAGE_COUNT} delta="Dashboard tabs" deltaType="neutral" icon={Settings}/>
@@ -2505,7 +2505,7 @@ const AdminPortalPage = ({ currentUser }) => {
                       {selectedUserObj.authMethod === 'entra' ? '● Microsoft Entra ID (SSO)' : '● Local Authentication'}
                     </span>
                   </div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div>
                       <div className="text-[10px] uppercase tracking-wider font-mono mb-1" style={{ color: 'var(--text-muted)' }}>Email</div>
                       <div className="text-[12px] font-mono" style={{ color: 'var(--text-primary)' }}>{selectedUserObj.email || '—'}</div>
@@ -2855,7 +2855,7 @@ const AdminSLAPage = ({ channelSlas, setChannelSlas, kpiTargets, setKpiTargets, 
       </div>
 
       {/* KPI strip */}
-      <div className="grid grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
         <KPI label="Stages Configured" value={currentSlas.length} delta="All lifecycle stages" deltaType="neutral" icon={Settings}/>
         <KPI label="Total Cycle Target" value={totalCycleTarget} unit="min" delta={`${(totalCycleTarget/60).toFixed(1)} hrs end-to-end`} deltaType="neutral" icon={Clock}/>
         <KPI label="Channel Overrides" value={overrideCount} delta={`${CHANNELS.length - overrideCount} using default`} deltaType="neutral" icon={Activity}/>
@@ -2921,7 +2921,7 @@ const AdminSLAPage = ({ channelSlas, setChannelSlas, kpiTargets, setKpiTargets, 
         </div>
       )}
 
-      <div className="grid grid-cols-5 gap-3 mb-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
         {/* STAGE SLAs */}
         <SectionCard
           title={selectedTab === 'default' ? 'Default SLA Targets (Fallback)' : `${selectedTab} — SLA Targets`}
@@ -3112,7 +3112,7 @@ const InboundPage = () => {
 
   return (
     <>
-      <div className="grid grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
         <KPI label="Active Docks" value={activeDocks} delta={`of ${MOCK_DOCKS.length} total`} deltaType="neutral" icon={Anchor}/>
         <KPI label="Receiving Accuracy" value={recvAccuracy} unit="%" delta="vs expected qty" deltaType="good" icon={CheckCircle2}/>
         <KPI label="Dock-to-Stock" value="2.4" unit="hrs" delta="Avg today" deltaType="neutral" icon={Clock}/>
@@ -3120,7 +3120,7 @@ const InboundPage = () => {
       </div>
 
       <SectionCard title="Dock Door Grid" subtitle="Real-time door status" tag="LIVE" className="mb-4">
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {MOCK_DOCKS.map(d => (
             <div key={d.doorId} className="bg-[#232c37] border border-[#2d3744] rounded-md p-3 hover:border-[#1ABC9C] transition-colors">
               <div className="flex items-center justify-between mb-2">
@@ -3183,7 +3183,7 @@ const StoragePage = () => {
 
   return (
     <>
-      <div className="grid grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
         <KPI label="Avg Utilization" value={avgUtil} unit="%" delta="Across all zones" deltaType="neutral" icon={Warehouse}/>
         <KPI label="Active Zones" value={activeZones} delta={`of ${MOCK_ZONES.length} total`} deltaType="neutral" icon={Layers}/>
         <KPI label="Inventory Accuracy" value="99.2" unit="%" delta="Last cycle count" deltaType="good" icon={CheckCircle2}/>
@@ -3191,7 +3191,7 @@ const StoragePage = () => {
       </div>
 
       <SectionCard title="Zone Utilization" subtitle="Capacity by storage zone" tag="ZONES">
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
           {MOCK_ZONES.map(z => {
             const barColor = z.utilization > 85 ? '#E74C6F' : z.utilization > 70 ? '#f5a623' : '#2ECC71';
             return (
@@ -3228,7 +3228,7 @@ const LaborPage = () => {
 
   return (
     <>
-      <div className="grid grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
         <KPI label="Total Headcount" value={totalHC} delta={`${MOCK_LABOR.reduce((s,l)=>s+l.planned,0)} planned`} deltaType="neutral" icon={HardHat}/>
         <KPI label="Avg Productivity" value={avgProd} unit="u/hr" delta="Units per hour" deltaType="neutral" icon={Activity}/>
         <KPI label="Avg Utilization" value={avgUtil} unit="%" delta="Across zones" deltaType="neutral" icon={Zap}/>
@@ -3236,7 +3236,7 @@ const LaborPage = () => {
       </div>
 
       <SectionCard title="Labor by Zone" subtitle="Headcount, productivity, utilization" tag="WORKFORCE">
-        <div className="grid grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {MOCK_LABOR.map(l => {
             const hcMet = l.headcount >= l.planned;
             const prodPct = Math.min((l.avgProductivity / l.targetProductivity) * 100, 100);
@@ -3284,7 +3284,7 @@ const WavesPage = () => {
 
   return (
     <>
-      <div className="grid grid-cols-4 gap-3 mb-4">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
         <KPI label="In Progress" value={inProgress} delta="Active waves" deltaType="neutral" icon={Waves}/>
         <KPI label="Planned / Released" value={planned} delta="Queued" deltaType="neutral" icon={Clock}/>
         <KPI label="Completed Today" value={completed} delta="Finished" deltaType="good" icon={CheckCircle2}/>
@@ -3311,7 +3311,7 @@ const WavesPage = () => {
                   <span>{w.orderCount} orders</span>
                   <span>{fmtNum(w.unitCount)} units</span>
                 </div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   <div>
                     <div className="text-[11px] text-[#5d6b7a] font-mono mb-1">Pick {w.pickProgress}%</div>
                     <div className="h-1.5 rounded-full bg-[#0f1419] overflow-hidden">
@@ -3355,7 +3355,7 @@ const OptimizerPage = () => {
   return (
     <>
       <SectionCard title="Optimization Engines" subtitle="Select an optimizer to run" tag="AI-POWERED" className="mb-4">
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {MOCK_OPTIMIZER.map(opt => {
             const Icon = opt.icon;
             return (
@@ -3451,7 +3451,7 @@ const ForecastPage = () => {
         </select>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 mb-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
         {MOCK_FORECASTS.map(f => {
           const displayData = f.data.slice(0, horizon);
           return (
@@ -3548,7 +3548,7 @@ const FlightBoardPage = ({ data: allData }) => {
 
   return (
     <>
-      <div className="grid grid-cols-6 gap-3 mb-4">
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-3 mb-4">
         <KPI label="At WMS" value={counts.atWms} delta="Stages 1-3" deltaType="neutral" icon={Database}/>
         <KPI label="On Floor" value={counts.onFloor} delta="Pick/Pack/Ship" deltaType="neutral" icon={Package}/>
         <KPI label="Ready Ship" value={counts.readyShip} delta="Stage 7" deltaType="neutral" icon={Truck}/>
@@ -3663,7 +3663,7 @@ const EconomicsPage = ({ filtered }) => {
 
   return (
     <>
-      <div className="grid grid-cols-2 gap-3 mb-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
         <SectionCard title="Cost Waterfall" subtitle="Order Value to Contribution Margin" tag="P&L">
           <ResponsiveContainer width="100%" height={260}>
             <BarChart data={waterfallData}>
@@ -4127,7 +4127,7 @@ const DataHubPage = ({ data }) => {
       </div>
 
       {/* B. KPI Row */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <KPI label="Available Datasets" value="24" delta="Across all categories" icon={Database} />
         <KPI label="Last Export" value="2h ago" delta="By GMC" icon={Download} />
         <KPI label="Data Freshness" value="Live" delta="Real-time sync" deltaType="good" icon={Activity} />
@@ -4155,7 +4155,7 @@ const DataHubPage = ({ data }) => {
       </div>
 
       {/* D. Dataset Cards Grid */}
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {datasets.map((ds, idx) => {
           const isOpen = previewOpen[activeCategory + '-' + idx];
           const previewRows = DATA_HUB_PREVIEW_DATA[ds.title];
@@ -4498,7 +4498,7 @@ const EventCalendarPage = ({ currentUser }) => {
       )}
 
       {/* KPI Row */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <KPI label="Events This Month" value={monthEvents.length} icon={Calendar} delta={`${highImpactCount} high-impact`} deltaType="neutral"/>
         <KPI label="Next Major Event" value={nextMajor ? nextMajor.name.slice(0, 22) + (nextMajor.name.length > 22 ? '...' : '') : 'None'} icon={AlertTriangle} delta={daysUntilNext !== null ? `in ${daysUntilNext} days` : '—'} deltaType="neutral"/>
         <KPI label="Avg Volume Uplift" value={`${avgUplift}%`} icon={TrendingUp} delta="During events" deltaType="neutral"/>
@@ -4696,7 +4696,7 @@ const EventCalendarPage = ({ currentUser }) => {
               {isConfirming && parsedData && (
                 <div className="space-y-3">
                   <div className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>Extracted Information</div>
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div>
                       <label className="text-[10px] font-semibold uppercase mb-1 block" style={{ color: 'var(--text-muted)' }}>Event Name</label>
                       <input value={parsedData.name} onChange={e => setParsedData(p => ({ ...p, name: e.target.value }))} className="w-full px-2 py-1.5 rounded text-[12px] font-mono" style={{ background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'var(--text-primary)' }}/>
@@ -5150,6 +5150,14 @@ export default function ShippingSLAApp() {
           --red: ${THEME.red};
           --purple: ${THEME.purple};
         }
+        @media (max-width: 640px) {
+          .recharts-wrapper { font-size: 10px; }
+          .hide-mobile { display: none !important; }
+          .mobile-stack { flex-direction: column !important; }
+        }
+        @media (max-width: 768px) {
+          .hide-tablet { display: none !important; }
+        }
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: ${THEME.bgPrimary}; }
         ::-webkit-scrollbar-thumb { background: ${THEME.border}; border-radius: 4px; }
@@ -5295,7 +5303,7 @@ export default function ShippingSLAApp() {
 
       {/* Top bar */}
       <div className="sticky top-0 z-10" style={{ background: THEME.topBar, borderBottom: theme === 'dark' ? `1px solid ${THEME.border}` : 'none' }}>
-        <div className="max-w-[1440px] mx-auto px-6 py-2.5 flex items-center justify-between">
+        <div className="max-w-[1440px] mx-auto px-3 sm:px-4 md:px-6 py-2.5 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button onClick={() => setSidebarOpen(true)} className="p-2 rounded transition-colors" style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
               <Menu size={16}/>
@@ -5347,29 +5355,30 @@ export default function ShippingSLAApp() {
               <RefreshCw size={11} className={isRefreshing ? 'animate-spin' : ''}/>
               <span style={{ color: theme === 'light' ? 'rgba(255,255,255,0.6)' : THEME.textMuted }}>{lastRefresh.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</span>
             </button>
-            {/* Theme toggle */}
+            {/* Theme toggle — hidden on mobile */}
             <button onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-              className="h-8 w-8 flex items-center justify-center rounded transition-colors"
+              className="h-8 w-8 hidden md:flex items-center justify-center rounded transition-colors"
               style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}>
               {theme === 'dark' ? <Sun size={13}/> : <Moon size={13}/>}
             </button>
             {userRole.canUploadData && (
               <button onClick={() => fileInputRef.current?.click()}
-                className="h-8 flex items-center gap-1.5 px-2.5 rounded transition-colors"
+                className="h-8 hidden md:flex items-center gap-1.5 px-2.5 rounded transition-colors"
                 style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
                 <Upload size={11}/> Upload CSV
               </button>
             )}
             <input ref={fileInputRef} type="file" accept=".csv" onChange={handleUpload} className="hidden"/>
             {uploadedData && userRole.canResetData && (
-              <button onClick={() => setUploadedData(null)} className="px-3 py-1.5 rounded transition-colors" style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
+              <button onClick={() => setUploadedData(null)} className="px-3 py-1.5 rounded transition-colors hidden md:block" style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
                 Reset to Mock
               </button>
             )}
             {/* User badge */}
             <div className="h-8 flex items-center gap-1.5 px-2.5 rounded" style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : userRole.color+'15', border: theme === 'light' ? '1px solid rgba(255,255,255,0.25)' : `1px solid ${userRole.color}40` }}>
               {(() => { const I = userRole.icon; return <I size={11} style={{ color: theme === 'light' ? '#ffffff' : userRole.color }}/>; })()}
-              <span className="text-[11px] font-medium" style={{ color: theme === 'light' ? '#ffffff' : userRole.color }}>{currentUser.displayName}</span>
+              <span className="text-[11px] font-medium hidden md:inline" style={{ color: theme === 'light' ? '#ffffff' : userRole.color }}>{currentUser.displayName}</span>
+              <span className="text-[11px] font-medium md:hidden" style={{ color: theme === 'light' ? '#ffffff' : userRole.color }}>{currentUser.displayName?.charAt(0)}</span>
             </div>
             <button onClick={() => { setCurrentUser(null); setActivePage('exec'); }}
               className="h-8 w-8 flex items-center justify-center rounded transition-colors"
@@ -5381,7 +5390,7 @@ export default function ShippingSLAApp() {
       </div>
 
       {/* Filter bar */}
-      <div className="max-w-[1440px] mx-auto px-6 py-3 space-y-2" style={{ borderBottom: `1px solid ${THEME.border}`, background: THEME.bgPrimary }}>
+      <div className="max-w-[1440px] mx-auto px-3 sm:px-4 md:px-6 py-3 space-y-2" style={{ borderBottom: `1px solid ${THEME.border}`, background: THEME.bgPrimary }}>
         <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono">
             <Filter size={11}/> Filters
@@ -5446,7 +5455,7 @@ export default function ShippingSLAApp() {
         </div>
       </div>
 
-      <div className="max-w-[1440px] mx-auto p-6">
+      <div className="max-w-[1440px] mx-auto p-3 sm:p-4 md:p-6">
 
         {/* ======================================================
             PAGE 1: EXECUTIVE SUMMARY
@@ -5561,7 +5570,7 @@ export default function ShippingSLAApp() {
 
               return (
                 <>
-                  <div className="grid grid-cols-7 gap-3 mb-2">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-2">
                     {kpiCards.map(kpi => (
                       <div key={kpi.key} onClick={() => setSelectedMetric(selectedMetric === kpi.key ? null : kpi.key)}
                         className="cursor-pointer transition-all" style={{ borderRadius: 8, outline: selectedMetric === kpi.key ? '2px solid #1ABC9C' : '2px solid transparent' }}>
@@ -5569,7 +5578,7 @@ export default function ShippingSLAApp() {
                       </div>
                     ))}
                   </div>
-                  <div className="grid grid-cols-7 gap-3 mb-4">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-4">
                     {dollarCards.map(kpi => (
                       <div key={'$'+kpi.key} onClick={() => setSelectedMetric(selectedMetric === kpi.key ? null : kpi.key)}
                         className="cursor-pointer transition-all" style={{ borderRadius: 8, outline: selectedMetric === kpi.key ? '2px solid #1ABC9C' : '2px solid transparent' }}>
@@ -5630,7 +5639,7 @@ export default function ShippingSLAApp() {
 
             {/* Channel performance strip */}
             <SectionCard title="Performance by Distribution Channel" subtitle={selectedChannels.length > 0 ? `Showing ${selectedChannels.length} selected channel(s)` : 'All 11 channels · click pills in filter bar to drill'} tag="CHANNEL MIX" className="mb-4">
-              <div className="grid grid-cols-11 gap-2">
+              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-11 gap-2">
                 {CHANNELS.map(ch => {
                   const chRows = data.filter(r => r.channel === ch);
                   const chFiltered = filtered.filter(r => r.channel === ch);
@@ -5664,7 +5673,7 @@ export default function ShippingSLAApp() {
               </div>
             </SectionCard>
 
-            <div className="grid grid-cols-3 gap-3 mb-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-4">
               <SectionCard title="Delay Root Cause Mix" subtitle={`${metrics.delayed} delayed shipments`} tag="DONUT">
                 <div className="flex items-center gap-4">
                   <ResponsiveContainer width={180} height={180}>
@@ -5695,7 +5704,7 @@ export default function ShippingSLAApp() {
                     <div className="flex-1 bg-[#1a2129] rounded border border-[#E74C6F]/30 p-4">
                       <div className="text-[11px] uppercase tracking-wider text-[#E74C6F] font-mono mb-1">Bottleneck Detected</div>
                       <div className="text-xl font-semibold mb-2">{bottleneck.name}</div>
-                      <div className="grid grid-cols-3 gap-3 mt-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mt-3">
                         <div>
                           <div className="text-[10px] uppercase text-[#5d6b7a] font-mono">SLA Target</div>
                           <div className="font-mono text-sm mt-0.5">{bottleneck.target}m</div>
@@ -5752,7 +5761,7 @@ export default function ShippingSLAApp() {
         ====================================================== */}
         {activePage === 'timeline' && (
           <>
-            <div className="grid grid-cols-4 gap-3 mb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
               <KPI label="SAP Stages (1-3)" value={stageData.slice(0,3).reduce((s,x)=>s+x.avg,0)} unit="m" delta="order→SCALE handoff" deltaType="neutral"/>
               <KPI label="SCALE Stages (4-7)" value={stageData.slice(3,7).reduce((s,x)=>s+x.avg,0)} unit="m" delta="receive→ship confirm" deltaType="neutral"/>
               <KPI label="Carrier Stage (8)" value={stageData[7]?.avg || 0} unit="m" delta="ship confirm→scan" deltaType="neutral"/>
@@ -5890,7 +5899,7 @@ export default function ShippingSLAApp() {
         ====================================================== */}
         {activePage === 'rootcause' && (
           <>
-            <div className="grid grid-cols-4 gap-3 mb-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
               {['UPS', 'DC', 'Missing', 'Damage'].map(cause => {
                 const count = filtered.filter(r => r.cause === cause).length;
                 const pct = metrics.total ? count/metrics.total : 0;
@@ -5910,7 +5919,7 @@ export default function ShippingSLAApp() {
               })}
             </div>
 
-            <div className="grid grid-cols-2 gap-3 mb-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
               <SectionCard title={`${CAUSE_LABELS[filterCause] || 'All Causes'} — Breakdown`} subtitle="By customer & carrier">
                 <div className="space-y-3">
                   <div>
@@ -6079,7 +6088,7 @@ export default function ShippingSLAApp() {
 
       {/* Footer */}
       <div className="border-t border-[#2d3744] mt-8">
-        <div className="max-w-[1440px] mx-auto px-6 py-3 flex items-center justify-between text-[11px] font-mono text-[#5d6b7a]">
+        <div className="max-w-[1440px] mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between text-[11px] font-mono text-[#5d6b7a]">
           <div className="flex items-center gap-4">
             <span>KDC Shipping SLA · v0.1 Prototype</span>
             <span>·</span>
