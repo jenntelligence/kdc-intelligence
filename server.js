@@ -20,6 +20,7 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import snowflake from 'snowflake-sdk';
+import { GoogleGenAI } from '@google/genai';
 
 const app = express();
 app.use(cors());
@@ -661,6 +662,127 @@ app.post('/api/kdc/query', async (req, res) => {
   }
 });
 
+
+// ════════════════════════════════════════════════════════════════════════════
+// GEMINI AI ENDPOINTS
+// Uses Google Gemini 2.5 Flash for warehouse operations intelligence
+// Falls back to mock responses when API key is not configured
+// ════════════════════════════════════════════════════════════════════════════
+
+const GEMINI_KEY = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+const genai = GEMINI_KEY ? new GoogleGenAI({ apiKey: GEMINI_KEY }) : null;
+
+const DC_SYSTEM_PROMPT = `You are KDC Intelligence AI, an operations analyst for Kiss Distribution Center (KDCGA1) in Savannah, GA.
+You analyze warehouse KPI data and provide actionable insights for DC operations managers.
+
+Context:
+- Companies: Kiss (1000), Ivy (1100), Red (1400), Vivace (1900)
+- WMS: Manhattan Active SCALE
+- ERP: SAP
+- Carriers: UPS (parcel), R&L (LTL), FedEx, various truck carriers
+- Key processes: Wave planning, picking (Autostore + Pick Module), packing (QC via EX03/EX28), staging, loading, ship confirm
+- KDC target: D+1 processing for all orders
+- Distribution channels: CS-Bulk, CS-DSDC, BS-IVY, BS-RED, VIVACE, AST, IIO, KIO, ECOM-AMAZON 1P/3P, ECOM-DTC
+
+Your responses should be:
+- Concise and actionable (no fluff)
+- Focused on operational impact
+- Include specific numbers when data is provided
+- Prioritize issues by urgency
+- Reference KDC-specific terminology (waves, SCALE status codes, consolidation locations, etc.)`;
+
+// AI Chat endpoint — conversational
+app.post('/api/ai/chat', async (req, res) => {
+  const { message, context } = req.body;
+  if (!message) return res.status(400).json({ success: false, error: 'Missing message' });
+
+  if (!genai) {
+    // Mock response when no API key
+    return res.json({
+      success: true,
+      response: getMockAIResponse(message),
+      source: 'mock',
+      message: 'AI responses are mocked — add GOOGLE_GENERATIVE_AI_API_KEY to .env for real AI',
+    });
+  }
+
+  try {
+    const contextStr = context ? `\n\nCurrent data context:\n${JSON.stringify(context)}` : '';
+    const response = await genai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `${DC_SYSTEM_PROMPT}${contextStr}\n\nUser question: ${message}`,
+    });
+    const text = response.text || 'I was unable to generate a response. Please try again.';
+    res.json({ success: true, response: text, source: 'gemini' });
+  } catch (err) {
+    res.json({ success: true, response: getMockAIResponse(message), source: 'mock-fallback', error: err.message });
+  }
+});
+
+// AI Insight endpoint — structured shift analysis
+app.post('/api/ai/insight', async (req, res) => {
+  const { kpis } = req.body;
+
+  if (!genai) {
+    return res.json({ success: true, data: getMockInsight(), source: 'mock' });
+  }
+
+  try {
+    const kpiStr = kpis ? kpis.map(k => `${k.label}: ${k.value} (${k.delta})`).join('\n') : 'No KPI data provided';
+    const response = await genai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `${DC_SYSTEM_PROMPT}\n\nAnalyze today's KPI data and provide a structured insight:\n\n${kpiStr}\n\nRespond in JSON format:\n{"summary": "...", "highlights": [{"metric": "...", "observation": "...", "impact": "positive|negative|neutral"}], "recommendations": ["..."], "riskAlerts": ["..."]}`,
+    });
+
+    const text = response.text || '';
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      res.json({ success: true, data: JSON.parse(jsonMatch[0]), source: 'gemini' });
+    } else {
+      res.json({ success: true, data: getMockInsight(), source: 'mock-fallback' });
+    }
+  } catch (err) {
+    res.json({ success: true, data: getMockInsight(), source: 'mock-fallback', error: err.message });
+  }
+});
+
+// Mock AI responses for when no API key is available
+function getMockAIResponse(message) {
+  const m = message.toLowerCase();
+  if (m.includes('pick') || m.includes('productivity'))
+    return 'Current pick productivity is trending at ~120 units/hr across Pick Module stations. Autostore throughput is higher at ~180 units/hr. Shift 1 consistently outperforms Shift 2 by 15-20%. Recommendation: Review labor allocation for Shift 2 pick zones, particularly in the Ivy Reserve area where we\'re seeing longer cycle times.';
+  if (m.includes('dock') || m.includes('inbound'))
+    return 'Dock utilization is at 75% with 9 of 12 doors active. DOOR-03 and DOOR-07 have been in UNLOADING status for >2 hours — check for trailer detention. R&L LTL loads are backed up at consolidation area T. Recommend clearing T05-T08 staging positions to improve flow.';
+  if (m.includes('carrier') || m.includes('ups') || m.includes('shipping'))
+    return 'UPS parcel performance: 19.4% on-time rate (90d), significantly below target. Zone 5+ destinations (IL, TX, CA) showing worst performance. R&L LTL has 3 shipments missing PRO numbers at status 650+. Recommend escalating with UPS regional rep and auditing EX27 R&L API integration.';
+  if (m.includes('delay') || m.includes('late') || m.includes('backorder'))
+    return '42,443 in-stock backorders currently open (orders past RDD but not shipped). 18,984 delayed shipments in the last 90 days. Top delay causes: DC processing (wave/allocation holds), UPS transit delays, and missing product (short picks). Critical: 2,165 Ivy orders stuck in Pool status >24hrs.';
+  if (m.includes('wave') || m.includes('allocation'))
+    return 'Last 2 days: 47 waves processed. Kiss waves averaging 38 shipments/wave, Ivy waves at 17. Wave completion rate is 96.8%. 159 Ivy shipments stuck at Waved status — likely allocation failures due to inventory variance. Check FIFO allocation rule for Ivy Reserve zones.';
+  if (m.includes('split') || m.includes('carton'))
+    return 'Split shipment rate is 15.9% against a 0% target — this is a critical compliance issue. Top split reasons: short picks (55% of splits), wave cutoff misses (25%), and SAP-SCALE inventory variance. Ulta Beauty and Target Corp are most affected. Estimated chargeback exposure: $32,903.';
+  return 'I can help you analyze KDC warehouse operations data. Try asking about:\n\n• Pick productivity and throughput\n• Dock status and inbound operations\n• Carrier performance (UPS, R&L)\n• Delay root causes and backorders\n• Wave planning and allocation\n• Split shipment compliance\n• Shift performance comparison\n• Customer-specific SLA analysis';
+}
+
+function getMockInsight() {
+  return {
+    summary: 'Operations show elevated backorder levels with 42K+ orders past due. On-time ship rate at 19.4% is significantly below target. Pick Module productivity stable but wave processing showing allocation bottlenecks in Ivy Reserve zones.',
+    highlights: [
+      { metric: 'On-Time Ship Rate', observation: '19.4% against 95% target — 80% of shipped orders are late', impact: 'negative' },
+      { metric: 'Backorder Volume', observation: '42,443 open backorders — primarily Ivy and Kiss companies', impact: 'negative' },
+      { metric: 'Avg Cycle Time', observation: '87 hours order-to-dock vs 18 hour target', impact: 'negative' },
+    ],
+    recommendations: [
+      'Prioritize clearing 2,165 Ivy orders stuck in Pool status — investigate SAP interface lag',
+      'Escalate UPS on-time performance with regional account manager',
+      'Review wave planning rules — 159 orders stuck at Waved status suggest allocation failures',
+    ],
+    riskAlerts: [
+      'Critical: 19% OTD rate will trigger customer chargebacks if not addressed within 48 hours',
+      'Split shipment rate 15.9% — Ulta Beauty and Target Corp compliance risk',
+    ],
+  };
+}
 
 // ── Start server ────────────────────────────────────────────────────────────
 app.listen(PORT, () => {

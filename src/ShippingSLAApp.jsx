@@ -3741,23 +3741,29 @@ const AiChatPanel = () => {
   const [input, setInput] = useState('');
   const chatEndRef = useRef(null);
 
+  const [isThinking, setIsThinking] = useState(false);
+
   const handleSend = () => {
-    if (!input.trim()) return;
+    if (!input.trim() || isThinking) return;
     const userMsg = input.trim();
     setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
     setInput('');
+    setIsThinking(true);
 
-    // Simple keyword matching for mock responses
-    setTimeout(() => {
-      const lower = userMsg.toLowerCase();
-      let response = MOCK_AI_RESPONSES.default;
-      if (lower.includes('pick') || lower.includes('rate')) response = MOCK_AI_RESPONSES.pick;
-      else if (lower.includes('dock') || lower.includes('door')) response = MOCK_AI_RESPONSES.dock;
-      else if (lower.includes('carrier') || lower.includes('ups') || lower.includes('fedex')) response = MOCK_AI_RESPONSES.carrier;
-      else if (lower.includes('wave')) response = MOCK_AI_RESPONSES.wave;
-      else if (lower.includes('split')) response = MOCK_AI_RESPONSES.split;
-      setMessages(prev => [...prev, { role: 'ai', text: response }]);
-    }, 600);
+    fetch('http://localhost:3001/api/ai/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: userMsg }),
+    })
+      .then(r => r.json())
+      .then(d => {
+        const src = d.source === 'gemini' ? '' : ' [mock]';
+        setMessages(prev => [...prev, { role: 'ai', text: d.response + src }]);
+      })
+      .catch(() => {
+        setMessages(prev => [...prev, { role: 'ai', text: 'Unable to reach AI service. Make sure the API server is running (npm run server).' }]);
+      })
+      .finally(() => setIsThinking(false));
   };
 
   const suggestions = ["What's today's pick rate?", "Which dock is most behind?", "Carrier performance this week?"];
@@ -3797,6 +3803,18 @@ const AiChatPanel = () => {
                 </div>
               </div>
             ))}
+            {isThinking && (
+              <div className="flex justify-start">
+                <div className="bg-[#232c37] border border-[#2d3744] rounded-lg px-3 py-2 text-[13px] text-[#8a95a3] flex items-center gap-2">
+                  <div className="flex gap-1">
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#1ABC9C] animate-bounce" style={{ animationDelay: '0ms' }}/>
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#1ABC9C] animate-bounce" style={{ animationDelay: '150ms' }}/>
+                    <div className="w-1.5 h-1.5 rounded-full bg-[#1ABC9C] animate-bounce" style={{ animationDelay: '300ms' }}/>
+                  </div>
+                  Thinking...
+                </div>
+              </div>
+            )}
             <div ref={chatEndRef}/>
           </div>
 
