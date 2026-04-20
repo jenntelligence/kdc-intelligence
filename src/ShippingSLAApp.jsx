@@ -5191,13 +5191,26 @@ export default function ShippingSLAApp() {
           --red: ${THEME.red};
           --purple: ${THEME.purple};
         }
+        /* Fluid typography — scales with viewport width */
+        html { font-size: clamp(13px, 0.85vw + 6px, 18px); }
+
         @media (max-width: 640px) {
+          html { font-size: 14px; }
           .recharts-wrapper { font-size: 10px; }
           .hide-mobile { display: none !important; }
           .mobile-stack { flex-direction: column !important; }
         }
         @media (max-width: 768px) {
           .hide-tablet { display: none !important; }
+        }
+        @media (min-width: 1920px) {
+          html { font-size: 16px; }
+        }
+        @media (min-width: 2560px) {
+          html { font-size: 18px; }
+        }
+        @media (min-width: 3840px) {
+          html { font-size: 22px; }
         }
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-track { background: ${THEME.bgPrimary}; }
@@ -5421,7 +5434,7 @@ export default function ShippingSLAApp() {
 
       {/* Top bar */}
       <div className="sticky top-0 z-10" style={{ background: THEME.topBar, borderBottom: theme === 'dark' ? `1px solid ${THEME.border}` : 'none' }}>
-        <div className="max-w-[1440px] mx-auto px-3 sm:px-4 md:px-6 py-2.5 flex items-center justify-between">
+        <div className="max-w-[2560px] mx-auto px-3 sm:px-4 md:px-6 py-2.5 flex items-center justify-between">
           <div className="flex items-center gap-1.5 sm:gap-3">
             <button onClick={() => setSidebarOpen(true)} className="p-1.5 sm:p-2 rounded transition-colors" style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
               <Menu size={16}/>
@@ -5510,7 +5523,7 @@ export default function ShippingSLAApp() {
       </div>
 
       {/* Filter bar */}
-      <div className="max-w-[1440px] mx-auto px-3 sm:px-4 md:px-6 py-3 space-y-2" style={{ borderBottom: `1px solid ${THEME.border}`, background: THEME.bgPrimary }}>
+      <div className="max-w-[2560px] mx-auto px-3 sm:px-4 md:px-6 py-3 space-y-2" style={{ borderBottom: `1px solid ${THEME.border}`, background: THEME.bgPrimary }}>
         <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono">
             <Filter size={11}/> Filters
@@ -5575,7 +5588,7 @@ export default function ShippingSLAApp() {
         </div>
       </div>
 
-      <div className="max-w-[1440px] mx-auto p-3 sm:p-4 md:p-6">
+      <div className="max-w-[2560px] mx-auto p-3 sm:p-4 md:p-6">
 
         {/* ======================================================
             PAGE 1: EXECUTIVE SUMMARY
@@ -6208,7 +6221,7 @@ export default function ShippingSLAApp() {
 
       {/* Footer */}
       <div className="border-t border-[#2d3744] mt-8">
-        <div className="max-w-[1440px] mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between text-[11px] font-mono text-[#5d6b7a]">
+        <div className="max-w-[2560px] mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between text-[11px] font-mono text-[#5d6b7a]">
           <div className="flex items-center gap-4">
             <span>KDC Shipping SLA · v0.1 Prototype</span>
             <span>·</span>
