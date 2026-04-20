@@ -224,6 +224,14 @@ const CAUSE_COLORS = {
   'Other': '#7F8C8D',    // Hark Blue -15 (muted gray)
 };
 
+const CAUSE_GRADIENTS = {
+  'UPS': 'url(#gradCerise)',
+  'DC': 'url(#gradSkyBlue)',
+  'Missing': 'url(#gradPurple)',
+  'Damage': 'url(#gradTurquoise)',
+  'Other': 'url(#gradGray)',
+};
+
 const CAUSE_LABELS = {
   'UPS': 'UPS Carrier',
   'DC': 'DC Processing',
@@ -1436,9 +1444,9 @@ const CostsPage = ({ filtered }) => {
             <XAxis dataKey="date" stroke="#5d6b7a" style={{ fontSize: 10, fontFamily: 'IBM Plex Mono' }}/>
             <YAxis stroke="#5d6b7a" style={{ fontSize: 10, fontFamily: 'IBM Plex Mono' }} tickFormatter={v => `$${v/1000}k`}/>
             <Tooltip contentStyle={{ background: '#1a2129', border: '1px solid #2d3744', fontSize: 11 }} formatter={v => `$${fmtNum(v.toFixed(0))}`}/>
-            <Bar dataKey="delay" stackId="a" fill="#E74C6F" name="Delay"/>
-            <Bar dataKey="split" stackId="a" fill="#2C3E9B" name="Split"/>
-            <Bar dataKey="damage" stackId="a" fill="#1ABC9C" name="Damage"/>
+            <Bar dataKey="delay" stackId="a" fill="url(#gradCerise)" name="Delay"/>
+            <Bar dataKey="split" stackId="a" fill="url(#gradPersianBlue)" name="Split"/>
+            <Bar dataKey="damage" stackId="a" fill="url(#gradTurquoise)" name="Damage"/>
           </BarChart>
         </ResponsiveContainer>
         <div className="flex gap-4 justify-center text-[11px] font-mono mt-2">
@@ -3743,6 +3751,11 @@ const AiChatPanel = () => {
 
   const [isThinking, setIsThinking] = useState(false);
 
+  // Auto-scroll to bottom when messages change or thinking state changes
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, isThinking]);
+
   const handleSend = () => {
     if (!input.trim() || isThinking) return;
     const userMsg = input.trim();
@@ -5158,7 +5171,7 @@ export default function ShippingSLAApp() {
   // RENDER
   // ============================================================
   return (
-    <div className="min-h-screen font-sans" style={{ fontFamily: "'IBM Plex Sans', system-ui, sans-serif", background: THEME.bgPrimary, color: THEME.textPrimary }}>
+    <div className="min-h-screen font-sans" style={{ fontFamily: "'IBM Plex Sans', system-ui, sans-serif", background: theme === 'dark' ? `radial-gradient(ellipse at top right, rgba(26,188,156,0.06) 0%, rgba(44,62,155,0.03) 30%, transparent 60%), ${THEME.bgPrimary}` : `radial-gradient(ellipse at top right, rgba(26,188,156,0.08) 0%, rgba(44,62,155,0.04) 30%, transparent 60%), ${THEME.bgPrimary}`, color: THEME.textPrimary }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
         body { font-family: 'IBM Plex Sans', system-ui, sans-serif; background: ${THEME.bgPrimary}; color: ${THEME.textPrimary}; }
@@ -5222,6 +5235,44 @@ export default function ShippingSLAApp() {
         .recharts-tooltip-wrapper .recharts-default-tooltip .recharts-tooltip-item-name { color: ${THEME.textSecondary} !important; }
         ` : ''}
       `}</style>
+
+      {/* SVG gradient definitions for charts */}
+      <svg width="0" height="0" style={{ position: 'absolute' }}>
+        <defs>
+          <linearGradient id="gradTurquoise" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#1ABC9C" stopOpacity={0.8}/>
+            <stop offset="100%" stopColor="#1ABC9C" stopOpacity={0.2}/>
+          </linearGradient>
+          <linearGradient id="gradGreen" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#2ECC71" stopOpacity={0.8}/>
+            <stop offset="100%" stopColor="#2ECC71" stopOpacity={0.2}/>
+          </linearGradient>
+          <linearGradient id="gradCerise" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#E74C6F" stopOpacity={0.8}/>
+            <stop offset="100%" stopColor="#E74C6F" stopOpacity={0.2}/>
+          </linearGradient>
+          <linearGradient id="gradPersianBlue" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#2C3E9B" stopOpacity={0.8}/>
+            <stop offset="100%" stopColor="#2C3E9B" stopOpacity={0.2}/>
+          </linearGradient>
+          <linearGradient id="gradSkyBlue" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#3498DB" stopOpacity={0.8}/>
+            <stop offset="100%" stopColor="#3498DB" stopOpacity={0.2}/>
+          </linearGradient>
+          <linearGradient id="gradPurple" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#8E44AD" stopOpacity={0.8}/>
+            <stop offset="100%" stopColor="#8E44AD" stopOpacity={0.2}/>
+          </linearGradient>
+          <linearGradient id="gradAmber" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#F39C12" stopOpacity={0.8}/>
+            <stop offset="100%" stopColor="#F39C12" stopOpacity={0.2}/>
+          </linearGradient>
+          <linearGradient id="gradGray" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="#7F8C8D" stopOpacity={0.8}/>
+            <stop offset="100%" stopColor="#7F8C8D" stopOpacity={0.2}/>
+          </linearGradient>
+        </defs>
+      </svg>
 
       {/* Sidebar overlay */}
       {sidebarOpen && (
@@ -5748,7 +5799,7 @@ export default function ShippingSLAApp() {
                   <ResponsiveContainer width={180} height={180}>
                     <PieChart>
                       <Pie data={causeBreakdown} dataKey="value" innerRadius={40} outerRadius={75} paddingAngle={2}>
-                        {causeBreakdown.map((e, i) => <Cell key={i} fill={CAUSE_COLORS[e.raw]}/>)}
+                        {causeBreakdown.map((e, i) => <Cell key={i} fill={CAUSE_GRADIENTS[e.raw] || CAUSE_COLORS[e.raw]}/>)}
                       </Pie>
                       <Tooltip contentStyle={{ background: '#1a2129', border: '1px solid #2d3744', fontSize: 11 }}/>
                     </PieChart>
@@ -5814,11 +5865,11 @@ export default function ShippingSLAApp() {
                   <XAxis dataKey="date" stroke="#5d6b7a" style={{ fontSize: 10, fontFamily: 'IBM Plex Mono' }}/>
                   <YAxis stroke="#5d6b7a" style={{ fontSize: 10, fontFamily: 'IBM Plex Mono' }}/>
                   <Tooltip contentStyle={{ background: '#1a2129', border: '1px solid #2d3744', fontSize: 11 }}/>
-                  <Bar dataKey="UPS" stackId="a" fill={CAUSE_COLORS.UPS}/>
-                  <Bar dataKey="DC" stackId="a" fill={CAUSE_COLORS.DC}/>
-                  <Bar dataKey="Missing" stackId="a" fill={CAUSE_COLORS.Missing}/>
-                  <Bar dataKey="Damage" stackId="a" fill={CAUSE_COLORS.Damage}/>
-                  <Bar dataKey="Other" stackId="a" fill={CAUSE_COLORS.Other}/>
+                  <Bar dataKey="UPS" stackId="a" fill="url(#gradCerise)"/>
+                  <Bar dataKey="DC" stackId="a" fill="url(#gradSkyBlue)"/>
+                  <Bar dataKey="Missing" stackId="a" fill="url(#gradPurple)"/>
+                  <Bar dataKey="Damage" stackId="a" fill="url(#gradTurquoise)"/>
+                  <Bar dataKey="Other" stackId="a" fill="url(#gradGray)"/>
                 </BarChart>
               </ResponsiveContainer>
             </SectionCard>
