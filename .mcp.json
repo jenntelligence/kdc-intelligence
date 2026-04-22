@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "snowflake": {
+      "command": "npx",
+      "args": ["-y", "snowflake-mcp"],
+      "env": {
+        "SNOWFLAKE_ACCOUNT": "UKDVSEA-NPB82638",
+        "SNOWFLAKE_USERNAME": "CHRIS.LEE@KISSUSA.COM",
+        "SNOWFLAKE_WAREHOUSE": "CORTEX_ANALYST_WH",
+        "SNOWFLAKE_DATABASE": "SCI",
+        "SNOWFLAKE_SCHEMA": "PUBLIC",
+        "SNOWFLAKE_AUTHENTICATOR": "externalbrowser"
+      }
+    }
+  }
+}

@@ -167,6 +167,49 @@ const generateMockShipments = () => {
     const orderValue = Math.round((500+Math.random()*8000)*100)/100;
     const cartons = 1+Math.floor(Math.random()*12);
 
+    const customer = customers[Math.floor(Math.random()*customers.length)];
+    const carrier = carriers[Math.floor(Math.random()*carriers.length)];
+
+    // Generate containers for this shipment
+    const containers = [];
+    const totalContainers = isSplit ? splitCartons + Math.floor(Math.random() * 2) + 1 : cartons;
+    for (let c = 0; c < totalContainers; c++) {
+      const trackingNum = `1Z${['C5K','1F1','X2R','W8P'][Math.floor(Math.random()*4)]}${String(Math.floor(Math.random()*9999999)).padStart(7,'0')}`;
+      const containerShipDate = isSplit && c >= splitCartons
+        ? new Date(t8.getTime() + splitGapDays * 86400000)
+        : new Date(t8.getTime());
+      const expectedDelivery = new Date(promiseDeliver);
+      const actualDelivery = isDelivered
+        ? new Date(containerShipDate.getTime() + (1 + Math.random() * 3) * 86400000)
+        : null;
+      const isLateContainer = actualDelivery && actualDelivery > expectedDelivery;
+      const deliveredDifferentDay = isSplit && c >= splitCartons; // later containers arrive on a different day
+
+      const statuses = ['LABEL_CREATED', 'PICKED_UP', 'IN_TRANSIT', 'OUT_FOR_DELIVERY', 'DELIVERED'];
+      const containerStatus = !isDelivered
+        ? statuses[Math.min(Math.floor(Math.random() * 4), 3)]
+        : 'DELIVERED';
+
+      containers.push({
+        containerId: `CTN-${10000 + i}-${String(c+1).padStart(2,'0')}`,
+        parentShipmentId: `SH-${10000+i}`,
+        containerNum: c + 1,
+        totalContainers,
+        trackingNumber: trackingNum,
+        carrier: carrier,
+        status: containerStatus,
+        shipDate: containerShipDate,
+        expectedDelivery,
+        actualDelivery,
+        isLate: isLateContainer,
+        deliveredDifferentDay,
+        weight: (2 + Math.random() * 15).toFixed(1),
+        items: Math.floor(1 + Math.random() * 8),
+        lastLocation: ['Savannah GA Hub', 'Atlanta GA Sort', 'Memphis TN Hub', 'Louisville KY Hub', 'Local Delivery Facility', 'Out for Delivery'][Math.floor(Math.random()*6)],
+        lastScan: new Date(Date.now() - Math.random() * 86400000 * 2),
+      });
+    }
+
     // Chargeback $ for delay + split + damage
     let chargeback = 0;
     if (cause === 'UPS' || cause === 'DC') chargeback += Math.round(orderValue * 0.03);
@@ -176,9 +219,6 @@ const generateMockShipments = () => {
     // Which shift processed it (based on wave release hour)
     const waveHour = t4.getHours();
     const shift = waveHour >= 6 && waveHour < 14 ? shifts[0] : waveHour >= 14 && waveHour < 22 ? shifts[1] : shifts[2];
-
-    const customer = customers[Math.floor(Math.random()*customers.length)];
-    const carrier = carriers[Math.floor(Math.random()*carriers.length)];
 
     rows.push({
       id: `SH-${10000+i}`,
@@ -211,6 +251,7 @@ const generateMockShipments = () => {
       chargeback,
       shift,
       waveHour,
+      containers,
     });
   }
   return rows;
@@ -1126,6 +1167,7 @@ const AIRiskPage = ({ filtered, data }) => {
 // SPLIT SHIPMENT PAGE
 // ============================================================
 const SplitShipmentPage = ({ filtered }) => {
+  const [expandedOrder, setExpandedOrder] = useState(null);
   const splitData = useMemo(() => {
     const split = filtered.filter(o => o.isSplit);
     const splitRate = filtered.length ? split.length / filtered.length : 0;
@@ -1192,6 +1234,25 @@ const SplitShipmentPage = ({ filtered }) => {
           All cartons from a single order must be delivered on the same day. Any split shipment is a compliance violation. Target split rate: <span className="font-mono text-[#2ECC71]">0.0%</span>
         </div>
       </div>
+
+      {/* Container delivery mismatch summary */}
+      {(() => {
+        const ordersWithMismatch = splitData.split.filter(o => o.containers?.some(c => c.deliveredDifferentDay || c.isLate));
+        if (ordersWithMismatch.length === 0) return null;
+        const totalLateContainers = splitData.split.reduce((s, o) => s + (o.containers?.filter(c => c.isLate || c.deliveredDifferentDay).length || 0), 0);
+        return (
+          <div className="bg-gradient-to-r from-[#E74C6F]/15 to-transparent border-l-2 border-[#E74C6F] rounded p-3 mb-4 flex items-center gap-3">
+            <Package size={18} className="text-[#E74C6F]"/>
+            <div className="flex-1">
+              <div className="text-[12px] text-[#E74C6F] font-semibold uppercase tracking-wider">Container Delivery Mismatch</div>
+              <div className="text-[13px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
+                <span className="font-mono text-[#E74C6F]">{ordersWithMismatch.length}</span> orders have containers arriving on different days.
+                <span className="font-mono text-[#E74C6F] ml-2">{totalLateContainers}</span> individual containers flagged (late or split-day delivery).
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
         <KPI label="Split Shipment Rate" value={fmtPct(splitData.splitRate)} delta={`Target: 0.0%`} deltaType="bad" icon={Split}/>
@@ -1277,48 +1338,126 @@ const SplitShipmentPage = ({ filtered }) => {
         )}
       </SectionCard>
 
-      <SectionCard title="Split Shipments Detail" subtitle={`${splitData.split.length} split orders — ${fmtPct(splitData.splitRate)} rate`}>
-        <table className="w-full text-[12px]">
-          <thead>
-            <tr className="text-left text-[#5d6b7a] border-b border-[#2d3744] font-mono uppercase text-[11px] tracking-wider">
-              <th className="py-2">Shipment</th>
-              <th className="py-2">Customer</th>
-              <th className="py-2">Channel</th>
-              <th className="py-2">Cartons</th>
-              <th className="py-2 text-center">Splits</th>
-              <th className="py-2 text-right">Gap (days)</th>
-              <th className="py-2">Root Cause</th>
-              <th className="py-2 text-right">Value</th>
-              <th className="py-2 text-right">Chargeback</th>
-            </tr>
-          </thead>
-          <tbody>
-            {splitData.split.slice(0, 15).map(o => (
-              <tr key={o.id} className="border-b border-[#2d3744] hover:bg-[#1a2129]">
-                <td className="py-2 font-mono">{o.id}</td>
-                <td className="py-2">
-                  <div className="flex items-center gap-1.5">
-                    {o.tier === 'Key' && <span className="text-[10px] px-1 py-0.5 rounded bg-[#1ABC9C]/20 text-[#1ABC9C] font-mono">KEY</span>}
-                    {o.customer}
-                  </div>
-                </td>
-                <td className="py-2">
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: (CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)] || '#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)] || '#8a95a3' }}>{o.channel}</span>
-                </td>
-                <td className="py-2 font-mono">{o.cartons}</td>
-                <td className="py-2 text-center">
-                  <span className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-[#E74C6F]/20 text-[#E74C6F]">
-                    {o.splitCartons}×
-                  </span>
-                </td>
-                <td className="py-2 font-mono text-right text-[#E74C6F]">{o.splitGapDays}</td>
-                <td className="py-2 text-[#8a95a3]">{o.splitReason}</td>
-                <td className="py-2 font-mono text-right">${fmtNum(o.orderValue.toFixed(0))}</td>
-                <td className="py-2 font-mono text-right text-[#E74C6F]">${fmtNum(o.chargeback)}</td>
+      <SectionCard title="Container Tracking — Split Orders" subtitle={`${splitData.split.length} split orders · click to expand container details`} tag="CONTAINER TREE" className="mb-4">
+        <div className="overflow-x-auto" style={{ maxHeight: 500 }}>
+          <table className="w-full text-[12px]">
+            <thead>
+              <tr className="text-[10px] uppercase tracking-wider font-mono" style={{ color: 'var(--text-muted)' }}>
+                <th className="text-left py-2 pr-3">Order</th>
+                <th className="text-left py-2 pr-3">Customer</th>
+                <th className="text-left py-2 pr-3">Channel</th>
+                <th className="text-center py-2 pr-3">Containers</th>
+                <th className="text-center py-2 pr-3">Split Gap</th>
+                <th className="text-left py-2 pr-3">Root Cause</th>
+                <th className="text-right py-2 pr-3">Value</th>
+                <th className="text-center py-2">Alert</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {splitData.split.slice(0, 30).map(o => {
+                const isExpanded = expandedOrder === o.id;
+                const hasAlert = o.containers?.some(c => c.isLate || c.deliveredDifferentDay);
+                return (
+                  <React.Fragment key={o.id}>
+                    {/* Parent shipment row */}
+                    <tr onClick={() => setExpandedOrder(isExpanded ? null : o.id)}
+                      className="cursor-pointer transition-colors"
+                      style={{ borderTop: '1px solid var(--border)', background: isExpanded ? '#1ABC9C10' : 'transparent' }}>
+                      <td className="py-2.5 pr-3 font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>
+                        <span className="mr-1.5">{isExpanded ? '\u25BC' : '\u25B6'}</span>{o.id}
+                      </td>
+                      <td className="py-2.5 pr-3" style={{ color: 'var(--text-primary)' }}>{o.customer}</td>
+                      <td className="py-2.5 pr-3">
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-mono" style={{ background: (CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)]||'#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)]||'#8a95a3' }}>{o.channel}</span>
+                      </td>
+                      <td className="py-2.5 pr-3 text-center font-mono">{o.containers?.length || o.splitCartons}x</td>
+                      <td className="py-2.5 pr-3 text-center font-mono text-[#E74C6F]">{o.splitGapDays}d</td>
+                      <td className="py-2.5 pr-3 text-[11px]" style={{ color: 'var(--text-secondary)' }}>{o.splitReason}</td>
+                      <td className="py-2.5 pr-3 text-right font-mono" style={{ color: 'var(--text-primary)' }}>${fmtNum(o.orderValue)}</td>
+                      <td className="py-2.5 text-center">
+                        {hasAlert && <AlertTriangle size={14} className="text-[#E74C6F] mx-auto"/>}
+                      </td>
+                    </tr>
+
+                    {/* Expanded container rows */}
+                    {isExpanded && o.containers && o.containers.map((c, ci) => {
+                      const statusColors = {
+                        'LABEL_CREATED': { bg: '#7F8C8D20', text: '#7F8C8D' },
+                        'PICKED_UP': { bg: '#3498DB20', text: '#3498DB' },
+                        'IN_TRANSIT': { bg: '#1ABC9C20', text: '#1ABC9C' },
+                        'OUT_FOR_DELIVERY': { bg: '#F39C1220', text: '#F39C12' },
+                        'DELIVERED': { bg: '#2ECC7120', text: '#2ECC71' },
+                      };
+                      const sc = statusColors[c.status] || statusColors.LABEL_CREATED;
+                      const isLastContainer = ci === o.containers.length - 1;
+
+                      return (
+                        <tr key={c.containerId} style={{ background: ci % 2 === 0 ? 'var(--bg-panel-alt)' : 'transparent', borderLeft: '3px solid #1ABC9C' }}>
+                          <td className="py-2 pr-3 pl-8 font-mono text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                            <span style={{ color: 'var(--text-muted)' }}>{isLastContainer ? '\u2514\u2500' : '\u251C\u2500'}</span> {c.containerId}
+                          </td>
+                          <td className="py-2 pr-3 font-mono text-[11px]" style={{ color: 'var(--text-primary)' }}>
+                            {c.trackingNumber}
+                            <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>{c.lastLocation}</div>
+                          </td>
+                          <td className="py-2 pr-3">
+                            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono font-semibold" style={{ background: sc.bg, color: sc.text }}>
+                              {c.status.replace(/_/g, ' ')}
+                            </span>
+                          </td>
+                          <td className="py-2 pr-3 text-center font-mono text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                            {c.items} items · {c.weight} lb
+                          </td>
+                          <td className="py-2 pr-3 text-center font-mono text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                            {c.shipDate.toLocaleDateString('en-US', {month:'short',day:'numeric'})}
+                          </td>
+                          <td className="py-2 pr-3 text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                            Exp: {c.expectedDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric'})}
+                            {c.actualDelivery && (
+                              <span className="ml-1" style={{ color: c.isLate ? '#E74C6F' : '#2ECC71' }}>
+                                {'\u2192'} {c.actualDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric'})}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-2 pr-3 text-right font-mono text-[11px]">
+                            {c.deliveredDifferentDay ? <span className="text-[#E74C6F]">SPLIT DAY</span> : ''}
+                            {c.isLate && !c.deliveredDifferentDay ? <span className="text-[#E74C6F]">LATE</span> : ''}
+                            {!c.isLate && !c.deliveredDifferentDay && c.status === 'DELIVERED' ? <span className="text-[#2ECC71]">OK</span> : ''}
+                          </td>
+                          <td className="py-2 text-center">
+                            {(c.isLate || c.deliveredDifferentDay) && <AlertTriangle size={12} className="text-[#E74C6F] mx-auto"/>}
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    {/* Alert banner for expanded order */}
+                    {isExpanded && o.containers && (() => {
+                      const lateContainers = o.containers.filter(c => c.isLate || c.deliveredDifferentDay);
+                      const deliveryDates = [...new Set(o.containers.filter(c => c.actualDelivery).map(c => c.actualDelivery.toDateString()))];
+                      if (lateContainers.length === 0 && deliveryDates.length <= 1) return null;
+                      return (
+                        <tr>
+                          <td colSpan={8} className="py-2 px-4">
+                            <div className="rounded p-2.5 flex items-start gap-2" style={{ background: '#E74C6F10', border: '1px solid #E74C6F30' }}>
+                              <AlertTriangle size={14} className="text-[#E74C6F] mt-0.5 flex-shrink-0"/>
+                              <div className="text-[12px]" style={{ color: 'var(--text-primary)' }}>
+                                <span className="font-semibold text-[#E74C6F]">Split Delivery Alert:</span>{' '}
+                                {deliveryDates.length > 1 && `Containers delivered across ${deliveryDates.length} different days. `}
+                                {lateContainers.length > 0 && `${lateContainers.length} container(s) delivered late or on a different day than the first carton. `}
+                                Customer requirement: all cartons same day. Chargeback: <span className="font-mono font-semibold">${fmtNum(o.chargeback)}</span>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })()}
+                  </React.Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </SectionCard>
     </>
   );
@@ -5678,6 +5817,8 @@ export default function ShippingSLAApp() {
               const yoyType = (diff, invert = false) => diff === 0 ? 'neutral' : (invert ? diff > 0 : diff < 0) ? 'bad' : 'good';
 
               const kpiCards = [
+                { key: 'cycle', label: 'Order→Dock Cycle', value: (displayMetrics.avgO2DHrs || 0).toFixed(1), unit: 'hrs', delta: 'Target: 18.0 hrs', deltaType: 'neutral', icon: Clock,
+                  delta2: yoy ? yoyFmt(yoy.cycleDiff, 'h') + ` (was ${yoy.pyCycle}h)` : null, delta2Type: yoy ? yoyType(yoy.cycleDiff, true) : null },
                 { key: 'ontime-ship', label: 'On-Time Ship', value: fmtPct(displayMetrics.onTimeShipPct), delta: '+2.1 pp vs last wk', deltaType: 'good', icon: Package,
                   delta2: yoy ? yoyFmt(yoy.otsPctDiff, ' pp') + ` (was ${yoy.pyOtsPct}%)` : null, delta2Type: yoy ? yoyType(yoy.otsPctDiff) : null },
                 { key: 'ontime-deliv', label: 'On-Time Delivery', value: fmtPct(displayMetrics.onTimeDelivPct), delta: '-1.4 pp vs last wk', deltaType: 'bad', icon: Truck,
@@ -5687,18 +5828,16 @@ export default function ShippingSLAApp() {
                 { key: 'split', label: 'Split Shipment', value: fmtPct(splitRows.length/(metrics.total||1)), delta: 'Target: 0.0%', deltaType: 'bad', icon: Split },
                 { key: 'damage', label: 'Damage / Problem', value: fmtPct(displayMetrics.damageRate), delta: `${damageRows.length} shipments`, deltaType: 'bad', icon: AlertTriangle },
                 { key: 'backorder', label: 'In-Stock Backorders', value: fmtNum(displayBackorders), delta: `${fmtPct((displayBackorders||0)/(displayTotal||1))} of open orders`, deltaType: (displayBackorders||0) > 0 ? 'bad' : 'good', icon: Package },
-                { key: 'cycle', label: 'Order→Dock Cycle', value: (displayMetrics.avgO2DHrs || 0).toFixed(1), unit: 'hrs', delta: 'Target: 18.0 hrs', deltaType: 'neutral', icon: Clock,
-                  delta2: yoy ? yoyFmt(yoy.cycleDiff, 'h') + ` (was ${yoy.pyCycle}h)` : null, delta2Type: yoy ? yoyType(yoy.cycleDiff, true) : null },
               ];
 
               const dollarCards = [
+                { key: 'cycle', label: 'Total Volume $', value: `$${fmtNum(Math.round(totalVal))}`, delta: `${fmtNum(metrics.total)} shipments`, deltaType: 'neutral', icon: DollarSign },
                 { key: 'ontime-ship', label: 'On-Time Ship $', value: `$${fmtNum(Math.round(ontimeShipVal))}`, delta: `${ontimeShipRows.length} shipments`, deltaType: 'good', icon: DollarSign },
                 { key: 'ontime-deliv', label: 'On-Time Delivery $', value: `$${fmtNum(Math.round(ontimeDelivVal))}`, delta: `${ontimeDelivRows.length} delivered`, deltaType: 'good', icon: DollarSign },
                 { key: 'delayed', label: '$ at Risk (Delayed)', value: `$${fmtNum(Math.round(delayedVal))}`, delta: `$${fmtNum(Math.round(delayedCB))} chargebacks`, deltaType: 'bad', icon: DollarSign },
                 { key: 'split', label: 'Split Penalties', value: `$${fmtNum(Math.round(splitCB))}`, delta: `$${fmtNum(Math.round(splitVal))} order value`, deltaType: 'bad', icon: DollarSign },
                 { key: 'damage', label: 'Damage Chargebacks', value: `$${fmtNum(Math.round(damageCB))}`, delta: `$${fmtNum(Math.round(damageVal))} order value`, deltaType: 'bad', icon: DollarSign },
                 { key: 'backorder', label: 'Backorder Value', value: `$${fmtNum(Math.round(backorderVal))}`, delta: `${backorderRows.length} past-due orders`, deltaType: backorderRows.length > 0 ? 'bad' : 'good', icon: DollarSign },
-                { key: 'cycle', label: 'Total Volume $', value: `$${fmtNum(Math.round(totalVal))}`, delta: `${fmtNum(metrics.total)} shipments`, deltaType: 'neutral', icon: DollarSign },
               ];
 
               return (
