@@ -5,3 +5,28 @@ dist
 *.log
 .DS_Store
 .vercel
+
+# Tooling state (not part of project)
+.omc/
+
+# Local environment / secrets (NEVER commit)
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+
+# Snowflake / DB credentials (defensive — should never be in repo anyway)
+*.snowflake-credentials
+snowflake.toml
+*.pem
+*.key
+
+# Cached query results (may contain real customer data)
+cache/
+*.cache.json
+data/exports/
+
+# OS / IDE
+Thumbs.db
+.idea/
+*.swp

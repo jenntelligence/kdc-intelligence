@@ -1,0 +1,10 @@
+# Auto-detect text files and normalize line endings to LF in repo
+* text=auto eol=lf
+
+# Force binary files to be treated as binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
