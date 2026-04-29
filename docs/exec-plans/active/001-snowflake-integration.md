@@ -896,12 +896,12 @@ without the answer**, and **rough cycle time**.
         (e.g., for cancellation reason analysis)?
         Who: operations supervisor. Time: ~5min.
         Blocks: every Phase 1 page.
-- [ ] 12. **Cross-check `COMPANY_NAME_EXPR` in server.js against
-        `snowflake-schema.md` sales org table.**
-        Does server.js's CASE include Red (1400)? If missing, server.js
-        needs the same correction we already made in the schema doc.
-        Who: Claude Code grep. Time: ~1min.
-        Blocks: nothing critical, just consistency.
+- [x] ~~12. **Cross-check `COMPANY_NAME_EXPR` in server.js against
+        `snowflake-schema.md` sales org table.**~~
+        **[CLOSED 2026-04-29]** Verified: `server.js:172` already
+        includes Red (1400) in `COMPANY_NAME_EXPR` alongside
+        Kiss (1000) / Ivy (1100) / Vivace (1900). Matches
+        `snowflake-schema.md` sales-org table. No correction needed.
 
 ---
 
