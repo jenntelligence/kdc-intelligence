@@ -203,3 +203,22 @@ are discovered — do not silently fix them inside an unrelated exec plan.
 - **Fix path:** Document `server.js` as part of the
   `001-snowflake-integration` exec plan, or extract it into its own
   documented module under `server/`.
+
+### `IN_DELETION = 'N'` filter is redundant in existing server.js endpoints
+
+- **Current state:** 12 working endpoints in `server.js` apply
+  `WHERE IN_DELETION = 'N'` to every shipment query. F0 validation
+  on 2026-04-29 confirmed Snowflake data contains only `'N'` values
+  for this column — upstream ETL filters `'Y'` rows out before
+  loading.
+- **Impact:** None at runtime — the filter excludes zero rows. The
+  cost is consistency: new Phase 1 endpoints omit the filter (per
+  master plan §6a F0), so reading `server.js` shows two patterns
+  side-by-side and creates minor cognitive overhead for future
+  contributors.
+- **Fix path:** Remove `WHERE IN_DELETION = 'N'` (and the matching
+  `AND IN_DELETION = 'N'` clause where it appears alongside
+  `WHERE WAREHOUSE = 'KDCGA1'`) from the 12 existing endpoints in a
+  dedicated cleanup PR after Phase 1 ships. No behavior change
+  expected; verify by spot-checking row counts before and after.
+  Not blocking — pure consistency work.
