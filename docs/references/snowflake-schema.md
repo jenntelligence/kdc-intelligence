@@ -111,8 +111,11 @@ SHOW SCHEMAS IN DATABASE SCI;
 ```
 
 Update the **Verified facts** and **Unverified** subsections above once
-the results are in, and amend the example SQL further down in this file
-(the `SCALE_DB.WMS.` placeholders are stale).
+the results are in.
+
+_The example SQL further down has been updated to use SCI.L0 paths
+(verified in commit d6df257). This warning is preserved as a marker
+in case the schema doc and SQL examples drift again in the future._
 
 ---
 
