@@ -78,6 +78,44 @@ DB connection), flag it as P0 tech debt — do not extend that pattern.
 
 ---
 
+## Database safety rule — Snowflake is read-only from this codebase
+
+This rule is non-negotiable and applies to every AI agent and human
+working in this repo, regardless of intent or context.
+
+### Always allowed (read-only operations)
+- `SELECT` (including `WITH ... SELECT`)
+- `SHOW`, `DESCRIBE`, `EXPLAIN`
+- `INFORMATION_SCHEMA` queries
+
+### Never allowed from this codebase
+- `INSERT`, `UPDATE`, `DELETE`, `MERGE`
+- `CREATE`, `DROP`, `ALTER`, `TRUNCATE`
+- `CALL` (stored procedures — including any `KISS_EXP_*`)
+- `COPY INTO`, `GRANT`, `REVOKE`
+- Any DDL or DML against production tables
+
+### Why
+The Snowflake `SCI` database holds production shipping data for KDC/KISS
+Savannah, replicating live SCALE WMS and SAP ERP state. SCALE's stored
+procedures (e.g., `KISS_EXP_UploadShipmentBefore`) and SAP's interfaces
+already manage this data — any write from this codebase risks data
+corruption or out-of-sync state with the upstream systems.
+
+This codebase is a *consumer* of Snowflake, not a writer. If a future
+exec plan genuinely requires creating a view, table, or running a
+procedure, that requires a separate, explicitly user-approved exec plan
+in `docs/exec-plans/active/` — never inline in another task.
+
+### Enforcement
+- `server.js` already enforces SELECT-only on `/api/kdc/query`
+  (line 653: `/^\s*SELECT/i`).
+- All new endpoints and direct `executeQuery()` calls follow the same rule.
+- If an AI agent encounters a task that seems to require a write,
+  STOP and ask the user. Do not generate the write SQL "for review."
+
+---
+
 ## What NOT to Do (carried over from CLAUDE.md)
 
 - Don't replace Tailwind with another CSS framework.

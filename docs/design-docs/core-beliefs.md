@@ -116,3 +116,31 @@ This applies especially to:
 produces KPIs that look clean but mislead. Naming the disagreement turns
 a hidden problem into a visible one — which is the whole point of an
 operations dashboard.
+
+### 8. Snowflake is read-only from this codebase — writes go through SCALE/SAP, never us.
+
+The dashboard is a Snowflake consumer. All SQL this codebase generates
+must be read-only: `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN`,
+`INFORMATION_SCHEMA`. Writes (`INSERT`/`UPDATE`/`DELETE`/`MERGE`), DDL
+(`CREATE`/`DROP`/`ALTER`/`TRUNCATE`), and stored procedure invocations
+(`CALL`) are forbidden, including indirect cases — no `COPY INTO`, no
+`GRANT`/`REVOKE`.
+
+This is enforced because production shipping data lives upstream in
+SCALE WMS and SAP ERP. Their stored procedures (`KISS_EXP_*`) and
+interfaces already write to Snowflake on a schedule we do not control.
+Any write from this codebase creates a race condition with the
+upstream systems and risks corrupting the data the operations team
+relies on.
+
+If a future need genuinely requires a Snowflake write — creating a
+view, seeding `KISS_BI_CONFIG`, etc. — that is a separate, explicitly
+user-approved exec plan, never an incidental change inside another task.
+
+**Why:** the cost of a bad write to production shipping data is far
+larger than any value an AI agent can deliver inside a single task.
+The asymmetry of risk and reward is the entire reason for the rule.
+
+**Operational corollary:** if an exec plan or task seems to require a
+write, that is a STOP signal — surface it to the user, do not
+"prepare" or "draft" the write SQL.

@@ -119,6 +119,25 @@ in case the schema doc and SQL examples drift again in the future._
 
 ---
 
+## Read-only rule (this codebase)
+
+All SQL generated from this codebase against `SCI.*` is read-only.
+See `AGENTS.md` § Database safety rule and `core-beliefs.md` § 8 for
+the authoritative statement and rationale.
+
+Quick reference:
+- ✅ `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN`, `INFORMATION_SCHEMA`
+- ❌ `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `DROP`, `ALTER`,
+   `TRUNCATE`, `CALL`, `COPY INTO`, `GRANT`, `REVOKE`
+
+Special note for Split Shipment work: `KISS_EXP_UploadShipmentBefore` is
+a stored procedure that sets `SD.UDF3` (PGI flag). It is invoked
+automatically by SCALE during the shipment upload pipeline — this
+codebase reads its result via `SD.UDF3 = 'N'` queries, but **never
+calls the procedure**.
+
+---
+
 ## Open environment questions
 
 Items still blocking the first end-to-end SQL execution against Snowflake
