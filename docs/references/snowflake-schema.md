@@ -132,6 +132,31 @@ file over the skill when entries differ.
     relative to sibling container close events
 
   Detection SQL details deferred to sub-plan `002`.
+- **Zone-area derivation pattern (#13 grep finding 2026-04-29)** —
+  `server.js` derives floor-area zones from
+  `LEFT(SC.original_pick_loc, 2)` prefix codes (`server.js:495-498`):
+  - `'AS'` → Pre-Pick / Autostore
+  - `'PL'`, `'PR'`, `'PS'` → Pick Module (sub-areas)
+  - `status` 400/401 → Pack Station
+
+  The same prefix convention appears on `TH.location`
+  (`server.js:547`). No `WORK_INSTRUCTION.ZONE` column is referenced
+  anywhere in `server.js`. Whether `WI` itself has a zone-equivalent
+  column TBD via direct Snowflake `DESCRIBE TABLE` during sub-plan
+  `002`. Recommended path: use `LEFT(SC.original_pick_loc, 2)` for
+  Type 1 detection; supersedes the master plan §6b sketch's
+  `WI.ZONE` reference.
+- **Container per-shipment ship event signal (#14 grep finding 2026-04-29)** —
+  `SC.SHIP_CONFIRM_DATE_TIME` does NOT appear in `server.js` or
+  schema doc. The documented per-container timestamp is
+  `SC.MANIFEST_CLOSE_DATE_TIME` (already in the SC UDF table:
+  "Manifest close timestamp; NULL = open"). For Container-level
+  split detection (master plan §6b Type 2),
+  `MANIFEST_CLOSE_DATE_TIME` variance across siblings is the most
+  likely correct signal. `SHIPMENT_HEADER.TRAILING_STATUS = 700`
+  ("Ship Confirm Pending") is per-order, not per-container — so it
+  cannot replace this for Type 2 detection. Sub-plan `002` verifies
+  in the Snowflake console and supersedes the master-plan sketch.
 
 ### Unverified — TODO: confirm in Snowflake console
 
@@ -238,23 +263,30 @@ from a new endpoint:
 - [x] ~~**Replication freshness** — Snowflake vs live SCALE lag.~~
       **[CLOSED 2026-04-29]** ~10 minutes (MSSQL → Snowflake on
       10-min cycle). See Verified facts above.
-- [ ] **WORK_INSTRUCTION zone codes** — what are the exact column name
-      and values for inventory zones? Suspected: column `ZONE` with
-      values matching 'autostore' / 'active' / 'reserve' (or codes
-      like 'AS' / 'AC' / 'RS'). Capture during sub-plan `002` SQL
-      writing.
-- [ ] **SHIPPING_CONTAINER ship-confirm column** — likely
-      `SHIP_CONFIRM_DATE_TIME` or similar. Verify exact name.
-      Needed for Container-level split detection.
+- [x] ~~**WORK_INSTRUCTION zone codes**~~
+      **[PARTIALLY CLOSED 2026-04-29]** No `WI.ZONE` column in
+      server.js. Floor-area zones derived from
+      `LEFT(SC.original_pick_loc, 2)` prefix (`AS`/`PL`/`PR`/`PS`).
+      See Verified facts above for full pattern. Whether WI has its
+      own zone column TBD via `DESCRIBE TABLE` during sub-plan
+      `002`.
+- [x] ~~**SHIPPING_CONTAINER ship-confirm column**~~
+      **[PARTIALLY CLOSED 2026-04-29]** No `SHIP_CONFIRM_DATE_TIME`
+      column. `SC.MANIFEST_CLOSE_DATE_TIME` is the documented
+      per-container ship-event signal — see Verified facts above.
+      Sub-plan `002` verifies in Snowflake console.
 - [ ] **PROCESS_HISTORY status 700 transition pattern** — exact
       column for status (likely `TRAILING_STATUS` or similar) and
       timestamp granularity. Needed for Manifest-level split
       detection.
-- [ ] **`customer_group` and `sales_org` column locations** — confirm
-      these are columns of `SCI.L0.SHIPMENT_HEADER` (likely
-      `USER_DEF1` for sales_org based on COMPANY_NAME_EXPR pattern;
-      customer_group source TBD — possibly from KDB join or another
-      SCI column).
+- [ ] **`customer_group` column location** — `sales_org` confirmed
+      as `SH.USER_DEF1` (verified 2026-04-29 via grep — used in
+      `COMPANY_NAME_EXPR` and 5 other endpoints). `customer_group`
+      column location remains TBD: Claude Code grep on 2026-04-29
+      found no reference in server.js or docs/. Likely (a) an
+      undocumented `USER_DEFx` on `SH`, (b) a column on
+      `KDB.PBI_SF.SAP_CUSTOMER_MASTER`, or (c) derived. Resolve via
+      direct `DESCRIBE TABLE` during sub-plan `002` bringup.
 
 Resolved items (moved to **Verified facts** above):
 

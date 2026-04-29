@@ -1007,17 +1007,41 @@ without the answer**, and **rough cycle time**.
         includes Red (1400) in `COMPANY_NAME_EXPR` alongside
         Kiss (1000) / Ivy (1100) / Vivace (1900). Matches
         `snowflake-schema.md` sales-org table. No correction needed.
-- [ ] 13. **WORK_INSTRUCTION zone codes** — what is the exact column
-        name and what are the valid zone values? Suspected: column
-        `ZONE` with values 'autostore' / 'active' / 'reserve' (or
-        coded versions). Who: data team OR Claude Code grep against
-        SCALE config. Time: ~10min.
-        Blocks: sub-plan `002` — Zone-level split detection (Type 1).
-- [ ] 14. **SHIPPING_CONTAINER ship-confirm column** — exact column
-        name for ship-confirm timestamp. Suspected
-        `SHIP_CONFIRM_DATE_TIME`. Who: data team OR snowflake-schema
-        grep. Time: ~5min.
-        Blocks: sub-plan `002` — Container-level split detection (Type 2).
+- [x] ~~13. **WORK_INSTRUCTION zone codes**~~
+        **[PARTIALLY CLOSED 2026-04-29]** server.js grep: no
+        `WI.ZONE` column referenced anywhere. Zone-area derivation
+        in server.js uses `LEFT(SC.original_pick_loc, 2)` prefix
+        codes on `SHIPPING_CONTAINER` (`server.js:495-498`):
+        `'AS'` → Pre-Pick / Autostore; `'PL'` / `'PR'` / `'PS'` →
+        Pick Module (sub-areas). Same prefix convention appears on
+        `TH.location` (`server.js:547`). The "autostore / active /
+        reserve" terminology likely maps to floor-area prefixes,
+        not a separate `ZONE` column.
+
+        Still unverified: whether `WORK_INSTRUCTION` itself has a
+        zone-equivalent column in Snowflake. Sub-plan `002` should
+        use `LEFT(SC.original_pick_loc, 2)` for Type 1 detection
+        (recommended given the consistent SC + TH pattern), OR run
+        `DESCRIBE TABLE SCI.L0.WORK_INSTRUCTION` to confirm a
+        separate zone column exists. Master plan §6b Type 1
+        detection sketch currently references `WI.ZONE` — sub-plan
+        `002` supersedes with the corrected column.
+- [x] ~~14. **SHIPPING_CONTAINER ship-confirm column**~~
+        **[PARTIALLY CLOSED 2026-04-29]** server.js + docs/ grep
+        finds no `SHIP_CONFIRM_DATE_TIME` column anywhere. The
+        documented SC-level timestamp closest to a ship-confirm
+        event is `SC.MANIFEST_CLOSE_DATE_TIME` (per
+        `snowflake-schema.md` SC UDF table: "Manifest close
+        timestamp; NULL = open"). This is the most likely correct
+        signal for Container-level split detection (Type 2).
+
+        Master plan §6b Type 2 detection sketch references
+        `SC.SHIP_CONFIRM_DATE_TIME` — sub-plan `002` should
+        substitute `MANIFEST_CLOSE_DATE_TIME` and verify in the
+        Snowflake console that this is the right per-container
+        ship-event timestamp. (Status `700` "Ship Confirm Pending"
+        on `SHIPMENT_HEADER` is per-order, not per-container — so
+        not directly usable for Type 2.)
 - [ ] 15. **Container-level threshold tuning** — what hour difference
         between sibling containers' ship-confirm constitutes a split?
         (e.g., > 4 hours? > 8 hours? same wave cutoff?)
@@ -1032,6 +1056,16 @@ without the answer**, and **rough cycle time**.
         + Snowflake console query. Time: ~10min.
         Blocks: sub-plan `002` + sub-plan `003` — both apply
         `customer_group = 'TR'` filter.
+
+        **Note (2026-04-29):** Claude Code grep against `server.js`
+        and `docs/` found no `customer_group` reference. server.js
+        uses `USER_DEF1` (sales_org) and `USER_DEF6` AS `dsdc_type`
+        (`server.js:491`) — neither maps to customer_group. The
+        column is likely (a) an undocumented `USER_DEFx` on
+        `SCI.L0.SHIPMENT_HEADER`, (b) a column on
+        `KDB.PBI_SF.SAP_CUSTOMER_MASTER`, or (c) a derived value.
+        Resolve via `DESCRIBE TABLE` against both SH and
+        SAP_CUSTOMER_MASTER during sub-plan `002` bringup (~5 min).
 
 ---
 
