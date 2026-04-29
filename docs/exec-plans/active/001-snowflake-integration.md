@@ -130,6 +130,16 @@ Phase 1 works around them; the long-term fix is a separate plan:
   collisions) have not yet fired.
 - **README.md and CLAUDE.md two-source-model drift (P1).** Phase 1
   does not update these — that is a small standalone exec plan.
+- **Mock UI's 5-reason root cause labels** (Trailer capacity, Wave
+  cutoff missed, Short pick - partial inventory, SAP-SCALE variance,
+  Pick exception) — these are fictional placeholder labels. Real
+  KDC root causes are 3-type (Zone/Container/Manifest level).
+  Sub-plan `002` replaces the mock labels.
+- **Page-level channel scope:** Split Shipments + Geographic pages
+  apply a 3-channel filter (`customer_group='TR'` + 3 sales_orgs).
+  Other pages are NOT affected — they continue to serve all 11
+  channels via their respective endpoints. The app's header channel
+  selector remains unchanged.
 
 ---
 
@@ -245,6 +255,26 @@ Every claim below is anchored to a file path and line number.
   hardcoded date range. Live mode passes the full 2026 year to the
   frontend; the page's date-range picker filters in-memory. No
   date param on the backend endpoint. (See §7b F7.)
+- **UI structure (from screenshot review 2026-04-29):**
+  - App header: channel selector (11 channels — UNCHANGED in live
+    mode, shared across all pages)
+  - 5 KPI tiles: Split Shipment Rate, Orders Split, Avg Gap,
+    Chargebacks, Key Acct Impact
+  - Two-column body: Split Rate by Customer (left) + Root Causes of
+    Splits (right, currently 5 reasons mock; live mode shows 3 types
+    within this page only)
+  - Split Rate by Distribution Channel: 11 channel cards (mock);
+    live mode shows 3 cards (page-level scope)
+  - Container Tracking table with drill-down to container details
+    (tracking number, status, location, items, weight, dates,
+    OK/SPLIT DAY indicator)
+- **Mock vs live changes (within this page only):**
+  - Channel cards: 11 → 3 (page-level scope filter)
+  - Root cause labels: "Trailer capacity", "Wave cutoff missed",
+    "Short pick - partial inventory", "SAP-SCALE variance",
+    "Pick exception" (5, fictional) → "Zone-level split",
+    "Container-level split", "Manifest-level split" (3, real)
+  - Other Phase 2 pages: NOT affected by these changes
 
 #### `GeoPage` (`src/ShippingSLAApp.jsx:566`)
 
@@ -597,81 +627,147 @@ validation evidence before touching it.
 #### Split Shipments — sub-plan `002-split-shipments-live.md`
 
 - **Why this position (1st):** Business compliance. Customers like
-  Ulta, Target, and Amazon enforce same-day-shipment as a contract
-  term; a split is a chargeback event, not a metric. This is the
-  highest-business-value page to put on live data.
-- **What it shows:** 5 KPIs, container delivery mismatch banner, 4
-  panels (customer / reason / channel / container tree). See §4b.
-- **Backing data:** `SCI.L0.SHIPMENT_HEADER` (SH),
-  `SCI.L0.SHIPMENT_DETAIL` (SD), `SCI.L0.SHIPPING_CONTAINER` (SC).
-  Critical fields:
-  - `SC.MANIFEST_FOR_DATE` — **the split-determination column.**
-    Same-day compliance check is `MIN(SC.MANIFEST_FOR_DATE)::DATE
-    != MAX(SC.MANIFEST_FOR_DATE)::DATE` across the order's
-    containers.
-  - `SD.UDF3` — PGI flag (`'Y'` complete / `'N'` not yet
-    complete). Set automatically by `KISS_EXP_UploadShipmentBefore`
-    during SCALE→SAP upload. **Available as supplementary signal
-    only — NOT used for split determination in Phase 1** (see
-    Split definition below). We **read** this column; we never
-    call the procedure (read-only rule, `AGENTS.md`).
-  - `SD.UDF8` — short-pick quantity (requested minus qty at status 999).
-- **Split definition (confirmed):** A shipment is split if and
-  only if its containers manifest across different calendar days.
-  Same-day shipment with multiple cartons does NOT count as split.
-  The judgment column is `IS_SPLIT` derived as
-  `MIN(SC.MANIFEST_FOR_DATE)::DATE != MAX(SC.MANIFEST_FOR_DATE)::DATE`.
+  Ulta, Target, Walmart treat split shipments as chargeback events.
+  This is the highest-business-value first page.
 
-  Note on EX11 PGI flag (`SD.UDF3`): this is a separate concept —
-  "shipment complete or incomplete" — set by
-  `KISS_EXP_UploadShipmentBefore`. Phase 1 does NOT use the PGI
-  flag for split determination. The PGI flag may be surfaced as
-  supplemental information in Phase 2 if operations finds it
-  useful, but it does not drive the split count or chargeback
-  exposure metric.
-- **New endpoint(s):** `/api/scale/split-shipments` — single
-  call, returns the full 2026 calendar year. Filters limited to
-  sales org (`USER_DEF1`) and customer; **no date-range parameter**
-  (see Date range below).
-- **Date range:** The endpoint returns the full 2026 calendar
-  year (SQL: `WHERE SH.SHIP_DATE >= '2026-01-01'`). The frontend
-  Split Shipments page adds a date-range picker that filters the
-  in-memory dataset client-side. Mock data follows the same
-  pattern, so the live and mock paths are visually identical.
-- **SQL strategy:** Use `SCI.L0` directly because `VEXC_SHORT_PICKS`
-  (the would-be view) is missing. JOIN structure starts from the
-  reference SQL in `docs/references/snowflake-schema.md` §
-  "Reference SQL — split shipments in the last 30 days" — but
-  the date filter changes from `DATEADD(day, -30, CURRENT_DATE())`
-  to `'2026-01-01'` (full-year fetch per F7). Apply
-  `WAREHOUSE = 'KDCGA1'`, `IN_DELETION = 'N'`,
-  `TRAILING_STATUS >= 800` (KISS-specific "shipped" threshold per
-  `snowflake-schema.md`). Replace the reference SQL's `HAVING`
-  clause with the same-day-only criterion: keep an order in the
-  result set when
-  `MIN(SC.MANIFEST_FOR_DATE)::DATE != MAX(SC.MANIFEST_FOR_DATE)::DATE`.
+- **Page-level scope filter (CONFIRMED 2026-04-29):** This page
+  filters to a 3-channel subset of all KDC shipments at the
+  endpoint SQL layer:
+
+  - `customer_group = 'TR'`
+  - `sales_org IN ('1100', '1400', '1900')`
+
+  Resulting channels: BS-IVY, BS-RED, VIVACE. Sales org 1000 (Kiss)
+  is NOT in scope (different customer_group).
+
+  **Page-level filter, not app-level:** the app's global channel
+  selector in the header remains unchanged (11 channels). The
+  3-channel filter is intrinsic to the `/api/scale/split-shipments`
+  endpoint — other endpoints serving other pages do NOT apply this
+  filter. The Split Shipments page's own UI elements (channel
+  cards, channel breakdown chart) display only the 3 in-scope
+  channels.
+
+- **Backing data:**
+  - `SCI.L0.SHIPMENT_HEADER` (SH) — order-level data, channel
+    determination via `USER_DEF1` (sales_org). `customer_group`
+    column location TBD (see §7c).
+  - `SCI.L0.SHIPMENT_DETAIL` (SD) — line-level data.
+  - `SCI.L0.SHIPPING_CONTAINER` (SC) — carton-level data;
+    `MANIFEST_FOR_DATE` for split-day check, ship-confirm timestamp
+    for Container-level type.
+  - `SCI.L0.WORK_INSTRUCTION` (WI) — pick work per line; ZONE
+    column (TBD verified) for Zone-level type.
+  - `SCI.L0.PROCESS_HISTORY` (PH) — status transitions; status 700
+    timing for Manifest-level type.
+  - `KDB.PBI_SF.SAP_CUSTOMER_MASTER` (CM) — customer name resolution
+    via cross-DB join (`SH.SHIP_TO = CM.SHIPTOPARTY_KEY`).
+
+- **Split definition (CONFIRMED 2026-04-29):** A shipment is split
+  if any of three conditions apply. The earlier "same-day rule"
+  (manifest dates differ) was incomplete — it only catches part of
+  Type 2 and Type 3 below.
+
+  **Type 1 — Zone-level split:** the order's lines sit across
+  multiple inventory zones (`autostore`, `active`, `reserve`).
+  Each zone produces its own pick work, and siblings finish at
+  different times.
+
+  Detection sketch:
+```sql
+  COUNT(DISTINCT WI.ZONE) OVER (PARTITION BY SH.SHIPMENT_ID) > 1
+```
+
+  **Type 2 — Container-level split:** the order's containers have
+  different ship-confirm timestamps (different truck pickups by
+  carrier).
+
+  Detection sketch:
+```sql
+  DATEDIFF('HOUR',
+    MIN(SC.SHIP_CONFIRM_DATE_TIME) OVER (PARTITION BY SH.SHIPMENT_ID),
+    MAX(SC.SHIP_CONFIRM_DATE_TIME) OVER (PARTITION BY SH.SHIPMENT_ID)
+  ) > [threshold]
+```
+
+  Threshold value TBD with operations (sub-plan `002`).
+
+  **Type 3 — Manifest-level split** ("the silent killer"): status
+  700 fires before all sibling containers close. SCALE manifests
+  what's ready; siblings land on separate PDL files.
+
+  Detection sketch:
+```sql
+  COUNT(DISTINCT SC.MANIFEST_CLOSE_DATE_TIME)
+    OVER (PARTITION BY SH.SHIPMENT_ID) > 1
+  -- or compare PROCESS_HISTORY status-700 timestamps with
+  -- sibling container close events
+```
+
+  An order is flagged as split if ANY type triggers. The UI's
+  "Root Cause" column on the container tracking table shows which
+  type(s) applied — defaulting to the most severe if multiple.
+
+- **Root cause taxonomy (replaces mock's 5-reason labels):** the
+  mock UI's 5 labels (Trailer capacity, Wave cutoff missed, Short
+  pick - partial inventory, SAP-SCALE variance, Pick exception) are
+  fictional. Live mode replaces them with the 3 real types above.
+  The `ROOT CAUSES OF SPLITS` chart shrinks from 5 to 3 entries
+  (within this page only — other pages are unaffected).
+
+- **New endpoint(s):**
+  - `/api/scale/split-shipments` — single call, returns the full
+    2026 calendar year for the 3 in-scope channels. Filter criteria
+    intrinsic to the endpoint; not configurable by the app's header
+    channel selector.
+
+- **Date range:** The endpoint returns the full 2026 calendar year
+  (SQL: `WHERE SH.SHIP_DATE >= '2026-01-01'`). The frontend Split
+  Shipments page adds a date-range picker that filters the in-memory
+  dataset client-side.
+
+- **SQL strategy:** Cross-DB join (SCI + KDB) for customer name
+  resolution. Apply `WAREHOUSE = 'KDCGA1'`, `customer_group = 'TR'`,
+  and `sales_org IN ('1100', '1400', '1900')` filters. **Omit**
+  `IN_DELETION = 'N'` per F0 validation 2026-04-29 — data contains
+  only 'N' values, filter is redundant. The 3-type detection logic
+  uses window functions or separate CTEs per type — sub-plan `002`
+  decides exact structure based on Snowflake query planner behavior.
+
+- **Cross-database access required:** the Snowflake user/role
+  running this query needs SELECT access to both `SCI` and `KDB`.
+  Verify access during sub-plan `002` implementation, before writing
+  the endpoint.
+
 - **Risks specific to this page:**
-  1. Real splits may have edge cases mock doesn't model (e.g.,
-     multi-line shipments where some lines are split and others
-     aren't; cancelled orders mid-split).
-  2. ~~**Same-day timezone definition unresolved**~~
-     **[RESOLVED 2026-04-29]** Same-day definition uses `::DATE`
-     cast on two timestamps from the same source — timezone does
-     not affect the comparison. See F6 in §7b and the closure
-     note in §7c.
-  3. **Customer-name column unverified** —
-     `snowflake-schema.md` flags this. The reference SQL uses
-     `SH.SHIP_TO_NAME AS CUSTOMER_ID` but it's not confirmed.
-  4. Container nesting (per-shipment array) requires either
-     `ARRAY_AGG` server-side or a second query and a frontend join.
-  5. **Full-year fetch payload size** — measure response size
-     during sub-plan `002` implementation. If too heavy, add
-     month-based slicing as a follow-up (per F7 trade-off note).
-- **Validation:** Pick 1-2 known recent split orders from operations
-  and confirm the dashboard shows them with the correct gap days,
-  chargeback amount, and reason classification. The user already
-  flagged Ulta and Target as recent split-impact accounts — start
-  there.
+  1. **Type detection accuracy** — each type relies on assumptions
+     about WORK_INSTRUCTION zone codes, SHIP_CONFIRM_DATE_TIME
+     column existence, and PROCESS_HISTORY status-700 patterns.
+     These need verification during sub-plan `002`.
+  2. **Threshold tuning** — Container-level type uses a
+     time-difference threshold (e.g., > 4 hours). Initial value is
+     a guess; operations should validate.
+  3. **Real splits may have edge cases mock doesn't model** —
+     multi-line shipments where some lines split and others don't,
+     cancelled orders mid-split, etc.
+  4. **Cross-DB query performance** — SCI ↔ KDB joins may be slower
+     than single-DB. Profile during sub-plan `002`.
+
+- **Validation:** Pick 1-2 known recent split orders **per type**
+  (3 total: 1 zone-split, 1 container-split, 1 manifest-split) from
+  operations. Confirm the dashboard correctly classifies each. The
+  user already mentioned several specific examples are available
+  for cross-checking — capture these in sub-plan `002`.
+
+- **UI changes from mock (within this page only):**
+  - Channel cards section ("Split Rate by Distribution Channel"):
+    11 cards → 3 cards (BS-IVY, BS-RED, VIVACE only)
+  - Root Causes chart: 5 reason labels → 3 type labels
+  - Container Tracking table: ROOT CAUSE column values change
+    (Wave cutoff missed → Manifest-level split, etc.)
+  - All other elements (KPI tiles, customer breakdown, drill-down
+    structure, app header channel selector) stay the same; only
+    data mapping changes within this page's scope.
 
 #### Geographic — sub-plan `003-geographic-live.md`
 
@@ -680,6 +776,15 @@ validation evidence before touching it.
   carrier escalations) and account managers (per-region tier-1
   customer issues). Lower business-criticality than Split (no
   contract violation), but high information value.
+- **Page-level scope filter (CONFIRMED 2026-04-29):** Geographic
+  page applies the same 3-channel scope as Split Shipments —
+  `customer_group = 'TR'` AND `sales_org IN ('1100', '1400', '1900')`.
+  Resulting channels: BS-IVY, BS-RED, VIVACE. The geographic heat
+  map and state aggregations cover only orders matching this
+  scope. The app's header channel selector is unaffected (11
+  channels remain). This filter is intrinsic to the
+  `/api/scale/geo-summary` endpoint (or whatever the Geographic
+  endpoint is finalized as in sub-plan `003`).
 - **What it shows:** Issue selector → state heat map →
   ranked-states table. See §4b.
 - **Backing data:** `SCI.PUBLIC.SHIPMENT_HEADER` (or `SCI.L0` if
@@ -902,6 +1007,31 @@ without the answer**, and **rough cycle time**.
         includes Red (1400) in `COMPANY_NAME_EXPR` alongside
         Kiss (1000) / Ivy (1100) / Vivace (1900). Matches
         `snowflake-schema.md` sales-org table. No correction needed.
+- [ ] 13. **WORK_INSTRUCTION zone codes** — what is the exact column
+        name and what are the valid zone values? Suspected: column
+        `ZONE` with values 'autostore' / 'active' / 'reserve' (or
+        coded versions). Who: data team OR Claude Code grep against
+        SCALE config. Time: ~10min.
+        Blocks: sub-plan `002` — Zone-level split detection (Type 1).
+- [ ] 14. **SHIPPING_CONTAINER ship-confirm column** — exact column
+        name for ship-confirm timestamp. Suspected
+        `SHIP_CONFIRM_DATE_TIME`. Who: data team OR snowflake-schema
+        grep. Time: ~5min.
+        Blocks: sub-plan `002` — Container-level split detection (Type 2).
+- [ ] 15. **Container-level threshold tuning** — what hour difference
+        between sibling containers' ship-confirm constitutes a split?
+        (e.g., > 4 hours? > 8 hours? same wave cutoff?)
+        Who: operations supervisor. Time: ~15min discussion.
+        Blocks: sub-plan `002` — Type 2 detection accuracy. Default
+        if no answer: 4 hours, document for tuning.
+- [ ] 16. **`customer_group` column location** — confirm which column
+        carries `customer_group = 'TR'` value. Suspected: a column
+        on `SCI.L0.SHIPMENT_HEADER` (alongside `USER_DEF1` for
+        sales_org), or possibly retrievable via `KDB.PBI_SF.*`
+        join. Who: data team OR Claude Code grep against server.js
+        + Snowflake console query. Time: ~10min.
+        Blocks: sub-plan `002` + sub-plan `003` — both apply
+        `customer_group = 'TR'` filter.
 
 ---
 

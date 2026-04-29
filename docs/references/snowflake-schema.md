@@ -73,6 +73,65 @@ file over the skill when entries differ.
   inconsistency is tolerated since results are identical. A cleanup
   to remove the filter from existing endpoints is tracked as P2 in
   `tech-debt-tracker.md`.
+- **Phase 1 page-level channel scope: Split Shipments + Geographic
+  pages only** (user-confirmed via UI screenshot review). Both pages
+  apply the same filter at their respective endpoint SQL:
+
+  - `customer_group = 'TR'`
+  - `sales_org IN ('1100', '1400', '1900')`
+
+  Resulting channels:
+
+  | Sales Org | Display Label (in selector) | Company Name |
+  |-----------|------------------------------|--------------|
+  | 1100      | BS - IVY                     | Ivy          |
+  | 1400      | BS - RED                     | Red          |
+  | 1900      | VIVACE                       | Vivace       |
+
+  The "BS" prefix is a UI grouping label in the channel selector
+  (likely "Beauty Supply" or "B2B Sales"); the actual company names
+  are Ivy/Red/Vivace. Sales org 1000 (Kiss) belongs to a different
+  customer_group and is excluded from the Split Shipment + Geographic
+  compliance scope.
+
+  **Important — this is a PAGE-level filter, not an app-level filter:**
+  - The app's global channel selector (in the header) continues to
+    show 11 channels — it is NOT modified by Phase 1.
+  - The 3-channel filter is applied only within the
+    `/api/scale/split-shipments` and `/api/scale/geo-summary`
+    endpoints (or whatever the Geographic endpoint is named).
+  - Other pages (Executive Summary, Flight Board, AI Risk, etc.)
+    continue to use the full 11-channel scope from their own
+    endpoints.
+  - This reflects business policy: split-shipment compliance and
+    Geographic analysis are tracked only for BS-IVY/BS-RED/VIVACE
+    customers; other pages serve broader operational use cases.
+- **Split Shipment root causes — 3 types** (user-confirmed). The
+  mock UI labels (Trailer capacity, Wave cutoff missed, Short pick,
+  SAP-SCALE variance, Pick exception) are fictional placeholders.
+  The real operational root causes are:
+
+  1. **Zone-level split:** an order's lines sit across multiple
+     inventory zones (autostore, active, reserve). Each zone produces
+     its own pick work — siblings finish at different times and can
+     manifest separately.
+
+  2. **Container-level split:** same order, multiple containers,
+     different ship-confirm times. UPS picks up sibling boxes on
+     different trucks — tracked as separate shipments.
+
+  3. **Manifest-level split** ("the silent killer"): status 700
+     (Ship Confirm Pending) fires before all sibling containers
+     close. SCALE manifests what's ready; siblings end up on separate
+     PDL files.
+
+  Each type requires different data signals to detect:
+  - Zone-level: `WORK_INSTRUCTION` zone distribution per shipment
+  - Container-level: `SHIPPING_CONTAINER` ship-confirm timestamp variance
+  - Manifest-level: `PROCESS_HISTORY` status 700 transition timing
+    relative to sibling container close events
+
+  Detection SQL details deferred to sub-plan `002`.
 
 ### Unverified — TODO: confirm in Snowflake console
 
@@ -179,6 +238,23 @@ from a new endpoint:
 - [x] ~~**Replication freshness** — Snowflake vs live SCALE lag.~~
       **[CLOSED 2026-04-29]** ~10 minutes (MSSQL → Snowflake on
       10-min cycle). See Verified facts above.
+- [ ] **WORK_INSTRUCTION zone codes** — what are the exact column name
+      and values for inventory zones? Suspected: column `ZONE` with
+      values matching 'autostore' / 'active' / 'reserve' (or codes
+      like 'AS' / 'AC' / 'RS'). Capture during sub-plan `002` SQL
+      writing.
+- [ ] **SHIPPING_CONTAINER ship-confirm column** — likely
+      `SHIP_CONFIRM_DATE_TIME` or similar. Verify exact name.
+      Needed for Container-level split detection.
+- [ ] **PROCESS_HISTORY status 700 transition pattern** — exact
+      column for status (likely `TRAILING_STATUS` or similar) and
+      timestamp granularity. Needed for Manifest-level split
+      detection.
+- [ ] **`customer_group` and `sales_org` column locations** — confirm
+      these are columns of `SCI.L0.SHIPMENT_HEADER` (likely
+      `USER_DEF1` for sales_org based on COMPANY_NAME_EXPR pattern;
+      customer_group source TBD — possibly from KDB join or another
+      SCI column).
 
 Resolved items (moved to **Verified facts** above):
 
