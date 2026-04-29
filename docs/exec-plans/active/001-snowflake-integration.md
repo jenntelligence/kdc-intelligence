@@ -653,11 +653,19 @@ validation evidence before touching it.
     determination via `USER_DEF1` (sales_org). `customer_group`
     column location TBD (see §7c).
   - `SCI.L0.SHIPMENT_DETAIL` (SD) — line-level data.
-  - `SCI.L0.SHIPPING_CONTAINER` (SC) — carton-level data;
-    `MANIFEST_FOR_DATE` for split-day check, ship-confirm timestamp
-    for Container-level type.
-  - `SCI.L0.WORK_INSTRUCTION` (WI) — pick work per line; ZONE
-    column (TBD verified) for Zone-level type.
+  - `SCI.L0.SHIPPING_CONTAINER` (SC) — carton-level data. Key
+    columns:
+    - `MANIFEST_FOR_DATE` — manifest day (used in initial split-day
+      discussions; supplementary signal in Phase 1)
+    - `MANIFEST_CLOSE_DATE_TIME` — per-container ship event signal,
+      used for Type 2 detection (per #14 grep finding 2026-04-29)
+    - `original_pick_loc` — pick location string; first 2 chars
+      indicate floor area for Type 1 detection
+  - `SCI.L0.WORK_INSTRUCTION` (WI) — pick work per line. Note: no
+    separate ZONE column found in server.js usage — Type 1 zone
+    derivation uses `LEFT(SC.original_pick_loc, 2)` prefix instead
+    of `WI.ZONE`. Sub-plan `002` verifies whether WI has its own
+    zone column via `DESCRIBE TABLE`.
   - `SCI.L0.PROCESS_HISTORY` (PH) — status transitions; status 700
     timing for Manifest-level type.
   - `KDB.PBI_SF.SAP_CUSTOMER_MASTER` (CM) — customer name resolution
@@ -675,7 +683,15 @@ validation evidence before touching it.
 
   Detection sketch:
 ```sql
-  COUNT(DISTINCT WI.ZONE) OVER (PARTITION BY SH.SHIPMENT_ID) > 1
+-- Zone-area derivation per #13 grep finding 2026-04-29:
+-- Use SC.original_pick_loc prefix instead of WI.ZONE
+-- (which does not exist as a separate column in server.js usage)
+COUNT(DISTINCT LEFT(SC.original_pick_loc, 2))
+  OVER (PARTITION BY SH.SHIPMENT_ID) > 1
+
+-- Prefix codes (server.js:495-498):
+-- 'AS' → Pre-Pick / Autostore
+-- 'PL' / 'PR' / 'PS' → Pick Module sub-areas
 ```
 
   **Type 2 — Container-level split:** the order's containers have
@@ -684,10 +700,18 @@ validation evidence before touching it.
 
   Detection sketch:
 ```sql
-  DATEDIFF('HOUR',
-    MIN(SC.SHIP_CONFIRM_DATE_TIME) OVER (PARTITION BY SH.SHIPMENT_ID),
-    MAX(SC.SHIP_CONFIRM_DATE_TIME) OVER (PARTITION BY SH.SHIPMENT_ID)
-  ) > [threshold]
+-- Per #14 grep finding 2026-04-29: SHIP_CONFIRM_DATE_TIME does not
+-- exist; the closest documented per-container ship-event signal is
+-- SC.MANIFEST_CLOSE_DATE_TIME (NULL = open, value = manifest closed)
+DATEDIFF('HOUR',
+  MIN(SC.MANIFEST_CLOSE_DATE_TIME) OVER (PARTITION BY SH.SHIPMENT_ID),
+  MAX(SC.MANIFEST_CLOSE_DATE_TIME) OVER (PARTITION BY SH.SHIPMENT_ID)
+) > [threshold]
+
+-- Note: SH.TRAILING_STATUS = 700 ("Ship Confirm Pending") is
+-- per-ORDER, not per-CONTAINER, so not directly usable for Type 2.
+-- Sub-plan 002 verifies MANIFEST_CLOSE_DATE_TIME per-container
+-- semantics in Snowflake console before relying on it.
 ```
 
   Threshold value TBD with operations (sub-plan `002`).
@@ -965,10 +989,14 @@ without the answer**, and **rough cycle time**.
       lead (the formula must match how they triage). Time:
       ~30 min discussion. Default if unanswered: replicate
       heuristic exactly, log a follow-up.
-- [ ] **Replication freshness** — how recent is Snowflake data
+- [x] ~~**Replication freshness** — how recent is Snowflake data
       vs live SCALE? (minutes? hours? batch nightly?) Affects
       "live" vs "near-live" UI framing on all three Phase 1
-      pages. Who: data team. Time: ~5 min email.
+      pages. Who: data team. Time: ~5 min email.~~
+      **[CLOSED 2026-04-29]** ~10 minutes (MSSQL → Snowflake on
+      10-minute cycle, user-confirmed). UI framing: "near-live"
+      not "live." Frontend cache TTL ≤ 10 minutes. See
+      `snowflake-schema.md` Verified facts.
 - [x] ~~**`SHIP_DATE` and `MANIFEST_FOR_DATE` time zone.**~~
       **[CLOSED 2026-04-29]** Original concern: timezone of
       `SHIP_DATE` / `MANIFEST_FOR_DATE`. With the same-day
@@ -991,16 +1019,19 @@ without the answer**, and **rough cycle time**.
        '7_Loading', '8_ShipConfirmPending', '9_Shipped'.
        Who: operations supervisor. Time: ~30min walkthrough.
        Blocks: sub-plan `004` (Flight Board) — **CRITICAL DEPENDENCY**.
-- [ ] 10. **Validate `WAREHOUSE = 'KDCGA1'` always-filter.**
-        Is KDCGA1 the only warehouse this dashboard should ever cover?
-        Are other warehouses planned in 2026?
-        Who: operations manager. Time: ~5min.
-        Blocks: every Phase 1 page (low risk if KDCGA1 stays sole).
-- [ ] 11. **Validate `IN_DELETION = 'N'` always-filter.**
-        Should deleted shipments ever appear on the dashboard
-        (e.g., for cancellation reason analysis)?
-        Who: operations supervisor. Time: ~5min.
-        Blocks: every Phase 1 page.
+- [x] ~~10. **Validate `WAREHOUSE = 'KDCGA1'` always-filter.**~~
+        **[CLOSED 2026-04-29]** Confirmed: KDCGA1 is the only
+        warehouse this dashboard covers. No other warehouses planned
+        for 2026 (user-confirmed via operations manager). Filter
+        stays applied. See `snowflake-schema.md` Verified facts.
+- [x] ~~11. **Validate `IN_DELETION = 'N'` always-filter.**~~
+        **[CLOSED 2026-04-29]** User direct verification: only `'N'`
+        values exist in Snowflake — upstream ETL filters `'Y'` rows
+        out. **Decision: omit the `IN_DELETION = 'N'` filter from
+        new Phase 1 endpoints** (no rows to filter, no behavior
+        change). Existing `server.js` endpoints retain the filter;
+        cleanup tracked as P2 in `tech-debt-tracker.md` (commit
+        `dbc15b7`). See `snowflake-schema.md` Verified facts.
 - [x] ~~12. **Cross-check `COMPANY_NAME_EXPR` in server.js against
         `snowflake-schema.md` sales org table.**~~
         **[CLOSED 2026-04-29]** Verified: `server.js:172` already
