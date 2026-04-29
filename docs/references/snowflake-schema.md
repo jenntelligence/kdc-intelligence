@@ -48,33 +48,49 @@ file over the skill when entries differ.
   Confirmed via `server.js`: `authenticator: 'externalbrowser'`, no password
   ever transits the API, the Snowflake SDK opens a browser tab on first
   query, and the resulting session token is cached for subsequent queries.
+- **`SCI.PUBLIC.SHIPMENT_HEADER` is a Snowflake Dynamic Table**
+  (user-confirmed). It is a managed materialized view over upstream
+  data — Snowflake auto-refreshes it on a defined cadence. The exact
+  DDL (which columns derive from L0 vs raw) has not yet been captured
+  into this doc; capture it when first sub-plan needs to query
+  `SCI.PUBLIC` fields beyond what L0 provides.
+- **Replication freshness: ~10 minutes** (user-confirmed). MSSQL SCALE
+  data lands in `SCI.L0` on a 10-minute cycle. Dashboard UI should
+  frame data as "near-live" (last refresh ~Xm ago) rather than "live."
+  Cache TTL on the frontend should not exceed 10 minutes — beyond
+  that the cache becomes the bottleneck rather than replication.
+- **Warehouse scope: KDCGA1 only** (user-confirmed via operations
+  manager). No other warehouses are planned for 2026. The
+  `WAREHOUSE = 'KDCGA1'` filter in `server.js` stays applied to every
+  shipment query.
+- **`IN_DELETION` column status: only `'N'` values present in
+  Snowflake** (user-confirmed via direct Snowflake query). Upstream
+  ETL appears to filter `'Y'` rows out before loading.
+
+  Phase 1 implication: new endpoints **omit the `IN_DELETION = 'N'`
+  filter**. Cost is zero (no rows to filter), and behavior is
+  unchanged. Existing `server.js` endpoints retain the filter —
+  inconsistency is tolerated since results are identical. A cleanup
+  to remove the filter from existing endpoints is tracked as P2 in
+  `tech-debt-tracker.md`.
 
 ### Unverified — TODO: confirm in Snowflake console
 
-- **Is `SCI.PUBLIC.SHIPMENT_HEADER` a table or a view?**
-  `server.js` uses this path in 6 working endpoints, so something must
-  exist there. Possibilities:
-  - A base table (independent copy of header data).
-  - A view over `SCI.L0.SHIPMENT_HEADER` (with derived columns).
-  - An alias/synonym to L0.
-
-  The probable answer is "view defined in
-  `kdc_intelligence_foundation.sql`," but that file is not in this repo.
-  Until the DDL is inspected, treat `SCI.PUBLIC.SHIPMENT_HEADER` as a
-  best-effort path that *might* differ from `SCI.L0.SHIPMENT_HEADER` in
-  derived columns or row filtering.
 - **Other schemas in `SCI`** — `L1`, `L2`, `RAW`, `STAGING`, etc. are
-  unknown. `server.js` only references `PUBLIC` and `L0`.
+  unknown. `server.js` only references `PUBLIC` and `L0`. The
+  `PUBLIC` Dynamic Tables likely sit over `L0`; intermediate schemas
+  (if any) are not yet inventoried.
 - **`kdc_intelligence_foundation.sql`** — referenced in the `server.js`
   header comment but absent from the repo. Required to understand the
   semantic-view layer (`V_*`, `VOP_*`, `VPROD_*`, `VEXC_*`) that 11 of
   `server.js`'s endpoints stub out via `viewNotReady()`. Action: ask the
   prototype author for this file. Logged in `tech-debt-tracker.md`.
-- **SAP-origin tables** — schema location and table list TBD.
+- **Other SAP-origin tables in `KDB`** — only
+  `KDB.PBI_SF.SAP_CUSTOMER_MASTER` is mapped (see SAP-origin section
+  below). Sales orders, materials, pricing, chargebacks — TBD per
+  sub-plan need.
 - **Network access** — whether the dev environment reaches Snowflake
   directly or through a proxy / API gateway.
-- **Replication freshness** — how recent is data in Snowflake relative to
-  the live SCALE WMS? Drives the "live" vs "near-live" framing in the UI.
 
 ### Working guidelines (until verified)
 
@@ -91,6 +107,9 @@ When writing SQL for new exec plans:
   derivation.
 - **Do not assume `PUBLIC` mirrors every `L0` table.** If unsure, check
   in the Snowflake console first or fall back to `L0`.
+- **For customer names: cross-database join SCI + KDB.** See the
+  KDB section below for the `SCI.L0.SHIPMENT_HEADER` ↔
+  `KDB.PBI_SF.SAP_CUSTOMER_MASTER` join pattern.
 
 _Note: this section's stale-example warning ("the `SCALE_DB.WMS.`
 placeholders are stale") is now resolved as of the `SCI.L0` update below._
@@ -143,14 +162,23 @@ calls the procedure**.
 Items still blocking the first end-to-end SQL execution against Snowflake
 from a new endpoint:
 
-- [ ] **Is `SCI.PUBLIC.SHIPMENT_HEADER` a table or a view?** If view,
-      capture the DDL.
+- [x] ~~**Is `SCI.PUBLIC.SHIPMENT_HEADER` a table or a view?**~~
+      **[CLOSED 2026-04-29]** It is a Snowflake **Dynamic Table** —
+      managed materialized view, auto-refreshed. See Verified facts
+      above. DDL capture deferred to first sub-plan that needs
+      `SCI.PUBLIC` columns beyond what `L0` provides.
 - [ ] **Other schemas in `SCI`** — list and purpose.
 - [ ] **`kdc_intelligence_foundation.sql`** — obtain from prototype author;
       tracked in `docs/exec-plans/tech-debt-tracker.md`.
-- [ ] **SAP-origin tables** — schema location and table inventory.
+- [x] ~~**SAP-origin tables** — schema location and table inventory.~~
+      **[PARTIALLY CLOSED 2026-04-29]** `KDB.PBI_SF` database
+      confirmed; `SAP_CUSTOMER_MASTER` mapped (see SAP-origin
+      section below). Sales orders, materials, pricing, chargebacks —
+      TBD per sub-plan need.
 - [ ] **Network access** — direct from dev environment, or via proxy?
-- [ ] **Replication freshness** — Snowflake vs live SCALE lag.
+- [x] ~~**Replication freshness** — Snowflake vs live SCALE lag.~~
+      **[CLOSED 2026-04-29]** ~10 minutes (MSSQL → Snowflake on
+      10-min cycle). See Verified facts above.
 
 Resolved items (moved to **Verified facts** above):
 
@@ -410,23 +438,54 @@ ORDER BY SH.SHIP_DATE DESC;
 
 ---
 
-## SAP-origin tables
+## SAP-origin tables — KDB database
 
-**Status:** placeholder. Will be filled when an exec plan first needs SAP
-data (e.g., chargeback reporting, customer master enrichment for the
-Customer Impact page).
+**Database:** `KDB` (separate from `SCI`).
 
-Likely tables (TODO: confirm names in Snowflake):
-- Customer master
-- Material master
+**Confirmed schema:** `KDB.PBI_SF` (likely "Power BI / Salesforce"
+or similar consolidation layer for SAP-origin data).
+
+### KDB.PBI_SF.SAP_CUSTOMER_MASTER
+
+Customer master replicated from SAP. Confirmed columns:
+
+| Column | Purpose |
+|--------|---------|
+| `SHIPTOPARTY_KEY` | Join key — matches `SCI.L0.SHIPMENT_HEADER.SHIP_TO` |
+| `NAME` | Customer display name (used for "customer" field in FactShipment contract) |
+
+Other columns: TODO — capture during sub-plan `002` work.
+
+### Cross-database join pattern (Phase 1 critical)
+
+To resolve customer names on shipment data, join across SCI and KDB:
+
+```sql
+SELECT
+    SH.SHIPMENT_ID,
+    SH.SHIP_TO,
+    CM.NAME AS CUSTOMER_NAME
+    -- ... other shipment fields
+FROM SCI.L0.SHIPMENT_HEADER SH
+LEFT JOIN KDB.PBI_SF.SAP_CUSTOMER_MASTER CM
+    ON SH.SHIP_TO = CM.SHIPTOPARTY_KEY
+WHERE SH.WAREHOUSE = 'KDCGA1'
+  -- IN_DELETION filter intentionally omitted; only 'N' values exist in data
+;
+```
+
+This is a **cross-database join** — the Snowflake user/role running
+the query needs SELECT access to both `SCI` and `KDB`. Verify
+access during sub-plan `002` implementation.
+
+### Other SAP-origin tables — TBD
+
+Likely tables (not yet confirmed):
 - Sales order header / line items
+- Material master
 - Pricing / chargeback tables
-- Sales org master
 
-Likely cross-schema join keys (TODO: confirm column names):
-- Order number — SAP sales doc ↔ `SH.ORDER_ID` or similar SCALE field
-- Customer ID — SAP customer ↔ SCALE ship-to
-- Material/SKU — SAP material ↔ SCALE `ITEM_MASTER.ITEM`
+These will be filled in as sub-plans 003+ require them.
 
 ---
 
