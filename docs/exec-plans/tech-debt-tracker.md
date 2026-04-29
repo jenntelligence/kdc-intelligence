@@ -77,6 +77,88 @@ are discovered — do not silently fix them inside an unrelated exec plan.
 - **Fix path:** Update README.md and CLAUDE.md to point to ARCHITECTURE.md
   as authoritative. Small standalone exec plan.
 
+### Hidden dependency — `kdc_intelligence_foundation.sql`
+
+- **Current state:** `server.js` line 5 (header comment) references
+  `kdc_intelligence_foundation.sql` as the source of all semantic views
+  (`V_*`, `VOP_*`, `VPROD_*`, `VEXC_*`) and the `KISS_BI_CONFIG` table.
+  The file is **not in the repo**.
+- **Impact:** Source of all 11 missing-view stubs and the missing config
+  table. Without it we cannot reproduce the colleague's intended view
+  layer in our own Snowflake account; we have to either obtain it or
+  recreate from scratch.
+- **Fix path:** Ask the prototype author (origin remote
+  `grandmasterchris/KDC_Intelligence_v1`) for the file. If unavailable,
+  recreate from `manhattan-scale-config` skill references and the
+  `viewNotReady()` view names in `server.js`.
+
+### Missing Snowflake views (11 stubs)
+
+- **Current state:** Eleven `server.js` endpoints return
+  `viewNotReady(viewName)` because their backing views do not exist in
+  Snowflake yet:
+  - `VOP_CONSOL_LOCATION_USAGE`, `VOP_OPEN_MANIFESTS`
+  - `VPROD_QC_BY_STATION`, `VPROD_QC_BY_USER`, `VPROD_PICK_CYCLE`,
+    `VPROD_AUTOSTORE_THROUGHPUT`
+  - `VEXC_SHORT_PICKS`, `VEXC_QC_FAILURES`, `VEXC_RL_MISSING_PRO`,
+    `VEXC_IB_RECONCILIATION`, `VEXC_QC_FAIL_RATE_ALERT`
+- **Impact:** The Split Shipments page is the highest-priority blocker —
+  it depends on `VEXC_SHORT_PICKS` (currently stubbed at
+  `server.js:368`).
+- **Fix path:** Either deploy `kdc_intelligence_foundation.sql` (see
+  above), or **bypass the view** for Split Shipments by querying
+  `SCI.L0` raw tables using the EX11 PGI flag (`SD.UDF3`). The reference
+  SQL for the bypass is in
+  `docs/references/snowflake-schema.md` → "Reference SQL — split
+  shipments in the last 30 days."
+
+### `KISS_BI_CONFIG` table missing
+
+- **Current state:** `GET /api/scale/config` (`server.js:451`) returns
+  hardcoded mock thresholds; `PUT /api/scale/config/:key`
+  (`server.js:467`) is a no-op stub that responds
+  `requires: 'KISS_BI_CONFIG'`.
+- **Impact:** Configurable operational thresholds (stuck-shipment hours,
+  pick SLA minutes, OTD target, etc.) cannot be edited end-to-end. The
+  admin SLA editor in the UI is purely client-side until this is wired.
+- **Fix path:** Create `KISS_BI_CONFIG` (likely DDL is in
+  `kdc_intelligence_foundation.sql`); seed with the defaults currently
+  hardcoded in `server.js:454-461`; replace the stub PUT with a real
+  `UPDATE`.
+
+### `SCI.PUBLIC` schema layer unverified
+
+- **Current state:** `server.js` calls 6 endpoints against
+  `SCI.PUBLIC.SHIPMENT_HEADER`. We have not independently verified
+  whether `SCI.PUBLIC.SHIPMENT_HEADER` is a base table, a view over
+  `SCI.L0.SHIPMENT_HEADER` (with derived columns), or a synonym.
+  `SCI.L0.SHIPMENT_HEADER` itself is user-verified.
+- **Impact:** Without confirming `PUBLIC`, exec plans cannot reliably
+  decide whether to query `PUBLIC` or `L0` for headers, and how column
+  projections may differ between the two.
+- **Fix path:** Run `SELECT TABLE_TYPE FROM SCI.INFORMATION_SCHEMA.TABLES
+  WHERE TABLE_SCHEMA = 'PUBLIC' AND TABLE_NAME = 'SHIPMENT_HEADER';` —
+  if `VIEW`, capture DDL via `GET_DDL('VIEW',
+  'SCI.PUBLIC.SHIPMENT_HEADER')` and paste into
+  `docs/references/snowflake-schema.md`. Effort: ~5 minutes once
+  Snowflake access is in hand.
+
+### Frontend / backend column-name mismatch
+
+- **Current state:** `server.js` returns UPPERCASE Snowflake columns
+  (`SHIPMENT_ID`, `CUSTOMER_NAME`, `SHIP_TO_STATE`, ...). The frontend's
+  `FactShipment` shape — established by `public/sample-data.csv` and
+  `handleUpload` at `src/ShippingSLAApp.jsx:5256` — uses lowercase keys
+  (`id`, `customer`, `state`, `cause`, `isSplit`, ...). No conversion
+  layer exists today.
+- **Impact:** The live data path currently overlays only top-strip KPIs
+  (`liveKpis` at `src/ShippingSLAApp.jsx:5032`) onto the executive page;
+  it does not feed Split / Geo / Flight Board because the row shape
+  doesn't match the consumers' expectations.
+- **Fix path:** Decide between (a) server-side rename in `executeQuery()`
+  / per-handler, or (b) frontend adapter on the fetch site. To be
+  resolved in the master plan for `001-snowflake-integration`.
+
 ---
 
 ## P2

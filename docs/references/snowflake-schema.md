@@ -30,22 +30,111 @@ file over the skill when entries differ.
 
 ---
 
-## Open environment questions (TODO — confirm with data team / DBA)
+## DB / schema paths — verified vs unverified
 
-These do not block schema understanding, but they block the first SQL
-execution against Snowflake:
+### Verified facts (confirmed via code or directly with the user)
 
-- [ ] Snowflake **database** name (e.g., `SCALE_DB`? `KISS_PROD`?)
-- [ ] Snowflake **schema** for SCALE tables (e.g., `WMS`? `KISS_SCALE`?)
-- [ ] Snowflake **schema** for SAP tables
-- [ ] Authentication method (user/password? key-pair? OAuth?)
-- [ ] Network access — does the dev environment reach Snowflake directly,
-      or do we go through a proxy / API gateway?
-- [ ] Replication freshness — how recent is data in Snowflake vs SCALE?
-      (drives the "live" vs "near-live" framing in the UI)
+- **`SCI`** is the Snowflake database name. (33 occurrences in `server.js`,
+  user-confirmed.)
+- **`SCI.L0`** exists and contains the raw landing layer. Confirmed tables
+  in this schema:
+  - `SHIPMENT_HEADER` — user-verified directly in the Snowflake console.
+  - `SHIPMENT_DETAIL`, `SHIPPING_CONTAINER`, `LAUNCH_STATISTICS`,
+    `TRANSACTION_HISTORY`, `PROCESS_HISTORY`, `WORK_INSTRUCTION`,
+    `ITEM_UNIT_OF_MEASURE` — referenced by working endpoints in
+    `server.js`, so they exist (not independently verified, but the
+    endpoints are observably operational against this schema).
+- **Authentication: externalbrowser SSO via Entra ID.**
+  Confirmed via `server.js`: `authenticator: 'externalbrowser'`, no password
+  ever transits the API, the Snowflake SDK opens a browser tab on first
+  query, and the resulting session token is cached for subsequent queries.
 
-When confirmed, replace the `SCALE_DB.WMS.` prefix used in example SQL
-below with the real fully-qualified names.
+### Unverified — TODO: confirm in Snowflake console
+
+- **Is `SCI.PUBLIC.SHIPMENT_HEADER` a table or a view?**
+  `server.js` uses this path in 6 working endpoints, so something must
+  exist there. Possibilities:
+  - A base table (independent copy of header data).
+  - A view over `SCI.L0.SHIPMENT_HEADER` (with derived columns).
+  - An alias/synonym to L0.
+
+  The probable answer is "view defined in
+  `kdc_intelligence_foundation.sql`," but that file is not in this repo.
+  Until the DDL is inspected, treat `SCI.PUBLIC.SHIPMENT_HEADER` as a
+  best-effort path that *might* differ from `SCI.L0.SHIPMENT_HEADER` in
+  derived columns or row filtering.
+- **Other schemas in `SCI`** — `L1`, `L2`, `RAW`, `STAGING`, etc. are
+  unknown. `server.js` only references `PUBLIC` and `L0`.
+- **`kdc_intelligence_foundation.sql`** — referenced in the `server.js`
+  header comment but absent from the repo. Required to understand the
+  semantic-view layer (`V_*`, `VOP_*`, `VPROD_*`, `VEXC_*`) that 11 of
+  `server.js`'s endpoints stub out via `viewNotReady()`. Action: ask the
+  prototype author for this file. Logged in `tech-debt-tracker.md`.
+- **SAP-origin tables** — schema location and table list TBD.
+- **Network access** — whether the dev environment reaches Snowflake
+  directly or through a proxy / API gateway.
+- **Replication freshness** — how recent is data in Snowflake relative to
+  the live SCALE WMS? Drives the "live" vs "near-live" framing in the UI.
+
+### Working guidelines (until verified)
+
+When writing SQL for new exec plans:
+
+- **Prefer `SCI.L0.*` for raw-data needs.** Split Shipment uses the EX11
+  PGI flag at `SD.UDF3` — that is raw, definitely landed in L0.
+- **Reference `SCI.PUBLIC.*` only when extending existing `server.js`
+  endpoints** that already use PUBLIC successfully:
+  `overview-kpis`, `lifecycle-heatmap`, `otd`, `daily-volume`,
+  `stuck-shipments`, `shipments`. Reusing the same path keeps the new
+  endpoint consistent with the existing ones — and if PUBLIC turns out
+  to be a view, all six endpoints (and any new sibling) inherit the same
+  derivation.
+- **Do not assume `PUBLIC` mirrors every `L0` table.** If unsure, check
+  in the Snowflake console first or fall back to `L0`.
+
+_Note: this section's stale-example warning ("the `SCALE_DB.WMS.`
+placeholders are stale") is now resolved as of the `SCI.L0` update below._
+
+### Verification queries (when the team has Snowflake access)
+
+```sql
+-- List all tables and views in SCI
+SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
+FROM SCI.INFORMATION_SCHEMA.TABLES
+ORDER BY TABLE_SCHEMA, TABLE_NAME;
+
+-- For SCI.PUBLIC.SHIPMENT_HEADER specifically — if it's a view, get the DDL
+SELECT GET_DDL('VIEW', 'SCI.PUBLIC.SHIPMENT_HEADER');
+
+-- See all schemas in SCI
+SHOW SCHEMAS IN DATABASE SCI;
+```
+
+Update the **Verified facts** and **Unverified** subsections above once
+the results are in, and amend the example SQL further down in this file
+(the `SCALE_DB.WMS.` placeholders are stale).
+
+---
+
+## Open environment questions
+
+Items still blocking the first end-to-end SQL execution against Snowflake
+from a new endpoint:
+
+- [ ] **Is `SCI.PUBLIC.SHIPMENT_HEADER` a table or a view?** If view,
+      capture the DDL.
+- [ ] **Other schemas in `SCI`** — list and purpose.
+- [ ] **`kdc_intelligence_foundation.sql`** — obtain from prototype author;
+      tracked in `docs/exec-plans/tech-debt-tracker.md`.
+- [ ] **SAP-origin tables** — schema location and table inventory.
+- [ ] **Network access** — direct from dev environment, or via proxy?
+- [ ] **Replication freshness** — Snowflake vs live SCALE lag.
+
+Resolved items (moved to **Verified facts** above):
+
+- [x] Snowflake database name → **`SCI`**.
+- [x] At least one schema for SCALE tables → **`L0`** (raw replicas).
+- [x] Authentication method → **externalbrowser SSO via Entra ID**.
 
 ---
 
@@ -225,10 +314,14 @@ ops which customer SLAs use which definition.
 ### Reference SQL — split shipments in the last 30 days
 
 This query is the basis for the `SplitShipmentPage` data hook. It is
-written for Snowflake. Replace the `SCALE_DB.WMS.` prefix with the real
-schema name once confirmed.
+written for Snowflake against the `SCI.L0` raw layer (per the working
+guidelines above — Split Shipment depends on UDF fields that may not be
+preserved in `SCI.PUBLIC` views).
 
 ```sql
+-- Uses SCI.L0 (raw layer) because UDF fields like SD.UDF3 are KISS-specific
+-- raw columns. SCI.PUBLIC views may not preserve all UDFs — verify before
+-- switching.
 SELECT 
     SH.SHIPMENT_ID,
     SH.USER_DEF1                                      AS SALES_ORG,
@@ -247,10 +340,10 @@ SELECT
     CASE WHEN MIN(SC.MANIFEST_FOR_DATE)::DATE 
             != MAX(SC.MANIFEST_FOR_DATE)::DATE
          THEN 1 ELSE 0 END                            AS SAME_DAY_VIOLATION
-FROM SCALE_DB.WMS.SHIPMENT_HEADER     SH
-INNER JOIN SCALE_DB.WMS.SHIPMENT_DETAIL    SD
+FROM SCI.L0.SHIPMENT_HEADER     SH
+INNER JOIN SCI.L0.SHIPMENT_DETAIL    SD
     ON SD.INTERNAL_SHIPMENT_NUM = SH.INTERNAL_SHIPMENT_NUM
-LEFT JOIN  SCALE_DB.WMS.SHIPPING_CONTAINER SC
+LEFT JOIN  SCI.L0.SHIPPING_CONTAINER SC
     ON SC.INTERNAL_SHIPMENT_NUM = SH.INTERNAL_SHIPMENT_NUM
 WHERE SH.WAREHOUSE      = 'KDCGA1'
   AND SH.TRAILING_STATUS >= 800            -- shipped or beyond
