@@ -413,19 +413,55 @@ The foundation is **dramatically smaller than a from-zero plan** —
 most of it already exists in `server.js`. Each item below is
 explicit about what's done vs. what's needed.
 
-**Already done (no work needed):**
+#### Available from server.js (validate before reuse)
 
-- ✅ Snowflake connection layer (`getConnection`, externalbrowser SSO).
-- ✅ Connection singleton with `_connection`/`_connecting` reuse.
-- ✅ Response envelope, consistent across all 13 working endpoints.
-- ✅ Reusable SQL idioms (`LIFECYCLE_STAGE_EXPR`, `COMPANY_NAME_EXPR`).
-- ✅ Always-applied filters (`WAREHOUSE = 'KDCGA1'`,
-  `IN_DELETION = 'N'`).
-- ✅ Error handling pattern (try/catch + 500 on query errors).
-- ✅ Basic SELECT-only gate on `/api/kdc/query` (`server.js:653`).
-- ✅ Data-source toggle plumbing (state, handler, refresh, toast).
+`server.js` is a prototype. It runs and returns data, but its SQL
+correctness — domain assumptions, column choices, edge cases — has
+not been independently verified. **Do not treat it as ground truth.**
 
-**New foundation (5 items):**
+The following are *available as starting points*, each requiring
+validation before Phase 1 reuses them:
+
+| Asset | Validation owner | Risk if wrong |
+|-------|------------------|---------------|
+| Connection pattern (singleton, externalbrowser SSO) | Lower risk; widely-used Snowflake SDK pattern | Connection bugs surface in dev quickly |
+| Response envelope `{ success, data, source, table? }` | Architectural choice, not a fact claim | None — keep for consistency |
+| `LIFECYCLE_STAGE_EXPR` (9-stage CASE on TRAILING_STS) | Operations supervisor walkthrough | Flight Board stages mislabeled |
+| `COMPANY_NAME_EXPR` (sales-org → name, incl. Red 1400) | Cross-check vs `snowflake-schema.md` | Mislabel shipments |
+| `WAREHOUSE = 'KDCGA1'` always-applied | Operations manager | Miss other warehouses (current/future) |
+| `IN_DELETION = 'N'` always-applied | Operations supervisor | Wrong inclusion/exclusion policy |
+| Existing 12 working endpoints (queries) | Per endpoint, when its page is migrated | Inherited bugs propagate |
+
+Validation outcomes:
+- ✅ Confirmed → reuse the pattern as-is
+- ⚠️ Partially correct → fix `server.js` (read-only SQL edits — we may
+  modify SELECT statements; the read-only rule prohibits writes
+  *to the database*, not edits to query text)
+- ❌ Wrong → discard and rewrite, document why in the relevant sub-plan
+
+Validation is part of Phase 1 work, not a separate prerequisite.
+Each Phase 1 sub-plan validates the assumptions its SQL depends on.
+
+**New foundation (6 items, including F0 validation step):**
+
+#### F0 — Validate inherited domain assumptions
+
+Before any Phase 1 endpoint reuses a `server.js` SQL idiom or filter,
+the assumption is validated against operations or our schema doc
+(see table above). Validation work is distributed across sub-plans:
+
+- **Sub-plan 002 (Split):** validates `WAREHOUSE`, `IN_DELETION`,
+  `COMPANY_NAME_EXPR`. Does NOT depend on `LIFECYCLE_STAGE_EXPR`.
+- **Sub-plan 003 (Geo):** validates `WAREHOUSE`, `IN_DELETION`,
+  `COMPANY_NAME_EXPR`. Cause-bucket derivation is its own validation
+  (separate question, see §7c).
+- **Sub-plan 004 (Flight Board):** validates `LIFECYCLE_STAGE_EXPR`
+  most critically — Flight Board reuses 9-stage classification
+  directly. This is the highest-risk inheritance.
+
+If a validation fails, the sub-plan halts pending a `server.js` SQL
+fix or a rewrite decision. Do not ship a Phase 1 page with an
+unvalidated server.js dependency in its critical path.
 
 #### F1 — Frontend ↔ backend column-name conversion layer
 
@@ -543,6 +579,20 @@ beyond bounded params), so the regex gate is less critical there.
   candidate for the hardening plan.
 
 ### 6b. Phase 1 page work (priority order: Split → Geo → Flight)
+
+#### Phase 1 ordering — server.js dependency analysis
+
+The three pages have different levels of inherited risk from `server.js`:
+
+| Page | server.js dependency | Why |
+|------|---------------------|-----|
+| Split Shipments | LOW | New SQL written from scratch against `SCI.L0` raw tables. Reuses only `WAREHOUSE` / `IN_DELETION` filters. No `LIFECYCLE_STAGE_EXPR` involved. |
+| Geographic | LOW | New SQL with state-level aggregation. Reuses `WAREHOUSE` / `IN_DELETION` / `COMPANY_NAME_EXPR`. Cause-bucket logic is novel (not from server.js). |
+| Flight Board | **HIGH** | Extends `lifecycle-heatmap` and `stuck-shipments` patterns. Directly inherits `LIFECYCLE_STAGE_EXPR`. If the 9-stage CASE is wrong, every Flight Board metric is wrong. |
+
+This reinforces the user-chosen priority order (Split → Geo → Flight):
+the riskiest inheritance is also the last in line, so we accumulate
+validation evidence before touching it.
 
 #### Split Shipments — sub-plan `002-split-shipments-live.md`
 
@@ -681,18 +731,24 @@ beyond bounded params), so the regex gate is less critical there.
   add stage-dot derivation via `LIFECYCLE_STAGE_EXPR`, compute
   age via `DATEDIFF('HOUR', DATE_TIME_STAMP, CURRENT_TIMESTAMP())`.
 - **Risks specific to this page:**
-  1. **Breach-risk scoring formula** —
+  1. **CRITICAL — `LIFECYCLE_STAGE_EXPR` correctness:** the 9-stage CASE
+     inherited from server.js is the foundation of every Flight Board
+     metric (currentStage, ageInStage, breachRisk, flightStatus). Sub-plan
+     004 must walk through these 9 stages with an operations supervisor
+     before SQL is written. If even one stage threshold is wrong, the
+     whole page misleads.
+  2. **Breach-risk scoring formula** —
      `src/ShippingSLAApp.jsx:3674` uses a heuristic
      `Math.min(100, round(ageInStage / 24 * 100 + (cause ? 30 : 0)))`.
      Either replicate it faithfully in SQL or replace with a
      documented formula. Sub-plan `004` decides; default is
      "replicate exactly to start, document for future tuning."
-  2. **"Open order" definition** — `o.isOpen` in mock means "not
+  3. **"Open order" definition** — `o.isOpen` in mock means "not
      delivered." Confirm the SCALE-side equivalent; sketch:
      `TRAILING_STS BETWEEN 100 AND 899` (i.e., before "Closed"
      900) is closer to *not yet closed*, which differs from *not
      yet delivered*.
-  3. Per-row computation in SQL may push response size up if a
+  4. Per-row computation in SQL may push response size up if a
      date filter isn't applied — bound the result set.
 - **Validation:** For 3 consecutive days, compare the live Flight
   Board's "Breaching Now" count against the operations team's
@@ -823,6 +879,29 @@ without the answer**, and **rough cycle time**.
       bringing up server.js for the first time on a new
       developer machine. Who: IT / data platform team. Time:
       ~15 min email.
+- [ ] 9. **Validate `LIFECYCLE_STAGE_EXPR`** — does the 9-stage CASE
+       on TRAILING_STS match KDC's actual floor reality?
+       Stages to validate: '1_Pool', '2_Allocated', '3_Picking',
+       '4_InPacking', '5_PackingComplete', '6_Staging',
+       '7_Loading', '8_ShipConfirmPending', '9_Shipped'.
+       Who: operations supervisor. Time: ~30min walkthrough.
+       Blocks: sub-plan `004` (Flight Board) — **CRITICAL DEPENDENCY**.
+- [ ] 10. **Validate `WAREHOUSE = 'KDCGA1'` always-filter.**
+        Is KDCGA1 the only warehouse this dashboard should ever cover?
+        Are other warehouses planned in 2026?
+        Who: operations manager. Time: ~5min.
+        Blocks: every Phase 1 page (low risk if KDCGA1 stays sole).
+- [ ] 11. **Validate `IN_DELETION = 'N'` always-filter.**
+        Should deleted shipments ever appear on the dashboard
+        (e.g., for cancellation reason analysis)?
+        Who: operations supervisor. Time: ~5min.
+        Blocks: every Phase 1 page.
+- [ ] 12. **Cross-check `COMPANY_NAME_EXPR` in server.js against
+        `snowflake-schema.md` sales org table.**
+        Does server.js's CASE include Red (1400)? If missing, server.js
+        needs the same correction we already made in the schema doc.
+        Who: Claude Code grep. Time: ~1min.
+        Blocks: nothing critical, just consistency.
 
 ---
 
@@ -898,6 +977,11 @@ For whoever picks up the work:
   `server.js`** — do not redefine them. If you need a new shared
   expression, add it next to the existing ones (`server.js:158-172`)
   rather than inlining.
+- **Validate inherited assumptions before reusing.** `server.js` is a
+  prototype with unverified domain logic. Each sub-plan checks the
+  assumptions its SQL depends on (see §6a F0). Do not write Phase 1
+  endpoints that silently inherit `server.js` patterns without
+  validation evidence in the sub-plan.
 - **Each sub-plan re-reads this master plan + relevant reference
   docs before coding.** If a sub-plan needs to change a master-plan
   decision, **update the master plan first as a separate change**;
