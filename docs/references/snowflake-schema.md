@@ -70,10 +70,10 @@ new facts as they are discovered.
     `ITEM_UNIT_OF_MEASURE` — referenced by working endpoints in
     `server.js`, so they exist (not independently verified, but the
     endpoints are observably operational against this schema).
-- **Authentication: externalbrowser SSO via Entra ID.**
-  Confirmed via `server.js`: `authenticator: 'externalbrowser'`, no password
-  ever transits the API, the Snowflake SDK opens a browser tab on first
-  query, and the resulting session token is cached for subsequent queries.
+- **Authentication: RSA key-pair (`SNOWFLAKE_JWT`).** SUPERSEDES the
+  prior externalbrowser-SSO assumption — KDC environment does not
+  support SSO. See § Snowflake authentication below for the discovery
+  context, implementation pattern, and required env vars.
 - **`SCI.PUBLIC.SHIPMENT_HEADER` is a Snowflake Dynamic Table**
   (user-confirmed). It is a managed materialized view over upstream
   data — Snowflake auto-refreshes it on a defined cadence. The exact
@@ -183,6 +183,59 @@ new facts as they are discovered.
   ("Ship Confirm Pending") is per-order, not per-container — so it
   cannot replace this for Type 2 detection. Sub-plan `002` verifies
   in the Snowflake console and supersedes the master-plan sketch.
+
+### Snowflake authentication (CONFIRMED 2026-04-30)
+
+KDC Snowflake account requires RSA key-pair authentication
+(`SNOWFLAKE_JWT`), NOT externalbrowser SSO.
+
+**Discovery context:** The colleague's prototype (forked
+2026-04-29) hardcoded `authenticator: 'externalbrowser'` in
+`buildConnection`. Upstream main (verified via
+`git show upstream/main:server.js | grep` on 2026-04-30) does
+NOT contain any RSA / JWT / PKCS8 code — the colleague developed
+the prototype in an SSO-enabled environment, but the user's
+production environment requires RSA.
+
+**Implementation pattern (snowflake-sdk standard):**
+
+```javascript
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+
+const privateKeyPem = fs.readFileSync(
+  process.env.SNOWFLAKE_PRIVATE_KEY_PATH,
+  'utf8'
+);
+const privateKeyObject = crypto.createPrivateKey({
+  key: privateKeyPem,
+  format: 'pem',
+  passphrase: process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE,
+});
+const privateKey = privateKeyObject.export({
+  format: 'pem',
+  type: 'pkcs8',
+});
+
+snowflake.createConnection({
+  account, username,
+  authenticator: 'SNOWFLAKE_JWT',
+  privateKey,
+  // ... other options
+});
+```
+
+**Required env vars:**
+- `SNOWFLAKE_PRIVATE_KEY_PATH` — absolute path to .p8 file
+- `SNOWFLAKE_PRIVATE_KEY_PASSPHRASE` — optional (Python
+  reference uses `password=None`; KDC standard appears to be
+  unencrypted keys for service accounts)
+
+**Trust hierarchy reinforcement:** This is the third instance
+where colleague-prototype assumptions failed in user environment
+(after channel filter and split detection logic). Confirms
+master plan §6a F0 validation policy: "starting point, validate
+before reuse."
 
 ### Split Shipment SQL — operational reference (user-confirmed 2026-04-29)
 

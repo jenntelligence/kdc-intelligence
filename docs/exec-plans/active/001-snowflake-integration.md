@@ -146,6 +146,14 @@ Phase 1 works around them; the long-term fix is a separate plan:
   not documented, drill-down column names not captured. Treat skill
   as "starting point, supplement with operational facts" per the
   Trust hierarchy in `snowflake-schema.md`.
+- Upstream prototype assumptions as a category — colleague's
+  prototype was developed in a different environment than the
+  user's. Discovery on 2026-04-30: SSO authentication hardcoded
+  in upstream is not viable in user environment (RSA required).
+  Combined with earlier discoveries (channel filter, split
+  detection logic, drill-down columns), this confirms the plan's
+  §6a F0 policy of treating prototype as "starting point, validate
+  before reuse" rather than ground truth.
 
 ---
 
@@ -1151,6 +1159,14 @@ without the answer**, and **rough cycle time**.
         Time: ~15min.
         Blocks: sub-plan 002 — full drill-down feature parity with
         mock UI.
+- [x] ~~19. **Snowflake authentication method.**~~
+        **[CLOSED 2026-04-30]** KDC environment requires RSA
+        key-pair (`SNOWFLAKE_JWT`), NOT externalbrowser SSO.
+        Upstream prototype hardcoded SSO; user environment fails
+        SSO with "user differs from IDP user" error. server.js
+        `buildConnection` updated to RSA pattern in PR0. See
+        `snowflake-schema.md` Verified facts § Snowflake
+        authentication.
 
 ---
 

@@ -9,14 +9,19 @@
  *        V_QC_EVENT, V_WAVE, V_CARRIER, V_CONSOL_LOCATION
  *        VOP_*, VPROD_*, VEXC_* (operational, productivity, exception layers)
  *
- * Auth: externalbrowser SSO — on first query the Snowflake SDK opens
- * a browser tab for Entra ID login. Session is reused after that.
+ * Auth: SNOWFLAKE_JWT (RSA key-pair). KDC environment requires an
+ * RSA private key — externalbrowser SSO is not supported here.
+ * Set SNOWFLAKE_PRIVATE_KEY_PATH (and optional
+ * SNOWFLAKE_PRIVATE_KEY_PASSPHRASE) in .env. See
+ * docs/references/snowflake-schema.md § Snowflake authentication.
  *
  * Usage:
  *   node server.js          # starts on API_PORT (default 3001)
  *   npm run server           # same, via package.json script
  */
 import 'dotenv/config';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
 import express from 'express';
 import cors from 'cors';
 import snowflake from 'snowflake-sdk';
@@ -42,14 +47,49 @@ function buildConnection(overrides = {}) {
   const schema    = overrides.schema    || process.env.SNOWFLAKE_SCHEMA;
   const role      = overrides.role      || process.env.SNOWFLAKE_ROLE || undefined;
 
+  // RSA key-pair authentication (SNOWFLAKE_JWT)
+  // KDC environment requires RSA key — externalbrowser SSO is not
+  // supported. The colleague's upstream prototype hardcoded SSO,
+  // verified via grep on 2026-04-30 (no RSA code in upstream main).
+  const keyPath = overrides.privateKeyPath
+    || process.env.SNOWFLAKE_PRIVATE_KEY_PATH;
+  const keyPassphrase = overrides.privateKeyPassphrase
+    || process.env.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE
+    || undefined;
+
   if (!account || !username) {
     throw new Error('Missing SNOWFLAKE_ACCOUNT or SNOWFLAKE_USERNAME');
+  }
+  if (!keyPath) {
+    throw new Error(
+      'Missing SNOWFLAKE_PRIVATE_KEY_PATH — RSA key-pair required for KDC environment'
+    );
+  }
+
+  // Read PEM file and normalize to PKCS#8 format (snowflake-sdk requirement)
+  let privateKey;
+  try {
+    const privateKeyPem = fs.readFileSync(keyPath, 'utf8');
+    const privateKeyObject = crypto.createPrivateKey({
+      key: privateKeyPem,
+      format: 'pem',
+      passphrase: keyPassphrase,
+    });
+    privateKey = privateKeyObject.export({
+      format: 'pem',
+      type: 'pkcs8',
+    });
+  } catch (err) {
+    throw new Error(
+      `Failed to load Snowflake private key from ${keyPath}: ${err.message}`
+    );
   }
 
   return snowflake.createConnection({
     account,
     username,
-    authenticator: 'externalbrowser',
+    authenticator: 'SNOWFLAKE_JWT',
+    privateKey,
     warehouse,
     database,
     schema,
@@ -791,6 +831,7 @@ app.listen(PORT, () => {
   console.log(`  http://localhost:${PORT}`);
   console.log(`  Snowflake: ${process.env.SNOWFLAKE_ACCOUNT || 'not configured'}`);
   console.log(`  Database:  ${process.env.SNOWFLAKE_DATABASE || 'SCI'}.${process.env.SNOWFLAKE_SCHEMA || 'PUBLIC'}`);
+  console.log(`  Auth:      SNOWFLAKE_JWT (RSA key-pair)`);
   console.log(`  Warehouse: KDCGA1 (KISS Savannah, GA)`);
   console.log(`\n  ── SCALE Raw Table Endpoints ──`);
   console.log(`  GET  /api/scale/overview-kpis        SHIPMENT_HEADER (90d KPIs)`);
