@@ -30,6 +30,32 @@ file over the skill when entries differ.
 
 ---
 
+## Trust hierarchy
+
+When facts conflict between sources, the order of trust is:
+
+1. **User-confirmed operational fact (highest)** — user has run a
+   query against actual Snowflake or has direct domain knowledge.
+   Examples: 2026-04-29 split shipment SQL, IN_DELETION 'N'-only
+   verification.
+2. **`snowflake-schema.md` Verified facts** — captured here only
+   after user or external confirmation.
+3. **manhattan-scale-config skill content** — extensive but has gaps.
+   On 2026-04-29 grep found the UDF mapping table missing
+   `1400=Red` (which is confirmed elsewhere). Use as starting
+   point but not ground truth.
+4. **`server.js` prototype patterns** — colleague's prototype, never
+   independently validated. F0 in master plan §6a treats it as
+   "starting point, validate before reuse."
+5. **Plan SQL sketches (lowest)** — by definition speculative until
+   tested against actual Snowflake.
+
+When generating new SQL: anchor to (1) and (2). Cross-check (3) and
+(4) only as supplementary signals. Always update (1) and (2) with
+new facts as they are discovered.
+
+---
+
 ## DB / schema paths — verified vs unverified
 
 ### Verified facts (confirmed via code or directly with the user)
@@ -158,6 +184,220 @@ file over the skill when entries differ.
   cannot replace this for Type 2 detection. Sub-plan `002` verifies
   in the Snowflake console and supersedes the master-plan sketch.
 
+### Split Shipment SQL — operational reference (user-confirmed 2026-04-29)
+
+User wrote a working split shipment SQL against actual Snowflake data.
+The patterns below are confirmed operational facts:
+
+#### Channel filter
+
+```sql
+WHERE sc.company IN ('Ivy', 'Red', 'Vivace')
+  AND sh.carrier = 'UPS'
+```
+
+`sc.company` is the canonical channel column on `SHIPPING_CONTAINER`
+(NOT `customer_group` on shipment header, which the plan incorrectly
+guessed earlier). The carrier filter narrows to UPS — the only carrier
+in scope for Phase 1 split shipment compliance.
+
+#### Cross-DB join — KDB.PBI_SF.SAP_CUSTOMER_MASTER columns
+
+Beyond the previously-confirmed `SHIPTOPARTY_KEY` (join key) and `NAME`
+(customer name), the customer master table provides geographic data:
+
+| Column | Purpose |
+|--------|---------|
+| `SHIPTOPARTY_KEY` | Join key — matches `SCI.L0.SHIPMENT_HEADER.SHIP_TO` |
+| `NAME` | Customer display name |
+| `REGION` | State (US 2-letter code) — used for Geographic page heat map |
+| `city` | City name |
+| `postalcode` | ZIP code |
+
+This means **Geographic page (sub-plan 003) ALSO depends on the
+SCI ↔ KDB cross-DB join**, not just Split Shipments. Both pages share
+the same join pattern.
+
+#### Timezone handling
+
+All Snowflake timestamps are stored in UTC. KISS operates in
+Savannah, GA (Eastern Time). Convert at the SQL level for any
+display, comparison, or grouping that depends on local-day
+boundaries:
+
+```sql
+CONVERT_TIMEZONE('UTC', 'America/New_York', sc.date_time_stamp)
+```
+
+This supersedes the earlier "timezone irrelevant under ::DATE cast"
+note. The cast worked for purely date-equality checks, but
+operational queries comparing hour-level timing (Type 2/3 split
+detection) must convert to local time first.
+
+#### WORK_INSTRUCTION zone source
+
+Pick zone is stored in `WORK_INSTRUCTION.user_def1` (KISS-specific
+UDF customization), NOT a `ZONE` column. The base SCALE column
+`from_work_zone` (per Manhattan skill EX20 reference) carries values
+like `'W-AS'` (Autostore), but KISS uses `user_def1` as the live zone
+source for the operational query.
+
+`instruction_type = 'header'` filter is required — without it the
+query duplicates rows for sub-instructions.
+
+#### NEW TABLE: SCI.L0.IA_WORK_INSTRUCTION
+
+User SQL UNIONs `WORK_INSTRUCTION` with a previously undocumented
+table:
+
+```sql
+SELECT container_id, work_unit, user_def1 AS pick_zone, ...
+FROM sci.l0.work_instruction
+WHERE company IN ('Ivy', 'Red', 'Vivace') AND instruction_type = 'header'
+UNION ALL
+SELECT container_id, work_unit, user_def1 AS pick_zone, ...
+FROM sci.l0.ia_work_instruction
+WHERE company IN ('Ivy', 'Red', 'Vivace') AND instruction_type = 'header'
+```
+
+`ia_work_instruction` likely stands for "Inventory Allocation"
+work instruction (KISS-specific extension), or possibly a separate
+flow split. Skill search on 2026-04-29 found no documentation for
+this table. Sub-plan 002 must `DESCRIBE TABLE` to confirm column
+list and verify the UNION semantics with operations.
+
+#### Type 1 — Zone-level split detection (corrected)
+
+Replaces the earlier `LEFT(SC.original_pick_loc, 2)` sketch:
+
+```sql
+COUNT(DISTINCT pick_zone) > 1
+-- where pick_zone comes from the WI/IA_WI UNION above
+-- 1 → not split by zone; 2+ → zone-level split
+```
+
+#### Type 2 — Container-level split detection (corrected)
+
+Replaces the earlier 4-hour threshold sketch:
+
+```sql
+container_count > 1
+AND first_status_700_time IS NOT NULL
+AND last_status_700_time IS NOT NULL
+AND first_status_700_time <> last_status_700_time
+```
+
+**Critical correction:** there is NO hour threshold. ANY difference
+in `container_status >= '700'` timestamp between sibling containers
+counts as Container-level split. The earlier "4 hour" placeholder in
+the plan was wrong — operations defines split as event-time
+difference, not buffered tolerance.
+
+This also closes §7c #15 (threshold tuning) — the question itself
+was based on a wrong assumption.
+
+#### Type 3 — Manifest-level split detection (corrected)
+
+Replaces the earlier simple `MANIFEST_FOR_DATE` distinct count:
+
+```sql
+container_count > 1
+AND (
+       manifest_count > 1
+    OR first_manifest_close_time <> last_manifest_close_time
+    OR (
+           status_700_container_count > 0
+       AND status_700_container_count < container_count   -- ← silent killer
+       )
+    )
+```
+
+The third OR branch is the **true "silent killer" signal** — when
+status 700 fires for some sibling containers but not all. The plan's
+earlier `MANIFEST_FOR_DATE::DATE` count missed this.
+
+#### Output shape — flat container rows (UI requires this)
+
+User SQL grouped to shipment level (lost container detail). The
+correct shape for the dashboard preserves container rows so the
+UI's drill-down (clicking an order to see its containers) has
+data without a second API call:
+
+```sql
+-- Replace shipment_summary GROUP BY with window functions
+SELECT
+    -- container-level fields (one row per container)
+    container_id,
+    container_type,
+    container_status,
+    tracking_number,
+    manifest_id,
+    pick_zone,
+    container_status_time,
+    manifest_close_time,
+    
+    -- order-level fields (same value across sibling rows; window aggregations)
+    shipment_id,
+    cust_name,
+    company AS channel,
+    cust_state,
+    cust_city,
+    cust_zipcode,
+    
+    COUNT(DISTINCT container_id) OVER (PARTITION BY shipment_id) AS container_count,
+    COUNT(DISTINCT pick_zone)    OVER (PARTITION BY shipment_id) AS pick_zone_count,
+    COUNT(DISTINCT manifest_id)  OVER (PARTITION BY shipment_id) AS manifest_count,
+    -- ... etc
+
+    -- 3-type flags computed from window aggregations
+    CASE WHEN pick_zone_count > 1 THEN 1 ELSE 0 END AS zone_level_split_flag,
+    -- ... etc
+
+    -- Primary type with priority order
+    CASE
+        WHEN manifest_level_split_flag = 1 THEN '03 Manifest-level split'
+        WHEN container_level_split_flag = 1 THEN '02 Container-level split'
+        WHEN zone_level_split_flag = 1 THEN '01 Zone-level split'
+        ELSE 'No split'
+    END AS primary_split_type
+FROM ...
+WHERE zone_level_split_flag = 1
+   OR container_level_split_flag = 1
+   OR manifest_level_split_flag = 1
+ORDER BY shipment_id, container_id
+```
+
+Frontend groups by `shipment_id` for the table main rows; each
+row's `containers` array (from sibling rows) populates the
+drill-down. ~62 split orders × ~3 containers ≈ ~186 rows ≈ 100KB
+response — well within reasonable bounds.
+
+#### Drill-down columns — UI requirement, source to verify
+
+The UI's container drill-down displays:
+- Last scan location ("Local Delivery Facility", "Atlanta GA Sort")
+- Item count + weight ("1 items · 14.8 lb", "4 items · 6.5 lb")
+- Expected vs actual delivery dates ("Exp: Apr 23 → Apr 21")
+- Tracking number ✅ (already in user SQL)
+- Container status ✅ (already in user SQL)
+
+The user SQL does not yet pull these; they exist in SCALE. Likely
+column / source candidates:
+
+| UI display | Likely SCALE source |
+|-----------|---------------------|
+| Tracking number | `SC.tracking_number` (confirmed) |
+| Status (DELIVERED) | `SC.status` (confirmed; UI 'DELIVERED' likely maps to status >= some threshold) |
+| Last scan location | `PROCESS_HISTORY` last `location` event for container_id, OR a SC field |
+| Item count | `SHIPMENT_DETAIL` line count joined to container, OR `SC` UDF |
+| Weight | `SHIPPING_CONTAINER` weight column (name TBD — `weight`? `gross_weight`?) |
+| Expected delivery | `SC` or `SH` UDF — TBD |
+| Actual delivery | `SC.status_time` filtered to delivery status |
+
+Sub-plan 002 resolves exact column names via `DESCRIBE TABLE
+SCI.L0.SHIPPING_CONTAINER` and inspects PROCESS_HISTORY in PR1
+(exploration). Logged as new §7c items #17, #18 below.
+
 ### Unverified — TODO: confirm in Snowflake console
 
 - **Other schemas in `SCI`** — `L1`, `L2`, `RAW`, `STAGING`, etc. are
@@ -264,29 +504,53 @@ from a new endpoint:
       **[CLOSED 2026-04-29]** ~10 minutes (MSSQL → Snowflake on
       10-min cycle). See Verified facts above.
 - [x] ~~**WORK_INSTRUCTION zone codes**~~
-      **[PARTIALLY CLOSED 2026-04-29]** No `WI.ZONE` column in
+      **[CLOSED 2026-04-29]** No `WI.ZONE` column in
       server.js. Floor-area zones derived from
       `LEFT(SC.original_pick_loc, 2)` prefix (`AS`/`PL`/`PR`/`PS`).
       See Verified facts above for full pattern. Whether WI has its
       own zone column TBD via `DESCRIBE TABLE` during sub-plan
       `002`.
+
+      **Update 2026-04-29:** User SQL confirms zone source is
+      `WI.user_def1` (KISS UDF customization), with UNION over
+      `ia_work_instruction`. See Verified facts above. WI item closed
+      as "user-confirmed pattern"; ia_work_instruction tracked as new
+      discovery item below.
 - [x] ~~**SHIPPING_CONTAINER ship-confirm column**~~
-      **[PARTIALLY CLOSED 2026-04-29]** No `SHIP_CONFIRM_DATE_TIME`
+      **[CLOSED 2026-04-29]** No `SHIP_CONFIRM_DATE_TIME`
       column. `SC.MANIFEST_CLOSE_DATE_TIME` is the documented
       per-container ship-event signal — see Verified facts above.
       Sub-plan `002` verifies in Snowflake console.
+
+      **Update 2026-04-29:** User SQL uses
+      `SC.date_time_stamp WHERE container_status >= '700'` for Container-level
+      split detection (NOT MANIFEST_CLOSE_DATE_TIME as earlier suggested).
+      The operational signal is the timestamp of the status-700 transition
+      on the container row, available directly via SC.date_time_stamp +
+      status filter. CLOSED.
 - [ ] **PROCESS_HISTORY status 700 transition pattern** — exact
       column for status (likely `TRAILING_STATUS` or similar) and
       timestamp granularity. Needed for Manifest-level split
       detection.
-- [ ] **`customer_group` column location** — `sales_org` confirmed
-      as `SH.USER_DEF1` (verified 2026-04-29 via grep — used in
-      `COMPANY_NAME_EXPR` and 5 other endpoints). `customer_group`
-      column location remains TBD: Claude Code grep on 2026-04-29
-      found no reference in server.js or docs/. Likely (a) an
-      undocumented `USER_DEFx` on `SH`, (b) a column on
-      `KDB.PBI_SF.SAP_CUSTOMER_MASTER`, or (c) derived. Resolve via
-      direct `DESCRIBE TABLE` during sub-plan `002` bringup.
+- [x] ~~**`customer_group` column location**~~
+      **[CLOSED 2026-04-29]** Channel filter does not use a
+      customer_group column. User SQL filters via
+      `sc.company IN ('Ivy', 'Red', 'Vivace')` — the canonical
+      channel column on `SHIPPING_CONTAINER`. Plan's earlier
+      customer_group/sales_org guess was incorrect. See Verified
+      facts above (Split Shipment SQL — operational reference).
+- [ ] **`SCI.L0.IA_WORK_INSTRUCTION` semantics** — confirmed table
+      exists (used in user's split SQL), but its role and difference
+      from `WORK_INSTRUCTION` undocumented. Likely "Inventory
+      Allocation" work flow (KISS-specific extension). Resolve via
+      `DESCRIBE TABLE` + operations conversation during sub-plan 002.
+- [ ] **Drill-down column names — items / weight / last location /
+      expected delivery date.** UI requires these for the container
+      drill-down panel. User SQL does not yet retrieve them. Most
+      likely: `SC.weight` (or similar), `SHIPMENT_DETAIL` join for
+      item count, `PROCESS_HISTORY` for last scan location. Resolve
+      via `DESCRIBE TABLE SCI.L0.SHIPPING_CONTAINER` +
+      `PROCESS_HISTORY` event inspection during sub-plan 002 PR1.
 
 Resolved items (moved to **Verified facts** above):
 
