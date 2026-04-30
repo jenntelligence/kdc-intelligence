@@ -154,6 +154,14 @@ Phase 1 works around them; the long-term fix is a separate plan:
   detection logic, drill-down columns), this confirms the plan's
   §6a F0 policy of treating prototype as "starting point, validate
   before reuse" rather than ground truth.
+- Diagnostic-signal interpretation discipline — the schema=null
+  finding in `/api/snowflake/test` (2026-04-29) was a yellow flag
+  for role-permission gap that we initially dismissed as benign.
+  Treat schema/warehouse/role being null in connection-test
+  responses as a signal to verify role access, not a default
+  state to be ignored. Master plan §6a F0 validation gate now
+  implicitly covers this; explicit guidance lives in
+  `snowflake-schema.md` § Snowflake role permissions.
 
 ---
 
@@ -679,7 +687,7 @@ validation evidence before touching it.
     - `weight` — UI display (column name TBD per §7c #18)
   - `SCI.L0.WORK_INSTRUCTION` (WI) — pick work. **Pick zone source
     is `user_def1` (KISS UDF customization), with `instruction_type
-    = 'header'` filter required.**
+    = 'Header'` filter required (Pascal Case — see §7c #20).**
   - `SCI.L0.IA_WORK_INSTRUCTION` (IA_WI) — second work source,
     UNION'd with WI for full pick zone coverage. Likely "Inventory
     Allocation" work flow (KISS-specific). Logged §7c #17.
@@ -705,7 +713,7 @@ validation evidence before touching it.
 ```sql
 -- Window function over WI/IA_WI UNION result joined to SC
 COUNT(DISTINCT pick_zone) OVER (PARTITION BY shipment_id) > 1
--- pick_zone = WI.user_def1 (KISS UDF), filtered to instruction_type='header'
+-- pick_zone = WI.user_def1 (KISS UDF), filtered to instruction_type='Header'
 ```
 
   **Type 2 — Container-level split:**
@@ -768,7 +776,8 @@ AND (
      `sh.carrier = 'UPS'`, `sc.date_time_stamp >= '2026-01-01'`.
      **Omit** `IN_DELETION` filter per F0 validation.
   2. `work` CTE: UNION ALL of `work_instruction` and
-     `ia_work_instruction` with `instruction_type='header'` filter.
+     `ia_work_instruction` with `instruction_type='Header'` filter
+     (Pascal Case — see §7c #20).
   3. `container_with_zone` CTE: LEFT JOIN base ↔ work on container_id
      OR work_unit (user SQL pattern).
   4. `flagged_containers` CTE: Window aggregations
@@ -1133,32 +1142,38 @@ without the answer**, and **rough cycle time**.
         channel column on `SHIPPING_CONTAINER`. Plan's earlier
         customer_group/sales_org guess was incorrect. See
         `snowflake-schema.md` Verified facts.
-- [ ] 17. **`SCI.L0.IA_WORK_INSTRUCTION` semantics.** Confirmed
-        table exists (user SQL UNIONs it with `WORK_INSTRUCTION`),
-        but its role undocumented. Likely "Inventory Allocation"
-        work flow (KISS-specific extension). Resolve via
-        `DESCRIBE TABLE` during sub-plan 002 PR1, plus operations
-        conversation if column structure unclear.
-        Who: data team OR Snowflake DESCRIBE + operations review.
-        Time: ~10min via DESCRIBE; up to 30min if operations
-        clarification needed.
-        Blocks: sub-plan 002 — Type 1 detection accuracy depends
-        on UNION semantics being correct.
-- [ ] 18. **Drill-down column names — items, weight, last location,
-        expected delivery date.** UI displays these in the container
-        drill-down panel. User SQL does not yet retrieve them.
-        Most likely sources:
-        - `SC.weight` or `SC.gross_weight` (column name TBD)
-        - `SHIPMENT_DETAIL` join for item count
-        - `PROCESS_HISTORY` last scan event for "Local Delivery
-          Facility"-style strings
-        - SC or SH UDFs for expected delivery date
-        Resolve via `DESCRIBE TABLE SCI.L0.SHIPPING_CONTAINER` +
-        `PROCESS_HISTORY` sample query during sub-plan 002 PR1.
-        Who: Snowflake DESCRIBE + sample queries.
-        Time: ~15min.
-        Blocks: sub-plan 002 — full drill-down feature parity with
-        mock UI.
+- [~] ~~17. **`SCI.L0.IA_WORK_INSTRUCTION` semantics.**~~
+        **[PARTIALLY CLOSED 2026-04-30]** PR1 explore endpoint
+        (commit `e9ffa79`) confirmed table exists with 106
+        columns; structure consistent with SCALE work-instruction
+        schema. Sample rows verified via case-sensitivity fix
+        (`instruction_type = 'Header'` Pascal Case, see
+        `snowflake-schema.md` § Snowflake string case-sensitivity).
+        **Remaining uncertainty:** which column is the live pick
+        zone (USER_DEF1 vs TO_WORK_ZONE / FROM_WORK_ZONE /
+        LOCATING_ZONE / ALLOCATION_ZONE), and whether
+        IA_WI.COMPANY domain matches SC.COMPANY ('Ivy'/'Red'/
+        'Vivace') exactly. Resolved via PR3 SQL test against
+        actual rows — sub-plan 002 §7 open question B tracks this.
+- [~] ~~18. **Drill-down column names.**~~
+        **[MOSTLY CLOSED 2026-04-30]** PR1 explore endpoint
+        (commit `e9ffa79`) confirmed:
+        - Weight: `SC.WEIGHT` (FLOAT) + `SC.WEIGHT_UM` (TEXT, 'LB')
+        - Dimensions: `SC.WIDTH/HEIGHT/LENGTH` (FLOAT each) +
+          `SC.DIMENSION_UM`
+        - Expected delivery: `SC.PLANNED_DELIVERY_DATE_TIME`
+          (TIMESTAMP_NTZ)
+        - Tracking: `SC.TRACKING_NUMBER` (already known)
+        - Manifest close: `SC.MANIFEST_CLOSE_DATE_TIME` (already
+          known)
+        See `snowflake-schema.md` § PR1 exploration findings for
+        full column inventory.
+        **Remaining open:** `last-scan-location` ("Local Delivery
+        Facility" style strings) — PROCESS_HISTORY samples showed
+        only internal SCALE process events, not carrier scan
+        events. Likely sourced from carrier API outside SCI;
+        defer to PR4 UI work. UI may need to omit this field for
+        live mode initially.
 - [x] ~~19. **Snowflake authentication method.**~~
         **[CLOSED 2026-04-30]** KDC environment requires RSA
         key-pair (`SNOWFLAKE_JWT`), NOT externalbrowser SSO.
@@ -1167,6 +1182,24 @@ without the answer**, and **rough cycle time**.
         `buildConnection` updated to RSA pattern in PR0. See
         `snowflake-schema.md` Verified facts § Snowflake
         authentication.
+- [x] ~~20. **Snowflake string case-sensitivity rule.**~~
+        **[CLOSED 2026-04-30]** Snowflake string equality is
+        case-sensitive by default. SCALE table enum-like columns
+        use Pascal Case ('Header', 'Ivy', 'Box'). User reference
+        SQL's `instruction_type = 'header'` (lowercase) returned
+        0 rows; fix is `'Header'`. New verified fact in
+        `snowflake-schema.md`. Schema doc § Split Shipment SQL —
+        operational reference updated with corrected SQL. Trust
+        hierarchy: 4th confirmed prototype-assumption failure
+        in user environment.
+- [x] ~~21. **Snowflake role permission for SCI.L0.**~~
+        **[CLOSED 2026-04-30]** `CDM_TEAM` role lacks L0 access;
+        `INTELLOPS` role has it. New `.env` uses `INTELLOPS`.
+        `current_schema()` returning null in
+        `/api/snowflake/test` was the diagnostic signal we
+        initially dismissed (master plan note 2026-04-29). New
+        verified fact in `snowflake-schema.md` § Snowflake role
+        permissions captures the diagnostic pattern for future.
 
 ---
 

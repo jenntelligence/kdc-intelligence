@@ -237,6 +237,157 @@ where colleague-prototype assumptions failed in user environment
 master plan §6a F0 validation policy: "starting point, validate
 before reuse."
 
+### Snowflake string case-sensitivity (CONFIRMED 2026-04-30)
+
+Snowflake string equality is case-sensitive by default. SCALE table
+data uses Pascal Case for type/status enum-like columns:
+
+| Column | Value (verified) |
+|--------|------------------|
+| `WORK_INSTRUCTION.instruction_type` | `'Header'` |
+| `IA_WORK_INSTRUCTION.instruction_type` | `'Header'` |
+| `SHIPPING_CONTAINER.company` | `'Ivy'`, `'Red'`, `'Vivace'` |
+
+**Discovery context:** PR1 explore endpoint initially used `'header'`
+(lowercase) and returned 0 rows. User verified via Snowflake console
+that `'Header'` (Pascal Case) matches actual data. The earlier
+"sampleRows: 0" result from `/api/scale/explore-ia-wi` was caused
+by this case mismatch, not by missing data or wrong COMPANY domain.
+
+**Implementation guidance:** When writing SQL against SCALE tables,
+match observed case exactly OR use `lower()` / `upper()` for explicit
+case-insensitive comparison. The schema doc's reference SQL example
+should use `'Header'` (matching observed data) rather than wrapping
+in `lower()` since Pascal Case is the ground truth.
+
+**Trust hierarchy reinforcement:** This is the fourth confirmed
+instance of an assumption failing in the user environment (after
+channel filter, split detection logic, authentication method, and
+now string case). The §6a F0 "validate before reuse" policy is
+the right defense against silent data-format assumptions in
+prototype SQL.
+
+### Snowflake role permissions for SCI.L0 (CONFIRMED 2026-04-30)
+
+`INTELLOPS` role has SELECT permission on `SCI.L0.*` tables.
+`CDM_TEAM` role does NOT — only PUBLIC schema visible to that role.
+
+**Discovery context:** Initial Snowflake account used `CDM_TEAM`
+role; PR1 explore endpoints all returned "Schema 'SCI.L0' does not
+exist or not authorized" or "Object 'SCI.L0.X' does not exist or
+not authorized". User obtained new account with `INTELLOPS` role
+(2026-04-30), and the same endpoints returned full column lists
++ sample rows.
+
+**`/api/snowflake/test` schema field as diagnostic signal:**
+
+| Role | `current_schema()` | L0 access |
+|------|---------------------|-----------|
+| `CDM_TEAM` | `null` | NO |
+| `INTELLOPS` | `'L0'` | YES |
+
+The schema field returning `null` is a meaningful signal — it means
+the role's default schema is not set, which often correlates with
+schema-level permission gaps. Future debugging: treat `schema: null`
+in `/api/snowflake/test` response as a yellow flag, not a benign
+default.
+
+**Implementation:** `.env` should set `SNOWFLAKE_ROLE=INTELLOPS`
+for any work against `SCI.L0` tables. Existing 13 server.js
+endpoints querying `SCI.PUBLIC.*` are role-agnostic (PUBLIC schema
+generally accessible).
+
+### PR1 exploration findings (CONFIRMED 2026-04-30)
+
+Three `/api/scale/explore-*` endpoints (commit `e9ffa79`) confirmed
+column structures for tables referenced by sub-plan 002. Findings:
+
+#### `SCI.L0.SHIPPING_CONTAINER` — drill-down columns
+
+97 columns total. UI drill-down panel needs:
+
+| UI display | Column | Type | Sample value |
+|-----------|--------|------|--------------|
+| Weight | `WEIGHT` | FLOAT | `2.64` |
+| Weight unit | `WEIGHT_UM` | TEXT | `'LB'` |
+| Dimensions | `WIDTH` / `HEIGHT` / `LENGTH` | FLOAT | `8.7` / `5.7` / `13.0` |
+| Dimension unit | `DIMENSION_UM` | TEXT | `'IN'` |
+| Volume | `VOLUME` / `VOLUME_UM` | FLOAT / TEXT | (varies) |
+| Expected delivery | `PLANNED_DELIVERY_DATE_TIME` | TIMESTAMP_NTZ | (null in pre-manifest stage) |
+| Manifest close | `MANIFEST_CLOSE_DATE_TIME` | TIMESTAMP_NTZ | (per existing fact) |
+| Tracking number | `TRACKING_NUMBER` | TEXT | (null until manifest stage) |
+
+**NOT** `gross_weight` — column is just `WEIGHT`. NOT `dimensions`
+single column — three separate `WIDTH`/`HEIGHT`/`LENGTH` fields.
+
+**KISS UDF mappings (SHIPPING_CONTAINER):**
+
+| Column | Type | KISS usage (verified via PR1 sample) |
+|--------|------|--------------------------------------|
+| `USER_DEF1` | TEXT | Order type label (e.g., `'Intercompany PO'`) |
+| `USER_DEF2` | TEXT | Container number (matches `PARENT_CONTAINER_ID`) |
+| `USER_DEF4` | TEXT | Sales org code (`'1100'`=Ivy, `'1400'`=Red, `'1900'`=Vivace) |
+| `USER_DEF5` | TEXT | Weight value (redundant copy of `WEIGHT`) |
+
+(Note: `USER_DEF4` confirmed sales org code; superesedes earlier
+guess that the column might be elsewhere. The 1400=Red mapping
+that the manhattan-scale-config skill omits is now verified here.)
+
+**All `SHIPPING_CONTAINER` timestamps are TIMESTAMP_NTZ** (no
+timezone info stored). UTC assumption + `CONVERT_TIMEZONE('UTC',
+'America/New_York', ...)` required for any local-time display
+or comparison.
+
+#### `SCI.L0.IA_WORK_INSTRUCTION` — partial findings
+
+106 columns total. Schema acquired via PR1 explore endpoint;
+sample rows obtained after fixing case-sensitivity (see § Snowflake
+string case-sensitivity above) — `instruction_type = 'Header'`.
+
+**Partial close — uncertainty remaining:**
+- Multiple zone-related columns exist: `TO_WORK_ZONE`,
+  `FROM_WORK_ZONE`, `LOCATING_ZONE`, `ALLOCATION_ZONE`. Schema
+  doc's prior "Pick zone is `WI.user_def1`" fact applies to
+  `WORK_INSTRUCTION` — for `IA_WORK_INSTRUCTION` we observe both
+  `USER_DEF1` AND named zone columns. Sub-plan 002 PR3 must
+  determine which column is the live zone source via SQL test
+  against actual rows.
+- `IA_WORK_INSTRUCTION.COMPANY` domain values: assumed `'Ivy'` /
+  `'Red'` / `'Vivace'` matching `SHIPPING_CONTAINER.company`,
+  but not directly verified (sample rows from `lower()` query
+  exist; the case-sensitive plus correct-domain query is the
+  same one user verified — so the assumption appears to hold).
+
+PR3 SQL writing must validate UNION ALL semantics: that the same
+`COMPANY` and `instruction_type='Header'` filter produces meaningful
+rows in both `WORK_INSTRUCTION` AND `IA_WORK_INSTRUCTION`.
+
+#### `SCI.L0.PROCESS_HISTORY` — last-scan-location investigation
+
+25 columns total. Sample 10 rows showed only replenishment events
+(PROCESS=`'250'`, ACTION=`'190'` style codes); no shipping/scan
+events captured. Implication:
+
+- "Last scan location" for the UI drill-down may NOT be sourced
+  from PROCESS_HISTORY — PH appears to be internal SCALE process
+  log, not carrier-side tracking event log.
+- UPS / carrier scan events (e.g., `'Local Delivery Facility'`,
+  `'Atlanta GA Sort'`) are likely from a separate data source
+  (carrier API / EDI / outside SCI database).
+
+PR3 will not pull last-scan-location until source is confirmed.
+Drill-down panel may need to omit that field for live mode, or
+fall back to a SCALE-internal alternative (e.g., latest container
+status_time + container.location). Logged as remaining open item;
+see master plan §7c #18 update.
+
+**Related observation — PROCESS_HISTORY identifier columns:**
+`IDENTIFIER1`-`IDENTIFIER4` are `key:value` formatted strings
+(e.g., `'Wave Number:240030'`, `'Location:AS'`). For ship-confirm
+events (PROCESS code TBD), the key:value pattern likely encodes
+container_id and shipment_id. Free-text parsing required for joins.
+This is a larger discovery effort tracked separately.
+
 ### Split Shipment SQL — operational reference (user-confirmed 2026-04-29)
 
 User wrote a working split shipment SQL against actual Snowflake data.
@@ -295,8 +446,11 @@ UDF customization), NOT a `ZONE` column. The base SCALE column
 like `'W-AS'` (Autostore), but KISS uses `user_def1` as the live zone
 source for the operational query.
 
-`instruction_type = 'header'` filter is required — without it the
+`instruction_type = 'Header'` filter is required — without it the
 query duplicates rows for sub-instructions.
+
+**Note:** See § Snowflake string case-sensitivity for the rule
+governing this Pascal Case requirement.
 
 #### NEW TABLE: SCI.L0.IA_WORK_INSTRUCTION
 
@@ -306,11 +460,11 @@ table:
 ```sql
 SELECT container_id, work_unit, user_def1 AS pick_zone, ...
 FROM sci.l0.work_instruction
-WHERE company IN ('Ivy', 'Red', 'Vivace') AND instruction_type = 'header'
+WHERE company IN ('Ivy', 'Red', 'Vivace') AND instruction_type = 'Header'
 UNION ALL
 SELECT container_id, work_unit, user_def1 AS pick_zone, ...
 FROM sci.l0.ia_work_instruction
-WHERE company IN ('Ivy', 'Red', 'Vivace') AND instruction_type = 'header'
+WHERE company IN ('Ivy', 'Red', 'Vivace') AND instruction_type = 'Header'
 ```
 
 `ia_work_instruction` likely stands for "Inventory Allocation"
