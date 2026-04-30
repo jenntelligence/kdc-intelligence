@@ -220,6 +220,58 @@ function viewNotReady(res, viewName) {
   });
 }
 
+/**
+ * Convert a Snowflake row (UPPERCASE keys) to FactShipment shape
+ * (lowercase keys) used by the React frontend.
+ *
+ * Initial PR1 version — minimal mapping. PR3 extends this for
+ * the full /api/scale/split-shipments response with container-row
+ * preservation and 3-type split flags.
+ *
+ * @param {Object} row - Raw Snowflake result row (keys are UPPERCASE)
+ * @returns {Object|null} FactShipment-shaped object (lowercase keys)
+ */
+function toFactShape(row) {
+  if (!row) return null;
+  return {
+    // Core identifiers
+    id: row.SHIPMENT_ID,
+    container_id: row.CONTAINER_ID,
+
+    // Customer info (from KDB.PBI_SF.SAP_CUSTOMER_MASTER cross-DB join)
+    customer: row.CUST_NAME,
+    state: row.CUST_STATE,
+    city: row.CUST_CITY,
+    zipcode: row.CUST_ZIPCODE,
+
+    // Channel
+    channel: row.COMPANY,
+    sales_org: row.SALES_ORG,
+
+    // Container fields (preserved per PR1 design — preserved across
+    // sibling rows via window functions in PR3)
+    tracking_number: row.TRACKING_NUMBER,
+    container_status: row.CONTAINER_STATUS,
+    manifest_id: row.MANIFEST_ID,
+    pick_zone: row.PICK_ZONE,
+
+    // Timestamps (already EST-converted in SQL via CONVERT_TIMEZONE)
+    container_status_time: row.CONTAINER_STATUS_TIME,
+    manifest_close_time: row.MANIFEST_CLOSE_TIME,
+
+    // Order-level aggregations (window functions, populated in PR3)
+    container_count: row.CONTAINER_COUNT,
+    pick_zone_count: row.PICK_ZONE_COUNT,
+    manifest_count: row.MANIFEST_COUNT,
+
+    // 3-type split flags (populated in PR3)
+    zone_level_split: row.ZONE_LEVEL_SPLIT_FLAG === 1,
+    container_level_split: row.CONTAINER_LEVEL_SPLIT_FLAG === 1,
+    manifest_level_split: row.MANIFEST_LEVEL_SPLIT_FLAG === 1,
+    primary_split_type: row.PRIMARY_SPLIT_TYPE,
+  };
+}
+
 // ── Overview KPIs (Executive Overview page) ─────────────────────────────────
 
 app.get('/api/scale/overview-kpis', async (_req, res) => {
@@ -683,6 +735,123 @@ app.get('/api/scale/pick-frequency', async (_req, res) => {
   }
 });
 
+// ── Exploration endpoints (sub-plan 002 PR1) ────────────────────────────────
+// Read-only DESCRIBE-style endpoints to discover column structure of tables
+// referenced by the upcoming /api/scale/split-shipments endpoint (PR3).
+// Resolves §7c #17 (IA_WORK_INSTRUCTION semantics) and §7c #18 (drill-down
+// column names). Per AGENTS.md DB-safety rule: SELECT only.
+
+/**
+ * Exploration endpoint — discover IA_WORK_INSTRUCTION column structure.
+ * Resolves §7c #17 (ia_work_instruction semantics).
+ * Read-only.
+ */
+app.get('/api/scale/explore-ia-wi', async (_req, res) => {
+  try {
+    const columns = await executeQuery(`
+      SELECT COLUMN_NAME, DATA_TYPE, COMMENT
+      FROM SCI.INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = 'L0'
+        AND TABLE_NAME = 'IA_WORK_INSTRUCTION'
+      ORDER BY ORDINAL_POSITION
+    `);
+
+    const sampleRows = await executeQuery(`
+      SELECT *
+      FROM SCI.L0.IA_WORK_INSTRUCTION
+      WHERE company IN ('Ivy', 'Red', 'Vivace')
+        AND instruction_type = 'header'
+      LIMIT 5
+    `);
+
+    res.json({
+      success: true,
+      columns,
+      sampleRows,
+      source: 'snowflake',
+      table: 'SCI.L0.IA_WORK_INSTRUCTION',
+    });
+  } catch (err) {
+    console.error('explore-ia-wi failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * Exploration endpoint — discover SHIPPING_CONTAINER column structure
+ * for drill-down columns (weight, dates, etc.).
+ * Resolves §7c #18 (drill-down columns).
+ * Read-only.
+ */
+app.get('/api/scale/explore-shipping-container', async (_req, res) => {
+  try {
+    const columns = await executeQuery(`
+      SELECT COLUMN_NAME, DATA_TYPE, COMMENT
+      FROM SCI.INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = 'L0'
+        AND TABLE_NAME = 'SHIPPING_CONTAINER'
+      ORDER BY ORDINAL_POSITION
+    `);
+
+    // Sample row with all columns visible to discover values
+    const sampleRows = await executeQuery(`
+      SELECT *
+      FROM SCI.L0.SHIPPING_CONTAINER
+      WHERE company IN ('Ivy', 'Red', 'Vivace')
+      LIMIT 3
+    `);
+
+    res.json({
+      success: true,
+      columns,
+      sampleRows,
+      source: 'snowflake',
+      table: 'SCI.L0.SHIPPING_CONTAINER',
+    });
+  } catch (err) {
+    console.error('explore-shipping-container failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * Exploration endpoint — investigate PROCESS_HISTORY for
+ * last-scan-location derivation (drill-down panel).
+ * Resolves §7c #18 (location strings).
+ * Read-only.
+ */
+app.get('/api/scale/explore-process-history', async (_req, res) => {
+  try {
+    const columns = await executeQuery(`
+      SELECT COLUMN_NAME, DATA_TYPE, COMMENT
+      FROM SCI.INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = 'L0'
+        AND TABLE_NAME = 'PROCESS_HISTORY'
+      ORDER BY ORDINAL_POSITION
+    `);
+
+    // Sample recent events to see what location strings look like
+    const sampleRows = await executeQuery(`
+      SELECT *
+      FROM SCI.L0.PROCESS_HISTORY
+      WHERE warehouse = 'KDCGA1'
+      ORDER BY date_time_stamp DESC
+      LIMIT 10
+    `);
+
+    res.json({
+      success: true,
+      columns,
+      sampleRows,
+      source: 'snowflake',
+      table: 'SCI.L0.PROCESS_HISTORY',
+    });
+  } catch (err) {
+    console.error('explore-process-history failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Custom query (admin only — for Data Hub) ────────────────────────────────
 
 app.post('/api/kdc/query', async (req, res) => {
@@ -862,6 +1031,10 @@ app.listen(PORT, () => {
   console.log(`  GET  /api/scale/workload-ps          PS pack history (30d)`);
   console.log(`  GET  /api/scale/order-processing-time  Order cycle time`);
   console.log(`  GET  /api/scale/pick-frequency       Slotting/pick freq analysis`);
+  console.log(`\n  ── Exploration (sub-plan 002 PR1) ──`);
+  console.log(`  GET  /api/scale/explore-ia-wi               IA_WORK_INSTRUCTION schema (§7c #17)`);
+  console.log(`  GET  /api/scale/explore-shipping-container  SHIPPING_CONTAINER schema (§7c #18)`);
+  console.log(`  GET  /api/scale/explore-process-history     PROCESS_HISTORY schema (§7c #18)`);
   console.log(`\n  ── Utility ──`);
   console.log(`  GET  /api/health                     Health check`);
   console.log(`  POST /api/snowflake/test             Test connection`);
