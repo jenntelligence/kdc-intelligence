@@ -1164,6 +1164,80 @@ const AIRiskPage = ({ filtered, data }) => {
 };
 
 // ============================================================
+// useSplitShipments — data-fetching hook for SplitShipmentPage
+// ============================================================
+/**
+ * Fetches live split-shipment data from Snowflake. Falls back to
+ * mock on any failure (network, HTTP, or `success: false`).
+ * Per master plan §6b — page-level filter intrinsic to backend.
+ *
+ * Behavior controlled by VITE_DATA_SOURCE env var:
+ * - 'mock' (default): use generateMockShipments() — no network call
+ * - 'live': fetch from /api/scale/split-shipments (PR3 endpoint)
+ *   - On fetch error: fallback to generateMockShipments() + warn
+ * - 'csv' (future): not implemented in PR2 — falls back to mock
+ *
+ * NOT YET WIRED to SplitShipmentPage — PR4 wires it.
+ *
+ * Field shape: matches generateMockShipments() output exactly
+ * (camelCase: id, customer, channel, carrier, state, isSplit,
+ * splitCartons, splitGapDays, splitReason, containers[], ...).
+ *
+ * @returns {{ data: Array|null, error: string|null, loading: boolean, source: string }}
+ *   source: 'mock' | 'live' | 'mock-fallback'
+ */
+function useSplitShipments() {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [source, setSource] = useState('mock');
+
+  useEffect(() => {
+    const sourceMode = import.meta.env.VITE_DATA_SOURCE || 'mock';
+
+    if (sourceMode === 'mock') {
+      setData(generateMockShipments());
+      setSource('mock');
+      setLoading(false);
+      return;
+    }
+
+    if (sourceMode === 'csv') {
+      // PR2 doesn't implement CSV path — fall back to mock
+      console.warn('VITE_DATA_SOURCE=csv not implemented; falling back to mock');
+      setData(generateMockShipments());
+      setSource('mock');
+      setLoading(false);
+      return;
+    }
+
+    // sourceMode === 'live' — fetch from server (URL pattern matches
+    // src/ShippingSLAApp.jsx:5042; tracked as debt item §7c C)
+    fetch('http://localhost:3001/api/scale/split-shipments')
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((json) => {
+        if (!json.success) throw new Error(json.error || 'Unknown server error');
+        setData(json.data);
+        setSource('live');
+        setLoading(false);
+      })
+      .catch((err) => {
+        // Per core-beliefs §6: mock fallback, never blank the page
+        console.warn('Live split-shipment data unavailable, falling back to mock:', err.message);
+        setData(generateMockShipments());
+        setError(err.message);
+        setSource('mock-fallback');
+        setLoading(false);
+      });
+  }, []);
+
+  return { data, error, loading, source };
+}
+
+// ============================================================
 // SPLIT SHIPMENT PAGE
 // ============================================================
 const SplitShipmentPage = ({ filtered }) => {
