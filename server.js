@@ -852,6 +852,60 @@ app.get('/api/scale/explore-process-history', async (_req, res) => {
   }
 });
 
+/**
+ * Exploration endpoint — discover UPS_TRACKING column structure.
+ * User's master query uses sci.l0.ups_tracking for delivery dates,
+ * status events, and origin/processing/delivery scan info.
+ *
+ * Investigates whether last-scan-location ('Local Delivery Facility',
+ * etc.) and other drill-down fields exist on this table — directly
+ * resolves the §7c #18 "last-scan-location source" remaining
+ * uncertainty captured in the 2026-04-30 plan correction commit
+ * (cbfe07b).
+ *
+ * Read-only.
+ */
+app.get('/api/scale/explore-ups-tracking', async (_req, res) => {
+  try {
+    const columns = await executeQuery(`
+      SELECT COLUMN_NAME, DATA_TYPE, COMMENT
+      FROM SCI.INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_SCHEMA = 'L0'
+        AND TABLE_NAME = 'UPS_TRACKING'
+      ORDER BY ORDINAL_POSITION
+    `);
+
+    // Sample recent events to see status_type values + location fields
+    const sampleRows = await executeQuery(`
+      SELECT *
+      FROM SCI.L0.UPS_TRACKING
+      ORDER BY datetime DESC
+      LIMIT 10
+    `);
+
+    // Distinct status_type values — small enum set expected
+    const statusTypes = await executeQuery(`
+      SELECT status_type, COUNT(*) AS cnt
+      FROM SCI.L0.UPS_TRACKING
+      GROUP BY status_type
+      ORDER BY cnt DESC
+      LIMIT 20
+    `);
+
+    res.json({
+      success: true,
+      columns,
+      sampleRows,
+      statusTypes,
+      source: 'snowflake',
+      table: 'SCI.L0.UPS_TRACKING',
+    });
+  } catch (err) {
+    console.error('explore-ups-tracking failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Custom query (admin only — for Data Hub) ────────────────────────────────
 
 app.post('/api/kdc/query', async (req, res) => {
@@ -1035,6 +1089,7 @@ app.listen(PORT, () => {
   console.log(`  GET  /api/scale/explore-ia-wi               IA_WORK_INSTRUCTION schema (§7c #17)`);
   console.log(`  GET  /api/scale/explore-shipping-container  SHIPPING_CONTAINER schema (§7c #18)`);
   console.log(`  GET  /api/scale/explore-process-history     PROCESS_HISTORY schema (§7c #18)`);
+  console.log(`  GET  /api/scale/explore-ups-tracking        UPS_TRACKING schema (PR2.5, §7c #18 last-scan)`);
   console.log(`\n  ── Utility ──`);
   console.log(`  GET  /api/health                     Health check`);
   console.log(`  POST /api/snowflake/test             Test connection`);
