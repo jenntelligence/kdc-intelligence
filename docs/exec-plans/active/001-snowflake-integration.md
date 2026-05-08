@@ -811,6 +811,13 @@ AND (
   4. **Cross-DB query performance** — SCI ↔ KDB joins (now used
      for both customer name and state/city/zip) may be slower than
      single-DB. Profile during sub-plan 002.
+     **Measured 2026-05-08 via PR3 smoke (commit `54940b4`):**
+     - Cold connection latency: 10.4s (under 30s threshold ✅).
+     - Warm latency: <1s (Snowflake result cache).
+     - Payload size: 77 MB (76,883 container rows × ~36 columns).
+     - **Risk #4 status: ACCEPTABLE for current scope, but PR4
+       frontend wiring needs pagination or month-window slicing
+       (sub-plan 002 PR6 risk #4 / #5 already flag this).**
   5. **Window function payload** — preserving container rows
      produces ~3-5x more rows than aggregated approach. Estimate:
      ~186 rows for 62 split orders ≈ 100KB. Acceptable; revisit if
@@ -1142,19 +1149,33 @@ without the answer**, and **rough cycle time**.
         channel column on `SHIPPING_CONTAINER`. Plan's earlier
         customer_group/sales_org guess was incorrect. See
         `snowflake-schema.md` Verified facts.
-- [~] ~~17. **`SCI.L0.IA_WORK_INSTRUCTION` semantics.**~~
-        **[PARTIALLY CLOSED 2026-04-30]** PR1 explore endpoint
-        (commit `e9ffa79`) confirmed table exists with 106
+- [x] ~~17. **`SCI.L0.IA_WORK_INSTRUCTION` semantics.**~~
+        **[CLOSED 2026-05-08 via PR3 commit `54940b4`]** PR1 explore
+        endpoint (commit `e9ffa79`) confirmed table exists with 106
         columns; structure consistent with SCALE work-instruction
         schema. Sample rows verified via case-sensitivity fix
         (`instruction_type = 'Header'` Pascal Case, see
         `snowflake-schema.md` § Snowflake string case-sensitivity).
-        **Remaining uncertainty:** which column is the live pick
-        zone (USER_DEF1 vs TO_WORK_ZONE / FROM_WORK_ZONE /
-        LOCATING_ZONE / ALLOCATION_ZONE), and whether
-        IA_WI.COMPANY domain matches SC.COMPANY ('Ivy'/'Red'/
-        'Vivace') exactly. Resolved via PR3 SQL test against
-        actual rows — sub-plan 002 §7 open question B tracks this.
+        **Fully closed via PR3 (commit `54940b4`) on 2026-05-08:**
+        - `IA_WORK_INSTRUCTION.user_def1` confirmed as live pick
+          zone column (verified by working SQL output — the `zone`
+          field on `/api/scale/split-shipments` populates from
+          this column).
+        - `IA_WORK_INSTRUCTION.company` domain matches
+          `SHIPPING_CONTAINER.company` exactly ('Ivy'/'Red'/
+          'Vivace') — the WHERE filter `company IN ('Ivy','Red',
+          'Vivace')` returns rows for all 3 names.
+        - 3 channels (Ivy/Red/Vivace) all present in PR3 endpoint
+          output (exposed by sales-org code via `sh.user_def1`:
+          1100=Ivy 91.9%, 1900=Vivace 4.4%, 1400=Red 3.8% —
+          PR4 frontend will need code→name mapping via
+          `COMPANY_NAME_EXPR`).
+        - Verified by Snowflake direct query cross-validation:
+          21,223 DOs, 37.7% SPLIT rate, byte-exact match
+          (4/4 `split_status` counts: SPLIT / NOT_SPLIT /
+          SINGLE_SHIPMENT / PENDING; UNKNOWN legitimately absent).
+        - Endpoint: `GET /api/scale/split-shipments`.
+        - Smoke results documented in PR3 closure (this commit).
 - [~] ~~18. **Drill-down column names.**~~
         **[MOSTLY CLOSED 2026-04-30]** PR1 explore endpoint
         (commit `e9ffa79`) confirmed:
