@@ -313,154 +313,208 @@ page (PR4 wires).
 
 ---
 
-### PR3 — `/api/scale/split-shipments` endpoint
+### PR3 — `/api/scale/split-shipments` endpoint (Phase A — split detection)
 
-**Goal:** Live SQL endpoint. Direct adaptation of user reference SQL
-into `server.js` style. Cross-DB join, 3-type detection, container-row
-preservation, EST timezone conversion.
+**Scope update (2026-05-08):** Original PR3 plan combined split
+detection with 3-type root cause classification. Per user master query
+review, root cause classification (zone-level / container-level /
+manifest-level) requires further validation and is deferred to a
+separate PR (**Phase B**).
+
+- **PR3 (Phase A — this PR):** split shipment detection only.
+  - Output: `is_split_shipment` (Y/N), `split_status`
+    (SINGLE_SHIPMENT / SPLIT / NOT_SPLIT / PENDING / UNKNOWN).
+  - Detection basis: `delivered_date` × `tracking_num`
+    (customer-experience perspective — what the customer actually
+    sees).
+- **Phase B (deferred to a later PR):** root cause classification.
+  - Outputs: `has_zone_divergence`, `is_zone_split_root_cause`,
+    `is_container_split`, `is_manifest_split`, `split_root_cause`.
+  - Detection basis: zone / container / manifest divergence
+    (operational perspective — what KDC's process produced).
+  - Trigger: after PR4 page wiring and PR5 ops validation confirm
+    Phase A.
+
+**Goal:** Live SQL endpoint that returns container-level rows with a
+DO-level `is_split_shipment` flag, derived from the user-verified
+master query. Cross-DB join (SCI ↔ KDB), EST timezone conversion built
+into the SQL itself, container-row preservation for UI drill-down.
+
+**Trust hierarchy (binding for this PR):**
+
+1. User operational facts (highest)
+2. User master query (this section)
+3. Plan / sub-plan SQL drafts
+4. Endpoint code
+
+The SQL string in `server.js` MUST be a byte-exact paste of the query
+in task 1 — never edit the SQL in code. If the SQL needs to change,
+update this plan section first as a separate commit, then re-paste.
 
 **Files modified:**
-- `server.js` — add new endpoint (~150-200 lines incl SQL string)
-- (possibly) `toFactShape` extended if PR1's initial mapping needs
-  adjustments based on actual SELECT projections
+- `server.js` — add new endpoint (~150-200 lines incl SQL string).
+- (possibly) `toFactShape` extended to project the new columns.
+
+**Major changes from prior plan draft (recorded for traceability):**
+
+| # | Old plan draft | User master query (now ground truth) | Why |
+|---|----------------|---------------------------------------|-----|
+| 1 | Window-function `pick_zone_count > 1` for split detection | `delivered_date_cnt > 1` / `has_null_delivered_date = 1` / `has_null_tracking = 1` | Detection basis switched from operational (zone divergence) to customer-experience (delivered-date divergence) |
+| 2 | Two-table base: SH + SC + KDB.SAP_CUSTOMER_MASTER | Adds `KDB.PBI_SF.ZSDRORDR` join for `so_created_date` | Sales-order creation date needed for time-to-ship metrics |
+| 3 | `cm` join on `shiptoparty_key` only | `cm` join on `shiptoparty_key AND salesorg_key` | Prevents multi-row fan-out across sales orgs |
+| 4 | No carrier-tracking CTE | New `ups_data` CTE from `SCI.L0.UPS_TRACKING` | `delivered_date` is the split-detection signal |
+| 5 | No container-type filter | `lower(sc.container_type) in ('as inner', 'as outer', 'car', 'ip', 'ivy inner', 'ivy outer')` | Excludes non-customer-bound containers |
+| 6 | Hardcoded date `>= '2026-01-01'` | Dynamic `YEAR(salesdocdate) = year(current_date())` | Avoids annual maintenance |
+| 7 | `instruction_type = 'header'` (lowercase) | `instruction_type = 'Header'` (Pascal Case) | Aligns with §7c #20 closure |
+| 8 | `WHERE warehouse = 'KDCGA1'` filter | Filter omitted | Not present in user master query — user is ground truth |
+| 9 | `IA_WORK_INSTRUCTION UNION ALL WORK_INSTRUCTION` for pick zone | Only `IA_WORK_INSTRUCTION`, with `work_group='Picking'` and `work_type='Parcel Loading'` selectors | User confirmed IA_WI carries both pick and parcel-loading events for the in-scope channels |
+| 10 | 5 CTEs | 6 CTEs (`base` / `ia_work_instruction` / `ups_data` / `final` / `do_level` / `classified`) | Necessary structure for `split_status` classification |
 
 **Specific tasks:**
 
-1. Adapt the user reference SQL from `snowflake-schema.md` § Split
-   Shipment SQL — operational reference. Structure (5-CTE per master
-   plan §6b SQL strategy):
+1. Use the user master query verbatim as the endpoint SQL. The query
+   is operational ground truth. Paste byte-for-byte into a JS
+   template literal in `server.js` — no edits to the SQL string.
 
-   ```sql
-   WITH base AS (
-     SELECT
-       sh.shipment_id,
-       sh.carrier,
-       sh.ship_to,
-       sh.internal_shipment_num,
-       sc.container_id,
-       sc.tracking_number,
-       sc.manifest_id,
-       sc.status                          AS container_status,
-       sc.date_time_stamp                 AS container_status_time,
-       sc.manifest_close_date_time        AS manifest_close_time,
-       sc.company,
-       cm.name                            AS cust_name,
-       cm.region                          AS cust_state,
-       cm.city                            AS cust_city,
-       cm.postalcode                      AS cust_zipcode
-     FROM SCI.L0.SHIPMENT_HEADER sh
-     JOIN SCI.L0.SHIPPING_CONTAINER sc
-       ON sc.internal_shipment_num = sh.internal_shipment_num
-     LEFT JOIN KDB.PBI_SF.SAP_CUSTOMER_MASTER cm
-       ON sh.ship_to = cm.shiptoparty_key
-     WHERE sc.company IN ('Ivy', 'Red', 'Vivace')
-       AND sh.carrier = 'UPS'
-       AND sc.date_time_stamp >= '2026-01-01'
-       AND sh.warehouse = 'KDCGA1'
-       -- IN_DELETION filter omitted per F0 validation 2026-04-29
-   ),
-   work AS (
-     SELECT container_id, work_unit, user_def1 AS pick_zone
-     FROM SCI.L0.WORK_INSTRUCTION
-     WHERE company IN ('Ivy', 'Red', 'Vivace')
-       AND instruction_type = 'header'
-     UNION ALL
-     SELECT container_id, work_unit, user_def1 AS pick_zone
-     FROM SCI.L0.IA_WORK_INSTRUCTION
-     WHERE company IN ('Ivy', 'Red', 'Vivace')
-       AND instruction_type = 'header'
-   ),
-   container_with_zone AS (
-     SELECT b.*, w.pick_zone
-     FROM base b
-     LEFT JOIN work w ON w.container_id = b.container_id
-   ),
-   flagged_containers AS (
-     SELECT
-       cwz.*,
-       COUNT(DISTINCT container_id) OVER (PARTITION BY shipment_id) AS container_count,
-       COUNT(DISTINCT pick_zone)    OVER (PARTITION BY shipment_id) AS pick_zone_count,
-       COUNT(DISTINCT manifest_id)  OVER (PARTITION BY shipment_id) AS manifest_count,
-       MIN(CASE WHEN container_status >= '700' THEN container_status_time END)
-         OVER (PARTITION BY shipment_id) AS first_status_700_time,
-       MAX(CASE WHEN container_status >= '700' THEN container_status_time END)
-         OVER (PARTITION BY shipment_id) AS last_status_700_time,
-       COUNT(CASE WHEN container_status >= '700' THEN 1 END)
-         OVER (PARTITION BY shipment_id) AS status_700_container_count,
-       MIN(manifest_close_time) OVER (PARTITION BY shipment_id) AS first_manifest_close_time,
-       MAX(manifest_close_time) OVER (PARTITION BY shipment_id) AS last_manifest_close_time
-     FROM container_with_zone cwz
-   ),
-   with_flags AS (
-     SELECT
-       fc.*,
-       CASE WHEN pick_zone_count > 1 THEN 1 ELSE 0 END AS zone_level_split_flag,
-       CASE
-         WHEN container_count > 1
-          AND first_status_700_time IS NOT NULL
-          AND last_status_700_time IS NOT NULL
-          AND first_status_700_time <> last_status_700_time
-         THEN 1 ELSE 0
-       END AS container_level_split_flag,
-       CASE
-         WHEN container_count > 1
-          AND (
-                manifest_count > 1
-             OR first_manifest_close_time <> last_manifest_close_time
-             OR (status_700_container_count > 0
-                 AND status_700_container_count < container_count)
-              )
-         THEN 1 ELSE 0
-       END AS manifest_level_split_flag
-     FROM flagged_containers fc
-   )
-   SELECT
-     shipment_id,
-     container_id,
-     container_status,
-     tracking_number,
-     manifest_id,
-     pick_zone,
-     CONVERT_TIMEZONE('UTC', 'America/New_York', container_status_time) AS container_status_time,
-     CONVERT_TIMEZONE('UTC', 'America/New_York', manifest_close_time)   AS manifest_close_time,
-     company AS channel,
-     cust_name,
-     cust_state,
-     cust_city,
-     cust_zipcode,
-     container_count,
-     pick_zone_count,
-     manifest_count,
-     zone_level_split_flag,
-     container_level_split_flag,
-     manifest_level_split_flag,
-     CASE
-       WHEN manifest_level_split_flag  = 1 THEN '03 Manifest-level split'
-       WHEN container_level_split_flag = 1 THEN '02 Container-level split'
-       WHEN zone_level_split_flag      = 1 THEN '01 Zone-level split'
-       ELSE 'No split'
-     END AS primary_split_type
-   FROM with_flags
-   WHERE zone_level_split_flag      = 1
-      OR container_level_split_flag = 1
-      OR manifest_level_split_flag  = 1
-   ORDER BY shipment_id, container_id
-   ```
+   The exact query:
 
-   Above SQL is the **draft from this plan**, not the verbatim user
-   SQL. Treat this as the starting structure; cross-validate against
-   the user's reference (per master plan §6b Validation: "sub-plan
-   002's first endpoint result must match the user's reference SQL
-   output for the same date range").
+```sql
+with base as (
+    select
+        sh.user_def1 as company,
+        sh.user_def4 as so_num,
+        sh.launch_num as wave_num,
+        sh.shipment_id as do_num,
+        sh.internal_shipment_num,
+        cm.shiptoparty_key,
+        cm.name as cust_name,
+        cm.region as cust_state,
+        cm.city as cust_city,
+        cm.postalcode as cust_zipcode,
+        sc.container_id,
+        sc.container_type,
+        sc.container_class,
+        sh.LEADING_STS,
+        sc.status as container_status,
+        sc.tracking_number,
+        sc.manifest_id,
+        cast(concat(left(SALESDOCDATE, 4) , '-' , SUBSTRING(SALESDOCDATE, 5, 2) ,'-' , right(SALESDOCDATE, 2)) as date) so_created_date,
+        convert_timezone('UTC', 'America/New_York', sc.date_time_stamp) as container_status_time,
+        convert_timezone('UTC', 'America/New_York', sc.manifest_close_date_time) as manifest_close_time
+    from sci.l0.shipping_container sc
+    join sci.l0.shipment_header sh on sc.internal_shipment_num = sh.internal_shipment_num
+    join kdb.pbi_sf.sap_customer_master cm on sh.ship_to = cm.shiptoparty_key and sh.route = cm.salesorg_key
+    join kdb.pbi_sf.zsdrordr so on sh.user_def4 = so.salesdocnumber
+    where sc.company in ('Ivy', 'Red', 'Vivace')
+    and lower(sc.container_type) in ('as inner', 'as outer', 'car', 'ip', 'ivy inner', 'ivy outer')
+    and sh.carrier = 'UPS'
+    AND YEAR(TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD')) = year(current_date())
+)
+, ia_work_instruction as (
+    select
+        erp_order as do,
+        container_id,
+        max(case when work_group = 'Picking' then work_type end) as work_type,
+        max(case when work_group = 'Picking' then user_def1 end) as zone,
+        max(case when work_group = 'Picking' then date_time_stamp end) as picking_date_time_utc,
+        max(case when work_group = 'Picking' then convert_timezone('UTC', 'America/New_York', date_time_stamp) end) as picking_completion_time,
+        max(case when work_type = 'Parcel Loading' then date_time_stamp end) as manifest_date_time_utc,
+        max(case when work_type = 'Parcel Loading' then convert_timezone('UTC', 'America/New_York', date_time_stamp) end) as manifest_date_time
+    from sci.l0.ia_work_instruction
+    where company in ('Ivy', 'Red', 'Vivace')
+    and (work_group = 'Picking' or (work_type = 'Parcel Loading' and instruction_type = 'Header'))
+    group by 1, 2
+)
+, ups_data as (
+    select 
+        tracking_num,
+        max(case when status_type = 'Origin' then datetime end) as origin_date,
+        max(case when status_type = 'Generic' then datetime end) as processing_date,
+        max(case when status_type = 'Delivery' then datetime end) as delivered_date,
+        max(case when status_type = 'Delivery' then delivery_political_div1 end) as delivered_state
+    from sci.l0.ups_tracking
+    group by 1
+)
+, final as (
+    select 
+        b.company,
+        b.so_num,
+        b.so_created_date,
+        b.do_num,
+        ia.work_type,
+        ia.zone,
+        ia.picking_completion_time,
+        ia.manifest_date_time,
+        b.leading_sts,
+        b.container_id,
+        b.container_status,
+        b.container_type,
+        b.container_status_time,
+        b.tracking_number as tracking_num,
+        b.manifest_id,
+        b.manifest_close_time,
+        ud.origin_date,
+        ud.processing_date,
+        ud.delivered_date,
+        ud.delivered_state,
+        b.cust_state,
+        b.shiptoparty_key,
+        b.cust_name,
+        b.cust_city,
+        b.cust_zipcode,
+        b.wave_num,
+        b.internal_shipment_num
+    from base b
+    left join ia_work_instruction ia on b.do_num = ia.do and b.container_id = ia.container_id
+    left join ups_data ud on b.tracking_number = ud.tracking_num
+)
+, do_level as (
+    select
+        do_num,
+        count(distinct tracking_num) as tracking_cnt,
+        count(distinct container_id) as container_cnt,
+        count(distinct manifest_id) as manifest_cnt,
+        count(distinct date_trunc('day', try_to_timestamp(delivered_date))) as delivered_date_cnt,
+        max(case when tracking_num is null then 1 else 0 end) as has_null_tracking,
+        max(case when tracking_num is not null and delivered_date is null then 1 else 0 end) as has_null_delivered_date
+    from final
+    group by do_num
+)
+, classified as (
+    select
+        b.*,
+        d.tracking_cnt,
+        d.container_cnt,
+        d.manifest_cnt,
+        d.delivered_date_cnt,
+        d.has_null_tracking,
+        d.has_null_delivered_date,
+        case when d.tracking_cnt <= 1 then 'SINGLE_SHIPMENT'
+             when d.tracking_cnt > 1 and d.delivered_date_cnt >= 1 and (d.delivered_date_cnt > 1 or d.has_null_delivered_date = 1 or d.has_null_tracking = 1) then 'SPLIT'
+             when d.tracking_cnt > 1 and d.has_null_delivered_date = 0 and d.delivered_date_cnt = 1 then 'NOT_SPLIT'
+             when d.tracking_cnt > 1 and d.delivered_date_cnt = 0 then 'PENDING'
+        else 'UNKNOWN'
+        end as split_status
+    from final b
+    left join do_level d on b.do_num = d.do_num
+)
+select
+    c.*,
+    case when c.split_status = 'SPLIT' then 'Y' else 'N'
+         end as is_split_shipment
+from classified c
+order by c.do_num, c.container_status_time;
+```
 
 2. Endpoint code (mirrors existing `server.js` patterns):
 
    ```javascript
-   // ── Split Shipments (Phase 1 — page 1) ─────────────────────
+   // ── Split Shipments (Phase 1 — page 1, Phase A: detection) ─
    // Per docs/exec-plans/active/001-snowflake-integration.md §6b
-   // and snowflake-schema.md § "Split Shipment SQL — operational
-   // reference". Channel scope: BS-IVY/BS-RED/VIVACE via UPS only.
-   const SPLIT_SHIPMENTS_SQL = `... ${MULTILINE_SQL_FROM_TASK_1} ...`;
+   // and docs/exec-plans/active/002-split-shipments-live.md PR3.
+   // SQL is the user-verified master query — DO NOT edit in code.
+   // Channel scope: BS-IVY/BS-RED/VIVACE via UPS only.
+   const SPLIT_SHIPMENTS_SQL = `... (verbatim user master query from PR3 task 1) ...`;
 
    app.get('/api/scale/split-shipments', async (_req, res) => {
      try {
@@ -471,7 +525,7 @@ preservation, EST timezone conversion.
          data,
          count: data.length,
          source: 'snowflake',
-         table: 'SCI.L0.SHIPMENT_HEADER + SHIPPING_CONTAINER + WORK_INSTRUCTION + IA_WORK_INSTRUCTION + KDB.PBI_SF.SAP_CUSTOMER_MASTER',
+         table: 'SCI.L0.SHIPMENT_HEADER + SHIPPING_CONTAINER + IA_WORK_INSTRUCTION + UPS_TRACKING + KDB.PBI_SF.SAP_CUSTOMER_MASTER + ZSDRORDR',
        });
      } catch (err) {
        console.error('split-shipments query failed:', err);
@@ -483,35 +537,49 @@ preservation, EST timezone conversion.
 3. Update the boot log block at `server.js:787-829` to include the
    new endpoint.
 
-4. Update `toFactShape` to handle every column the SELECT projects
-   (extend from the PR1 minimal shape).
+4. Update `toFactShape` to project the new columns: `so_num`,
+   `so_created_date`, `wave_num`, `work_type`, `zone`,
+   `picking_completion_time`, `manifest_date_time`, `leading_sts`,
+   `container_type`, `tracking_num`, `origin_date`, `processing_date`,
+   `delivered_date`, `delivered_state`, `tracking_cnt`,
+   `container_cnt`, `manifest_cnt`, `delivered_date_cnt`,
+   `has_null_tracking`, `has_null_delivered_date`, `split_status`,
+   `is_split_shipment` — on top of the existing PR1 minimal shape.
 
-5. EST timezone conversion (`CONVERT_TIMEZONE('UTC',
-   'America/New_York', ...)`) applied to **all displayed
-   timestamps**. Pattern matches existing `workload-pm` /
-   `workload-ps` queries (`server.js:530-577`).
+5. EST timezone conversion is **already inside** the user master
+   query (`convert_timezone('UTC', 'America/New_York', ...)` for
+   `container_status_time`, `manifest_close_time`,
+   `picking_completion_time`, `manifest_date_time`). No additional
+   conversion in endpoint code — do not double-convert.
 
 6. Manual smoke validation:
    - `curl http://localhost:3001/api/scale/split-shipments | jq '.data | length'` — sane count (>0, <10000).
    - First call latency < 30s (cold connection); subsequent < 5s.
-   - Sample row: all 3 channels (Ivy/Red/Vivace) appear; all 3
-     `primary_split_type` values appear; customer names populated
-     for >80% of rows.
+   - Sample row: all 3 channels (Ivy/Red/Vivace) appear; 4 of the 5
+     `split_status` values exercised in real data (SINGLE_SHIPMENT /
+     SPLIT / NOT_SPLIT / PENDING — UNKNOWN may be legitimately absent
+     in clean data); customer names populated for >80% of rows.
 
 **Validation:**
-- **Cross-validate against user reference SQL:** for the same date
-  range, `data.length` and 3-type counts should match. Any divergence
-  is a bug — fix or escalate before PR4.
-- Container rows preserved (multiple rows per `shipment_id` confirmed
+- **Cross-validate against user master query in Snowflake console:**
+  for the same date filter, `data.length` and `split_status`
+  distribution from the endpoint match the user's direct query
+  output. Any divergence is a bug — fix or escalate before PR4.
+- Container rows preserved (multiple rows per `do_num` confirmed
   via grouping check in jq or DevTools).
-- All 3 split flag combinations (zone+container, container only,
-  manifest only) appear in real data — empirically verifies no
-  single CTE is broken.
+- All 4-5 `split_status` values appear (or absence is empirically
+  explained — e.g., UNKNOWN may not appear in clean data).
 - `npm run build` passes.
 
-**Depends on:** PR1 (column info from explore endpoints), PR2
-  (FactShape understood)
+**Depends on:** PR1 (column info from explore endpoints, including
+`/api/scale/explore-ups-tracking` from PR2.5), PR2 (FactShape understood)
 **Blocks:** PR4
+
+**§7c #17 closure:** Once PR3's smoke test passes (all 3 channels
+appear; IA_WI rows feed pick zone correctly), update master plan §7c
+#17 from `[~]` partially-closed to `[x]` closed in a separate
+`docs(plan): close §7c #17 with PR3 results` commit. Do not modify
+master plan §7c #17 in this prep commit.
 
 ---
 
