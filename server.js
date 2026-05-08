@@ -220,13 +220,26 @@ function viewNotReady(res, viewName) {
   });
 }
 
+// Sales-org code → channel name mapping.
+// Per docs/exec-plans/active/001-snowflake-integration.md §7c #17 closure
+// (commit 22e77f4): user master query selects sh.user_def1 as company,
+// which is the SAP sales-org code (numeric string), not the channel name.
+// PR4a (this commit) maps it to the human-readable channel name at the
+// boundary; the raw code is preserved in `channel_code` for ops debugging.
+const COMPANY_NAME_MAP = {
+  '1100': 'BS-IVY',
+  '1400': 'BS-RED',
+  '1900': 'VIVACE',
+};
+
 /**
  * Convert a Snowflake row (UPPERCASE keys) to FactShipment shape
  * (lowercase keys) used by the React frontend.
  *
  * Initial PR1 version — minimal mapping. PR3 extends this for
  * the full /api/scale/split-shipments response with container-row
- * preservation and 3-type split flags.
+ * preservation and 3-type split flags. PR4a adds COMPANY_NAME_MAP
+ * channel translation (sales-org code → BS-IVY/BS-RED/VIVACE).
  *
  * @param {Object} row - Raw Snowflake result row (keys are UPPERCASE)
  * @returns {Object|null} FactShipment-shaped object (lowercase keys)
@@ -244,8 +257,9 @@ function toFactShape(row) {
     city: row.CUST_CITY,
     zipcode: row.CUST_ZIPCODE,
 
-    // Channel
-    channel: row.COMPANY,
+    // Channel (PR4a: name via COMPANY_NAME_MAP, raw code preserved)
+    channel: COMPANY_NAME_MAP[row.COMPANY] || row.COMPANY,
+    channel_code: row.COMPANY,
     sales_org: row.SALES_ORG,
 
     // Container fields (preserved per PR1 design — preserved across
@@ -987,7 +1001,8 @@ with base as (
     where sc.company in ('Ivy', 'Red', 'Vivace')
     and lower(sc.container_type) in ('as inner', 'as outer', 'car', 'ip', 'ivy inner', 'ivy outer')
     and sh.carrier = 'UPS'
-    AND YEAR(TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD')) = year(current_date())
+    AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') >= ?
+    AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') <= ?
 )
 , ia_work_instruction as (
     select
@@ -1085,9 +1100,37 @@ from classified c
 order by c.do_num, c.container_status_time;
 `;
 
-app.get('/api/scale/split-shipments', async (_req, res) => {
+app.get('/api/scale/split-shipments', async (req, res) => {
   try {
-    const rows = await executeQuery(SPLIT_SHIPMENTS_SQL);
+    // PR4a: date range parameters with default = trailing 7 days.
+    // SQL uses two `?` bind variables — order: [from, to].
+    // Format: SCALE's SALESDOCDATE is YYYYMMDD (no separators).
+    const today = new Date();
+    const weekAgo = new Date(today);
+    weekAgo.setDate(weekAgo.getDate() - 7);
+    const formatDate = (d) => d.toISOString().slice(0, 10); // YYYY-MM-DD
+
+    const from = req.query.from || formatDate(weekAgo);
+    const to = req.query.to || formatDate(today);
+
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (!dateRegex.test(from) || !dateRegex.test(to)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid date format. Use YYYY-MM-DD.',
+      });
+    }
+    if (from > to) {
+      return res.status(400).json({
+        success: false,
+        error: 'from date must be <= to date.',
+      });
+    }
+
+    const fromYYYYMMDD = from.replace(/-/g, '');
+    const toYYYYMMDD = to.replace(/-/g, '');
+
+    const rows = await executeQuery(SPLIT_SHIPMENTS_SQL, [fromYYYYMMDD, toYYYYMMDD]);
     const data = rows.map(toFactShape);
     res.json({
       success: true,
@@ -1095,6 +1138,7 @@ app.get('/api/scale/split-shipments', async (_req, res) => {
       count: data.length,
       source: 'snowflake',
       table: 'SCI.L0.SHIPMENT_HEADER + SHIPPING_CONTAINER + IA_WORK_INSTRUCTION + UPS_TRACKING + KDB.PBI_SF.SAP_CUSTOMER_MASTER + ZSDRORDR',
+      filter: { from, to },
     });
   } catch (err) {
     console.error('split-shipments query failed:', err);

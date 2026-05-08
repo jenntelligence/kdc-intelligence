@@ -408,7 +408,8 @@ with base as (
     where sc.company in ('Ivy', 'Red', 'Vivace')
     and lower(sc.container_type) in ('as inner', 'as outer', 'car', 'ip', 'ivy inner', 'ivy outer')
     and sh.carrier = 'UPS'
-    AND YEAR(TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD')) = year(current_date())
+    AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') >= ?
+    AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') <= ?
 )
 , ia_work_instruction as (
     select
@@ -580,6 +581,30 @@ appear; IA_WI rows feed pick zone correctly), update master plan §7c
 #17 from `[~]` partially-closed to `[x]` closed in a separate
 `docs(plan): close §7c #17 with PR3 results` commit. Do not modify
 master plan §7c #17 in this prep commit.
+
+**PR4a update (2026-05-08, this commit):**
+
+- **Date filter parameterized.** The `base` CTE's date predicate now
+  uses two bind variables (`?`) for `from` / `to` instead of the
+  full-year `YEAR(...) = year(current_date())` form. The user
+  verified the new predicate in Snowflake with hardcoded dates
+  (2026-05-01 ~ 2026-05-08 = 1,553 DOs).
+- **Endpoint default window:** trailing 7 days (today-7d ~ today).
+  Override via `?from=YYYY-MM-DD&to=YYYY-MM-DD`. Format validation
+  + `from <= to` constraint enforced server-side. SCALE's
+  `SALESDOCDATE` is `YYYYMMDD`, so the endpoint strips dashes
+  before binding.
+- **Channel mapping.** `toFactShape` now translates the sales-org
+  code via `COMPANY_NAME_MAP` (1100→BS-IVY, 1400→BS-RED, 1900→VIVACE)
+  on the `channel` field. Raw code preserved as new `channel_code`
+  field for ops debugging. Closes the PR4 caveat noted in the §7c
+  #17 closure (master plan).
+- **Smoke (user, 2026-05-01 ~ 2026-05-08, 1,553 DOs):** distribution
+  shifts in short windows — SINGLE_SHIPMENT 32.8%, PENDING 32.1%,
+  SPLIT 22.7%, NOT_SPLIT 12.3%. PENDING is high (32%) because
+  short-window orders are still in flight. PR4b (frontend) will
+  apply rate calc that excludes PENDING from the denominator
+  ("settled split rate").
 
 ---
 

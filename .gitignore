@@ -29,6 +29,9 @@ data/exports/
 # PR1 exploration query results — local dev only
 explore-*.json
 
+# PR3+ smoke test artifacts (large API response dumps)
+smoke_result*.json
+
 # OS / IDE
 Thumbs.db
 .idea/
