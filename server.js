@@ -1104,7 +1104,12 @@ app.get('/api/scale/split-shipments', async (req, res) => {
   try {
     // PR4a: date range parameters with default = trailing 7 days.
     // SQL uses two `?` bind variables — order: [from, to].
-    // Format: SCALE's SALESDOCDATE is YYYYMMDD (no separators).
+    // Format: SAP's SALESDOCDATE column is stored as YYYYMMDD VARCHAR;
+    // the SQL handles that on the LHS via TO_DATE(col, 'YYYYMMDD').
+    // The bind RHS must be YYYY-MM-DD (Snowflake's auto-DATE-cast format)
+    // — see docs/references/snowflake-schema.md § Verified facts —
+    // "Date handling" (PR4a hotfix). Stripping dashes silently returns
+    // 0 rows.
     const today = new Date();
     const weekAgo = new Date(today);
     weekAgo.setDate(weekAgo.getDate() - 7);
@@ -1127,10 +1132,8 @@ app.get('/api/scale/split-shipments', async (req, res) => {
       });
     }
 
-    const fromYYYYMMDD = from.replace(/-/g, '');
-    const toYYYYMMDD = to.replace(/-/g, '');
-
-    const rows = await executeQuery(SPLIT_SHIPMENTS_SQL, [fromYYYYMMDD, toYYYYMMDD]);
+    // Bind YYYY-MM-DD directly — Snowflake auto-casts to DATE.
+    const rows = await executeQuery(SPLIT_SHIPMENTS_SQL, [from, to]);
     const data = rows.map(toFactShape);
     res.json({
       success: true,

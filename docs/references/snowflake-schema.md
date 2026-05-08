@@ -183,6 +183,51 @@ new facts as they are discovered.
   ("Ship Confirm Pending") is per-order, not per-container — so it
   cannot replace this for Type 2 detection. Sub-plan `002` verifies
   in the Snowflake console and supersedes the master-plan sketch.
+- **Date handling — SAP YYYYMMDD storage + Snowflake YYYY-MM-DD bind**
+  (CONFIRMED 2026-05-08 via PR4a hotfix smoke). Two related but
+  distinct facts; both must be respected together when writing
+  parameterized date queries:
+
+  1. **SAP-origin date columns are stored as `YYYYMMDD` strings
+     (VARCHAR), not `DATE`.** Confirmed on
+     `KDB.PBI_SF.ZSDRORDR.salesdocdate`; other SAP-origin tables
+     likely follow the same convention (verify per use). NULL is
+     encoded as the sentinel `'00000000'`, which must be filtered
+     explicitly:
+
+     ```sql
+     CASE WHEN col = '00000000' THEN NULL ELSE col END
+     ```
+
+     Conversion to DATE for SQL operations:
+
+     ```sql
+     TO_DATE(CASE WHEN col = '00000000' THEN NULL ELSE col END, 'YYYYMMDD')
+     ```
+
+  2. **Snowflake bind variables for DATE comparison require
+     `YYYY-MM-DD` format (with dashes).** When the SQL uses
+     `TO_DATE(col, 'YYYYMMDD') >= ?`, the bind RHS goes through an
+     implicit DATE cast, which only accepts auto-DATE format
+     (`YYYY-MM-DD`, with separators). `YYYYMMDD` without separators
+     **silently returns 0 rows — no error.**
+
+     Empirical verification (PR4a hotfix smoke, same query shape):
+
+     | Bind RHS                | Rows returned |
+     |-------------------------|--------------:|
+     | (no date filter)        | 2,853,321 |
+     | `'2026-05-01'` ~ `'2026-05-08'` | 203,549 ✅ |
+     | `'20260501'` ~ `'20260508'`     | 0 ❌ silent |
+
+     Implication: ANY endpoint that uses date binds MUST pass
+     `YYYY-MM-DD` strings. Don't strip dashes assuming Snowflake
+     will infer the format. Applies to all date binds, not specific
+     to any one table.
+
+     Discovered: PR4a (4f105f0) silently returned 0 rows because
+     the endpoint stripped dashes before binding. PR4a hotfix
+     restored YYYY-MM-DD bind format.
 
 ### Snowflake authentication (CONFIRMED 2026-04-30)
 

@@ -591,9 +591,14 @@ master plan §7c #17 in this prep commit.
   (2026-05-01 ~ 2026-05-08 = 1,553 DOs).
 - **Endpoint default window:** trailing 7 days (today-7d ~ today).
   Override via `?from=YYYY-MM-DD&to=YYYY-MM-DD`. Format validation
-  + `from <= to` constraint enforced server-side. SCALE's
-  `SALESDOCDATE` is `YYYYMMDD`, so the endpoint strips dashes
-  before binding.
+  + `from <= to` constraint enforced server-side. SAP's
+  `SALESDOCDATE` is stored as `YYYYMMDD` (VARCHAR), but the SQL
+  handles the conversion via `TO_DATE(col, 'YYYYMMDD')` on the LHS.
+  The bind RHS must be `YYYY-MM-DD` (Snowflake auto-DATE-cast
+  format) — see schema doc § Verified facts — Date handling.
+  **PR4a hotfix:** original 4f105f0 stripped dashes before binding,
+  which silently returned 0 rows. Fixed by binding `YYYY-MM-DD`
+  directly.
 - **Channel mapping.** `toFactShape` now translates the sales-org
   code via `COMPANY_NAME_MAP` (1100→BS-IVY, 1400→BS-RED, 1900→VIVACE)
   on the `channel` field. Raw code preserved as new `channel_code`
