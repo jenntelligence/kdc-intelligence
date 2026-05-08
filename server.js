@@ -269,6 +269,45 @@ function toFactShape(row) {
     container_level_split: row.CONTAINER_LEVEL_SPLIT_FLAG === 1,
     manifest_level_split: row.MANIFEST_LEVEL_SPLIT_FLAG === 1,
     primary_split_type: row.PRIMARY_SPLIT_TYPE,
+
+    // ── PR3 (Phase A) — split detection columns ──────────────────
+    // Per docs/exec-plans/active/002-split-shipments-live.md PR3.
+    // Populated by /api/scale/split-shipments (user master query).
+
+    // SAP order identifiers
+    so_num: row.SO_NUM,
+    so_created_date: row.SO_CREATED_DATE,
+    do_num: row.DO_NUM,
+    wave_num: row.WAVE_NUM,
+
+    // SCALE work-instruction-derived (IA_WORK_INSTRUCTION CTE)
+    work_type: row.WORK_TYPE,
+    zone: row.ZONE,
+    picking_completion_time: row.PICKING_COMPLETION_TIME,
+    manifest_date_time: row.MANIFEST_DATE_TIME,
+
+    // Container metadata (extends PR1 container fields)
+    leading_sts: row.LEADING_STS,
+    container_type: row.CONTAINER_TYPE,
+    tracking_num: row.TRACKING_NUM,
+
+    // UPS tracking (ups_data CTE)
+    origin_date: row.ORIGIN_DATE,
+    processing_date: row.PROCESSING_DATE,
+    delivered_date: row.DELIVERED_DATE,
+    delivered_state: row.DELIVERED_STATE,
+
+    // DO-level aggregations (do_level CTE)
+    tracking_cnt: row.TRACKING_CNT,
+    container_cnt: row.CONTAINER_CNT,
+    manifest_cnt: row.MANIFEST_CNT,
+    delivered_date_cnt: row.DELIVERED_DATE_CNT,
+    has_null_tracking: row.HAS_NULL_TRACKING === 1,
+    has_null_delivered_date: row.HAS_NULL_DELIVERED_DATE === 1,
+
+    // Split classification (classified CTE + outer SELECT)
+    split_status: row.SPLIT_STATUS,
+    is_split_shipment: row.IS_SPLIT_SHIPMENT === 'Y',
   };
 }
 
@@ -906,6 +945,163 @@ app.get('/api/scale/explore-ups-tracking', async (_req, res) => {
   }
 });
 
+// ── Phase 1 Live Endpoints (sub-plan 002 → 004) ─────────────────────────────
+// Per docs/exec-plans/active/001-snowflake-integration.md §6b.
+// Each endpoint replaces mock data on a Phase 1 dashboard page.
+
+// ── Split Shipments (Phase 1 — page 1, Phase A: detection) ──
+// Per docs/exec-plans/active/001-snowflake-integration.md §6b
+// and docs/exec-plans/active/002-split-shipments-live.md PR3.
+// SQL is the user-verified master query — DO NOT edit in code.
+// If SQL needs to change, update the plan first as a separate
+// commit, then re-paste here. (Trust hierarchy: user fact >
+// user master query > plan draft > endpoint code.)
+// Channel scope: BS-IVY/BS-RED/VIVACE via UPS only.
+const SPLIT_SHIPMENTS_SQL = `
+with base as (
+    select
+        sh.user_def1 as company,
+        sh.user_def4 as so_num,
+        sh.launch_num as wave_num,
+        sh.shipment_id as do_num,
+        sh.internal_shipment_num,
+        cm.shiptoparty_key,
+        cm.name as cust_name,
+        cm.region as cust_state,
+        cm.city as cust_city,
+        cm.postalcode as cust_zipcode,
+        sc.container_id,
+        sc.container_type,
+        sc.container_class,
+        sh.LEADING_STS,
+        sc.status as container_status,
+        sc.tracking_number,
+        sc.manifest_id,
+        cast(concat(left(SALESDOCDATE, 4) , '-' , SUBSTRING(SALESDOCDATE, 5, 2) ,'-' , right(SALESDOCDATE, 2)) as date) so_created_date,
+        convert_timezone('UTC', 'America/New_York', sc.date_time_stamp) as container_status_time,
+        convert_timezone('UTC', 'America/New_York', sc.manifest_close_date_time) as manifest_close_time
+    from sci.l0.shipping_container sc
+    join sci.l0.shipment_header sh on sc.internal_shipment_num = sh.internal_shipment_num
+    join kdb.pbi_sf.sap_customer_master cm on sh.ship_to = cm.shiptoparty_key and sh.route = cm.salesorg_key
+    join kdb.pbi_sf.zsdrordr so on sh.user_def4 = so.salesdocnumber
+    where sc.company in ('Ivy', 'Red', 'Vivace')
+    and lower(sc.container_type) in ('as inner', 'as outer', 'car', 'ip', 'ivy inner', 'ivy outer')
+    and sh.carrier = 'UPS'
+    AND YEAR(TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD')) = year(current_date())
+)
+, ia_work_instruction as (
+    select
+        erp_order as do,
+        container_id,
+        max(case when work_group = 'Picking' then work_type end) as work_type,
+        max(case when work_group = 'Picking' then user_def1 end) as zone,
+        max(case when work_group = 'Picking' then date_time_stamp end) as picking_date_time_utc,
+        max(case when work_group = 'Picking' then convert_timezone('UTC', 'America/New_York', date_time_stamp) end) as picking_completion_time,
+        max(case when work_type = 'Parcel Loading' then date_time_stamp end) as manifest_date_time_utc,
+        max(case when work_type = 'Parcel Loading' then convert_timezone('UTC', 'America/New_York', date_time_stamp) end) as manifest_date_time
+    from sci.l0.ia_work_instruction
+    where company in ('Ivy', 'Red', 'Vivace')
+    and (work_group = 'Picking' or (work_type = 'Parcel Loading' and instruction_type = 'Header'))
+    group by 1, 2
+)
+, ups_data as (
+    select 
+        tracking_num,
+        max(case when status_type = 'Origin' then datetime end) as origin_date,
+        max(case when status_type = 'Generic' then datetime end) as processing_date,
+        max(case when status_type = 'Delivery' then datetime end) as delivered_date,
+        max(case when status_type = 'Delivery' then delivery_political_div1 end) as delivered_state
+    from sci.l0.ups_tracking
+    group by 1
+)
+, final as (
+    select 
+        b.company,
+        b.so_num,
+        b.so_created_date,
+        b.do_num,
+        ia.work_type,
+        ia.zone,
+        ia.picking_completion_time,
+        ia.manifest_date_time,
+        b.leading_sts,
+        b.container_id,
+        b.container_status,
+        b.container_type,
+        b.container_status_time,
+        b.tracking_number as tracking_num,
+        b.manifest_id,
+        b.manifest_close_time,
+        ud.origin_date,
+        ud.processing_date,
+        ud.delivered_date,
+        ud.delivered_state,
+        b.cust_state,
+        b.shiptoparty_key,
+        b.cust_name,
+        b.cust_city,
+        b.cust_zipcode,
+        b.wave_num,
+        b.internal_shipment_num
+    from base b
+    left join ia_work_instruction ia on b.do_num = ia.do and b.container_id = ia.container_id
+    left join ups_data ud on b.tracking_number = ud.tracking_num
+)
+, do_level as (
+    select
+        do_num,
+        count(distinct tracking_num) as tracking_cnt,
+        count(distinct container_id) as container_cnt,
+        count(distinct manifest_id) as manifest_cnt,
+        count(distinct date_trunc('day', try_to_timestamp(delivered_date))) as delivered_date_cnt,
+        max(case when tracking_num is null then 1 else 0 end) as has_null_tracking,
+        max(case when tracking_num is not null and delivered_date is null then 1 else 0 end) as has_null_delivered_date
+    from final
+    group by do_num
+)
+, classified as (
+    select
+        b.*,
+        d.tracking_cnt,
+        d.container_cnt,
+        d.manifest_cnt,
+        d.delivered_date_cnt,
+        d.has_null_tracking,
+        d.has_null_delivered_date,
+        case when d.tracking_cnt <= 1 then 'SINGLE_SHIPMENT'
+             when d.tracking_cnt > 1 and d.delivered_date_cnt >= 1 and (d.delivered_date_cnt > 1 or d.has_null_delivered_date = 1 or d.has_null_tracking = 1) then 'SPLIT'
+             when d.tracking_cnt > 1 and d.has_null_delivered_date = 0 and d.delivered_date_cnt = 1 then 'NOT_SPLIT'
+             when d.tracking_cnt > 1 and d.delivered_date_cnt = 0 then 'PENDING'
+        else 'UNKNOWN'
+        end as split_status
+    from final b
+    left join do_level d on b.do_num = d.do_num
+)
+select
+    c.*,
+    case when c.split_status = 'SPLIT' then 'Y' else 'N'
+         end as is_split_shipment
+from classified c
+order by c.do_num, c.container_status_time;
+`;
+
+app.get('/api/scale/split-shipments', async (_req, res) => {
+  try {
+    const rows = await executeQuery(SPLIT_SHIPMENTS_SQL);
+    const data = rows.map(toFactShape);
+    res.json({
+      success: true,
+      data,
+      count: data.length,
+      source: 'snowflake',
+      table: 'SCI.L0.SHIPMENT_HEADER + SHIPPING_CONTAINER + IA_WORK_INSTRUCTION + UPS_TRACKING + KDB.PBI_SF.SAP_CUSTOMER_MASTER + ZSDRORDR',
+    });
+  } catch (err) {
+    console.error('split-shipments query failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Custom query (admin only — for Data Hub) ────────────────────────────────
 
 app.post('/api/kdc/query', async (req, res) => {
@@ -1090,6 +1286,8 @@ app.listen(PORT, () => {
   console.log(`  GET  /api/scale/explore-shipping-container  SHIPPING_CONTAINER schema (§7c #18)`);
   console.log(`  GET  /api/scale/explore-process-history     PROCESS_HISTORY schema (§7c #18)`);
   console.log(`  GET  /api/scale/explore-ups-tracking        UPS_TRACKING schema (PR2.5, §7c #18 last-scan)`);
+  console.log(`\n  ── Phase 1 Live Endpoints (sub-plan 002 → 004) ──`);
+  console.log(`  GET  /api/scale/split-shipments             Phase A: detection (BS-IVY/RED/VIVACE via UPS)`);
   console.log(`\n  ── Utility ──`);
   console.log(`  GET  /api/health                     Health check`);
   console.log(`  POST /api/snowflake/test             Test connection`);
