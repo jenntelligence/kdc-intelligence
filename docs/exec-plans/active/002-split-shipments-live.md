@@ -615,6 +615,32 @@ master plan §7c #17 in this prep commit.
 
 ### PR4 — SplitShipmentPage live wiring
 
+**PR4 split into 2 sub-PRs (2026-05-08 discovery):**
+
+After pre-flight discovery, `src/ShippingSLAApp.jsx` confirmed at 6,486
+lines (not 2,772 as README/tech-debt-tracker stated). PR4 scope is
+~215 lines across hook + adapter + page + UI. Split for safer review
+and revert:
+
+- **PR4b1 (this commit):** `useSplitShipments` hook upgrade +
+  `serverRowsToShipments` adapter + `.env` `VITE_DATA_SOURCE=live`.
+  No UI changes — `SplitShipmentPage` still consumes mock-shape data,
+  but in `live` mode that shape now comes from the adapter.
+  Validation: `console.log` of hook output for live + mock modes.
+
+- **PR4b2 (next commit):** `SplitShipmentPage` live wiring; KPI N/A
+  handling for the 3 mock-only fields (`splitGapDays`, `chargeback`,
+  `tier`); custom date picker; channel-scope inline hint;
+  mock-fallback banner. Visual validation in browser.
+
+**Field-shape gap (resolved by PR4b1 adapter):** server returns flat
+per-container rows (`do_num`, `container_id`, `tracking_num`,
+`is_split_shipment`, `split_status`, `channel`, `channel_code`, …),
+mock-shape expects orders with `containers[]` nested. The adapter
+groups by `do_num` and synthesizes mock-only fields as `null`.
+
+
+
 **Goal:** Wire live data into the page. UI changes per master plan §6b.
 Mock fallback path preserved.
 

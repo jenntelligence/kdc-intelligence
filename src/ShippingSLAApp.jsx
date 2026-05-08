@@ -1166,75 +1166,254 @@ const AIRiskPage = ({ filtered, data }) => {
 // ============================================================
 // useSplitShipments — data-fetching hook for SplitShipmentPage
 // ============================================================
+
 /**
- * Fetches live split-shipment data from Snowflake. Falls back to
- * mock on any failure (network, HTTP, or `success: false`).
- * Per master plan §6b — page-level filter intrinsic to backend.
- *
- * Behavior controlled by VITE_DATA_SOURCE env var:
- * - 'mock' (default): use generateMockShipments() — no network call
- * - 'live': fetch from /api/scale/split-shipments (PR3 endpoint)
- *   - On fetch error: fallback to generateMockShipments() + warn
- * - 'csv' (future): not implemented in PR2 — falls back to mock
- *
- * NOT YET WIRED to SplitShipmentPage — PR4 wires it.
- *
- * Field shape: matches generateMockShipments() output exactly
- * (camelCase: id, customer, channel, carrier, state, isSplit,
- * splitCartons, splitGapDays, splitReason, containers[], ...).
- *
- * @returns {{ data: Array|null, error: string|null, loading: boolean, source: string }}
- *   source: 'mock' | 'live' | 'mock-fallback'
+ * Format Date as YYYY-MM-DD using LOCAL timezone.
+ * toISOString() uses UTC, which can shift the date for users in
+ * non-UTC timezones (KDC = US-East). Local format is what users
+ * expect when they think of "today".
  */
-function useSplitShipments() {
-  const [data, setData] = useState(null);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [source, setSource] = useState('mock');
+function formatDateLocal(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
+ * Convert header preset value to {from, to} YYYY-MM-DD strings.
+ * Server endpoint /api/scale/split-shipments expects YYYY-MM-DD
+ * (per snowflake-schema.md § Verified facts — Date handling).
+ *
+ * @param {string} preset - One of '7d', '30d', '90d', 'custom'
+ * @param {{from?: string, to?: string}} customRange - Used only when preset === 'custom'
+ * @returns {{from: string, to: string}}
+ */
+function presetToDateRange(preset, customRange = {}) {
+  if (preset === 'custom') {
+    return {
+      from: customRange.from || formatDateLocal(new Date(Date.now() - 7 * 86400000)),
+      to: customRange.to || formatDateLocal(new Date()),
+    };
+  }
+
+  const today = new Date();
+  const dayOffsetMap = { '7d': 7, '30d': 30, '90d': 90 };
+  const days = dayOffsetMap[preset] ?? 7; // default 7d for unknown presets
+
+  const fromDate = new Date(today);
+  fromDate.setDate(fromDate.getDate() - days);
+
+  return {
+    from: formatDateLocal(fromDate),
+    to: formatDateLocal(today),
+  };
+}
+
+/**
+ * Adapt server response from /api/scale/split-shipments (PR3+PR4a)
+ * to the mock-shape used by SplitShipmentPage.
+ *
+ * Server response: flat per-container rows with do_num, container_id,
+ *   tracking_num, is_split_shipment, split_status, channel, channel_code,
+ *   delivered_date, manifest_id, etc.
+ *
+ * Mock shape: nested orders with containers[] array, plus mock-only
+ *   fields (splitGapDays, chargeback, tier) which we synthesize as null
+ *   for PR4b2 N/A handling.
+ *
+ * Group rows by do_num, build containers[], copy per-DO fields from
+ * the first row of each group.
+ *
+ * @param {Array} rows - Server response data array (toFactShape rows)
+ * @returns {Array} Mock-shaped shipments
+ */
+function serverRowsToShipments(rows) {
+  if (!Array.isArray(rows)) return [];
+
+  const byDoNum = new Map();
+  for (const row of rows) {
+    if (!row.do_num) continue;
+    if (!byDoNum.has(row.do_num)) {
+      byDoNum.set(row.do_num, { do: row, containers: [] });
+    }
+    byDoNum.get(row.do_num).containers.push(row);
+  }
+
+  return Array.from(byDoNum.values()).map(({ do: doRow, containers }) => ({
+    // Identifiers
+    id: doRow.do_num,
+    do_num: doRow.do_num,
+    so_num: doRow.so_num,
+    wave_num: doRow.wave_num,
+    internal_shipment_num: doRow.internal_shipment_num,
+
+    // Channel (PR4a: server already maps code -> name)
+    channel: doRow.channel,            // 'BS-IVY' / 'BS-RED' / 'VIVACE'
+    channel_code: doRow.channel_code,  // '1100' / '1400' / '1900'
+
+    // Customer (server toFactShape lowercases CUST_* into camel)
+    customer: doRow.customer,
+    customer_state: doRow.state,
+    customer_city: doRow.city,
+    customer_zipcode: doRow.zipcode,
+    state: doRow.state, // alias for mock-page filter compatibility
+
+    // Dates (already EST-converted in SQL)
+    so_created_date: doRow.so_created_date,
+    delivered_date: doRow.delivered_date,
+
+    // Split classification (live, settled basis)
+    split_status: doRow.split_status,
+    isSplit: doRow.is_split_shipment,           // alias for mock-page compatibility
+    is_split_shipment: doRow.is_split_shipment,
+    has_null_tracking: doRow.has_null_tracking,
+    has_null_delivered_date: doRow.has_null_delivered_date,
+
+    // DO-level aggregations
+    tracking_cnt: doRow.tracking_cnt,
+    container_cnt: doRow.container_cnt,
+    manifest_cnt: doRow.manifest_cnt,
+    delivered_date_cnt: doRow.delivered_date_cnt,
+
+    // Container array (mock-shape compatibility — nested per-DO)
+    containers,
+
+    // Mock-only fields → null in live mode (PR4b2 will render as N/A)
+    splitGapDays: null,
+    chargeback: null,
+    tier: null,
+    splitReason: null,
+    cause: null,
+    shift: null,
+    orderValue: null,
+
+    // Source marker (debug)
+    _source: 'live',
+  }));
+}
+
+/**
+ * Count items in arr by key, returning a {value: count} object.
+ * Used for console diagnostic on successful live load.
+ */
+function countBy(arr, key) {
+  const m = {};
+  for (const item of arr) {
+    const k = item[key] ?? '(null)';
+    m[k] = (m[k] || 0) + 1;
+  }
+  return m;
+}
+
+/**
+ * useSplitShipments — fetch split-shipment data with mock fallback.
+ *
+ * PR4b1 upgrade:
+ *  - Accepts dateRange + customRange args (was: no args)
+ *  - Calls /api/scale/split-shipments?from=&to= (was: no params)
+ *  - Adapts server response via serverRowsToShipments (was: assumed shape match)
+ *  - Re-fetches when dateRange or customRange changes
+ *
+ * Output shape matches generateMockShipments() — array of orders with
+ * containers[]. Per core-beliefs.md §6, this is the contract: caller
+ * components don't need to know if data is mock or live.
+ *
+ * NOT YET WIRED to SplitShipmentPage — PR4b2 wires it.
+ *
+ * @param {string} dateRange - '7d' / '30d' / '90d' / 'custom'
+ * @param {{from?: string, to?: string}} customRange - YYYY-MM-DD pair
+ * @returns {{
+ *   data: Array | null,
+ *   error: Error | null,
+ *   loading: boolean,
+ *   source: 'mock' | 'live' | 'mock-fallback' | null,
+ *   filter: {from: string, to: string} | null
+ * }}
+ */
+function useSplitShipments(dateRange = '7d', customRange = {}) {
+  const [state, setState] = useState({
+    data: null,
+    error: null,
+    loading: true,
+    source: null,
+    filter: null,
+  });
+
+  // Stable JSON of customRange so useEffect dep array reacts only to value changes
+  const customKey = JSON.stringify(customRange);
 
   useEffect(() => {
     const sourceMode = import.meta.env.VITE_DATA_SOURCE || 'mock';
 
-    if (sourceMode === 'mock') {
-      setData(generateMockShipments());
-      setSource('mock');
-      setLoading(false);
+    if (sourceMode === 'mock' || sourceMode === 'csv') {
+      if (sourceMode === 'csv') {
+        console.warn('[useSplitShipments] csv mode not implemented; falling back to mock');
+      }
+      setState({
+        data: generateMockShipments(),
+        error: null,
+        loading: false,
+        source: 'mock',
+        filter: null,
+      });
       return;
     }
 
-    if (sourceMode === 'csv') {
-      // PR2 doesn't implement CSV path — fall back to mock
-      console.warn('VITE_DATA_SOURCE=csv not implemented; falling back to mock');
-      setData(generateMockShipments());
-      setSource('mock');
-      setLoading(false);
-      return;
-    }
+    // sourceMode === 'live' — fetch with date params
+    const { from, to } = presetToDateRange(dateRange, JSON.parse(customKey));
+    const url = `http://localhost:3001/api/scale/split-shipments?from=${from}&to=${to}`;
 
-    // sourceMode === 'live' — fetch from server (URL pattern matches
-    // src/ShippingSLAApp.jsx:5042; tracked as debt item §7c C)
-    fetch('http://localhost:3001/api/scale/split-shipments')
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
+    setState((s) => ({ ...s, loading: true }));
+
+    let cancelled = false;
+
+    fetch(url)
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
       })
       .then((json) => {
-        if (!json.success) throw new Error(json.error || 'Unknown server error');
-        setData(json.data);
-        setSource('live');
-        setLoading(false);
+        if (cancelled) return;
+        if (!json.success) throw new Error(json.error || 'Server reported failure');
+
+        const shipments = serverRowsToShipments(json.data);
+        // eslint-disable-next-line no-console
+        console.log('[useSplitShipments] Live data loaded:', {
+          rows: json.count,
+          uniqueDOs: shipments.length,
+          filter: json.filter,
+          channelDistribution: countBy(shipments, 'channel'),
+          splitStatusDistribution: countBy(shipments, 'split_status'),
+        });
+
+        setState({
+          data: shipments,
+          error: null,
+          loading: false,
+          source: 'live',
+          filter: json.filter,
+        });
       })
       .catch((err) => {
+        if (cancelled) return;
         // Per core-beliefs §6: mock fallback, never blank the page
-        console.warn('Live split-shipment data unavailable, falling back to mock:', err.message);
-        setData(generateMockShipments());
-        setError(err.message);
-        setSource('mock-fallback');
-        setLoading(false);
+        console.warn('[useSplitShipments] Live fetch failed, falling back to mock:', err);
+        setState({
+          data: generateMockShipments(),
+          error: err,
+          loading: false,
+          source: 'mock-fallback',
+          filter: null,
+        });
       });
-  }, []);
 
-  return { data, error, loading, source };
+    return () => {
+      cancelled = true;
+    };
+  }, [dateRange, customKey]);
+
+  return state;
 }
 
 // ============================================================
