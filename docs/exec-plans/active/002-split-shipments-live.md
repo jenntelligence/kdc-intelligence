@@ -751,6 +751,42 @@ No changes to `useSplitShipments`, `serverRowsToShipments`, the server
 endpoint, the mock generator, or the channel-chip filter logic — PR4b3
 is a pure UI re-arrangement.
 
+**PR4b4 reorder + channel card redesign (2026-05-11, this commit):**
+
+User compared with reference dashboard
+(https://kdc-operations-intelligence.vercel.app/) and requested two
+visual changes on the Split page:
+
+1. **Section order:** Distribution Channel + Container Tracking now
+   appear *before* the Customer + Root Cause grid. New order is
+   `Channel → Container Tracking → Customer + Root Cause`.
+   Rationale: channel is the first triage layer ("which channel is
+   hurting"), then container drill-down ("which orders"), then the
+   deeper attribution (customer + cause).
+
+2. **Distribution Channel card redesign** (light-mode-first to match
+   the reference):
+   - Background: `var(--bg-panel)` → white (`#ffffff`) in light mode,
+     dark panel in dark mode (theme-aware via CSS vars set on `:root`,
+     so SplitShipmentPage doesn't need a `theme` prop).
+   - Border: channel color by `splitRate` threshold —
+     `#E74C6F` (pink, >20%), `#f5a623` (amber, 10-20%), `#2ECC71`
+     (green, <10%). Empty cards use `var(--border)`.
+   - Big headline %: same channel color as the border.
+   - Subtitle ("split/total" or "0 orders"): `var(--text-muted)`.
+   - Progress bar: channel-color fill on a `var(--border)` track.
+     Slight `box-shadow` lift on populated cards; none when empty.
+   - Empty state (BS-RED 0 orders in a short window): `opacity-40`
+     + `─` glyph + neutral border, so the card reads as "no data
+     this window" instead of "0% violation".
+   - Padding bumped from `p-2` → `p-3`, corners from `rounded` →
+     `rounded-lg`, headline from `text-sm` → `text-lg` for the
+     reference's airier feel.
+
+No data-flow changes — same `splitData.channelList` calculation, same
+`isLive` switch, same `lg:grid-cols-3` (live) vs `lg:grid-cols-11`
+(mock) layout, same channel-chip filter. PR4b4 is layout + style only.
+
 **Field-shape gap (resolved by PR4b1 adapter):** server returns flat
 per-container rows (`do_num`, `container_id`, `tracking_num`,
 `is_split_shipment`, `split_status`, `channel`, `channel_code`, …),

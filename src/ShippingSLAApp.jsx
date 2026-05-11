@@ -1652,72 +1652,49 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
         )}
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
-        <SectionCard title="Split Rate by Customer" subtitle="Sorted highest violation" tag="VIOLATION LIST">
-          <div className="space-y-2">
-            {splitData.customerList.map(c => (
-              <div key={c.customer} className="flex items-center gap-3">
-                <div className="flex items-center gap-1.5 w-40">
-                  {c.tier === 'Key' && <span className="text-[10px] px-1 py-0.5 rounded bg-[#1ABC9C]/20 text-[#1ABC9C] font-mono">KEY</span>}
-                  <div className="text-[12px]">{c.customer}</div>
-                </div>
-                <div className="flex-1 h-4 bg-[#0f1419] rounded overflow-hidden">
-                  <div className="h-full flex items-center justify-end pr-1" style={{
-                    width: `${Math.min(c.splitRate*100*4, 100)}%`,
-                    background: c.splitRate > 0.25 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2ECC71'
-                  }}>
-                    <span className="font-mono text-[10px] text-white">{fmtPct(c.splitRate)}</span>
-                  </div>
-                </div>
-                <div className="font-mono text-[11px] text-[#5d6b7a] w-16 text-right">{c.split}/{c.total}</div>
-              </div>
-            ))}
-          </div>
-        </SectionCard>
-
-        <SectionCard title="Root Causes of Splits" subtitle="Why orders are being split" tag="DIAGNOSIS">
-          <div className="space-y-2">
-            {splitData.reasonList.map((r, i) => (
-              <div key={r.reason} className="bg-[#1a2129] rounded p-2.5 border-l-2" style={{ borderColor: ['#E74C6F','#f5a623','#2C3E9B','#1ABC9C','#8a95a3'][i % 5] }}>
-                <div className="flex justify-between items-center">
-                  <div className="text-[12px] font-semibold">{r.reason}</div>
-                  <div className="font-mono text-[12px]">{r.count} · {fmtPct(r.count/splitData.split.length)}</div>
-                </div>
-                <div className="text-[11px] text-[#8a95a3] mt-1">
-                  {r.reason.includes('Short pick') && 'Pick confirmed less than ordered qty. Check SAP-SCALE inventory sync.'}
-                  {r.reason.includes('Wave cutoff') && 'Part of order missed the wave. Review wave planning cutoffs and order timing.'}
-                  {r.reason.includes('Trailer capacity') && 'Load splitting to fit available trailers. Evaluate pallet consolidation.'}
-                  {r.reason.includes('Pick exception') && 'Physical pick issue (empty location, damage found). Cycle count priority SKU.'}
-                  {r.reason.includes('SAP-SCALE') && 'Layer 1/2 inventory discrepancy (phantom inventory). Audit allocation logic.'}
-                </div>
-              </div>
-            ))}
-          </div>
-        </SectionCard>
-      </div>
-
+      {/* PR4b4: Channel first → Container Tracking → Customer + Root Cause.
+          Triage flow: which channel is hurting → which orders → who/why. */}
       <SectionCard title="Split Rate by Distribution Channel" subtitle="ECOM channels typically have zero tolerance for splits" tag="CHANNEL IMPACT" className="mb-4">
+        {/* PR4b4: Light-mode-first card redesign per reference dashboard.
+            Card bg uses var(--bg-panel) so dark mode stays dark. Border + headline %
+            + progress bar all share the same channel color (pink/orange/green by
+            splitRate threshold). Empty cards (BS-RED w/ 0 settled) gray out with a
+            neutral border so they read as "no data yet" rather than "0.0% violation". */}
         <div className={`grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 ${isLive ? 'lg:grid-cols-3' : 'lg:grid-cols-11'} gap-2 mb-3`}>
           {splitData.channelList.map(c => {
-            // PR4b2: BS-RED commonly has 0 settled rows in a short window — gray it instead of 0.0%.
             const isEmpty = c.total === 0;
+            const channelColor = c.splitRate > 0.2 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2ECC71';
             return (
-              <div key={c.channel} className={`rounded border p-2 ${isEmpty ? 'opacity-40' : ''}`}
-                style={{ background: '#1a2129', borderColor: isEmpty ? '#2d3744' : (c.splitRate > 0.2 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2d3744') }}>
-                <div className="flex items-center gap-1 mb-1">
-                  <div className="w-1.5 h-1.5 rounded-sm" style={{ background: CHANNEL_GROUP_COLORS[c.group] || '#8a95a3' }}/>
-                  <div className="text-[10px] font-mono uppercase tracking-wider text-[#8a95a3] truncate">{c.channel}</div>
+              <div key={c.channel}
+                className={`rounded-lg p-3 transition-all ${isEmpty ? 'opacity-40' : ''}`}
+                style={{
+                  background: 'var(--bg-panel)',
+                  border: `1px solid ${isEmpty ? 'var(--border)' : channelColor}`,
+                  boxShadow: isEmpty ? 'none' : '0 1px 3px rgba(0,0,0,0.05)',
+                }}>
+                {/* Channel label + group-color dot */}
+                <div className="flex items-center gap-1.5 mb-2">
+                  <div className="w-1.5 h-1.5 rounded-sm flex-shrink-0" style={{ background: CHANNEL_GROUP_COLORS[c.group] || '#8a95a3' }}/>
+                  <div className="text-[10px] font-mono uppercase tracking-wider truncate" style={{ color: 'var(--text-muted)' }}>{c.channel}</div>
                 </div>
+                {/* Headline percentage in the channel color (or muted dash when empty) */}
                 {isEmpty ? (
-                  <div className="font-mono text-sm font-semibold text-[#5d6b7a]">─</div>
+                  <div className="font-mono text-lg font-semibold" style={{ color: 'var(--text-muted)' }}>─</div>
                 ) : (
-                  <div className={`font-mono text-sm font-semibold ${c.splitRate > 0.2 ? 'text-[#E74C6F]' : c.splitRate > 0.1 ? 'text-[#f5a623]' : 'text-[#2ECC71]'}`}>
+                  <div className="font-mono text-lg font-semibold" style={{ color: channelColor }}>
                     {fmtPct(c.splitRate)}
                   </div>
                 )}
-                <div className="font-mono text-[10px] text-[#5d6b7a]">{isEmpty ? '0 orders' : `${c.split}/${c.total}`}</div>
-                <div className="mt-1 h-0.5 bg-[#0f1419] rounded overflow-hidden">
-                  <div className="h-full" style={{ width: isEmpty ? '0%' : `${Math.min(c.splitRate*100*3, 100)}%`, background: c.splitRate > 0.2 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2ECC71' }}/>
+                {/* split/total subtitle */}
+                <div className="font-mono text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                  {isEmpty ? '0 orders' : `${c.split}/${c.total}`}
+                </div>
+                {/* Progress bar — channel color on a light-gray track */}
+                <div className="mt-2 h-1 rounded overflow-hidden" style={{ background: 'var(--border)' }}>
+                  <div className="h-full transition-all" style={{
+                    width: isEmpty ? '0%' : `${Math.min(c.splitRate * 100 * 3, 100)}%`,
+                    background: channelColor,
+                  }}/>
                 </div>
               </div>
             );
@@ -1859,6 +1836,51 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
           </table>
         </div>
       </SectionCard>
+
+      {/* PR4b4: Customer + Root Cause grid moved here from above-channel. */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
+        <SectionCard title="Split Rate by Customer" subtitle="Sorted highest violation" tag="VIOLATION LIST">
+          <div className="space-y-2">
+            {splitData.customerList.map(c => (
+              <div key={c.customer} className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5 w-40">
+                  {c.tier === 'Key' && <span className="text-[10px] px-1 py-0.5 rounded bg-[#1ABC9C]/20 text-[#1ABC9C] font-mono">KEY</span>}
+                  <div className="text-[12px]">{c.customer}</div>
+                </div>
+                <div className="flex-1 h-4 bg-[#0f1419] rounded overflow-hidden">
+                  <div className="h-full flex items-center justify-end pr-1" style={{
+                    width: `${Math.min(c.splitRate*100*4, 100)}%`,
+                    background: c.splitRate > 0.25 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2ECC71'
+                  }}>
+                    <span className="font-mono text-[10px] text-white">{fmtPct(c.splitRate)}</span>
+                  </div>
+                </div>
+                <div className="font-mono text-[11px] text-[#5d6b7a] w-16 text-right">{c.split}/{c.total}</div>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+
+        <SectionCard title="Root Causes of Splits" subtitle="Why orders are being split" tag="DIAGNOSIS">
+          <div className="space-y-2">
+            {splitData.reasonList.map((r, i) => (
+              <div key={r.reason} className="bg-[#1a2129] rounded p-2.5 border-l-2" style={{ borderColor: ['#E74C6F','#f5a623','#2C3E9B','#1ABC9C','#8a95a3'][i % 5] }}>
+                <div className="flex justify-between items-center">
+                  <div className="text-[12px] font-semibold">{r.reason}</div>
+                  <div className="font-mono text-[12px]">{r.count} · {fmtPct(r.count/splitData.split.length)}</div>
+                </div>
+                <div className="text-[11px] text-[#8a95a3] mt-1">
+                  {r.reason.includes('Short pick') && 'Pick confirmed less than ordered qty. Check SAP-SCALE inventory sync.'}
+                  {r.reason.includes('Wave cutoff') && 'Part of order missed the wave. Review wave planning cutoffs and order timing.'}
+                  {r.reason.includes('Trailer capacity') && 'Load splitting to fit available trailers. Evaluate pallet consolidation.'}
+                  {r.reason.includes('Pick exception') && 'Physical pick issue (empty location, damage found). Cycle count priority SKU.'}
+                  {r.reason.includes('SAP-SCALE') && 'Layer 1/2 inventory discrepancy (phantom inventory). Audit allocation logic.'}
+                </div>
+              </div>
+            ))}
+          </div>
+        </SectionCard>
+      </div>
     </>
   );
 };
