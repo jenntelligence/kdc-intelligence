@@ -6046,31 +6046,10 @@ export default function ShippingSLAApp() {
             </div>
           </div>
           <div className="flex items-center gap-1.5 font-mono text-[11px]">
-            {/* PR4b3: Preset buttons demoted to a dim secondary indicator. Primary action moved
-                to the gray-bar summary dropdown below. Still clickable as a shortcut so the active
-                state can be flipped without opening the dropdown. */}
-            <div className="hidden md:flex items-center gap-1 opacity-50 hover:opacity-100 transition-opacity">
-              {['7d', '30d', '90d'].map(preset => {
-                const active = dateRange === preset;
-                return (
-                  <button key={preset}
-                    onClick={() => { setDateRange(preset); setCustomRange({}); }}
-                    className="h-6 px-2 rounded text-[10px] font-mono uppercase tracking-wider transition-colors"
-                    style={active
-                      ? { background: theme === 'light' ? 'rgba(255,255,255,0.35)' : 'rgba(26,188,156,0.35)', border: theme === 'light' ? '1px solid rgba(255,255,255,0.6)' : '1px solid rgba(26,188,156,0.7)', color: theme === 'light' ? '#ffffff' : '#1ABC9C', fontWeight: 600 }
-                      : { background: 'transparent', border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? 'rgba(255,255,255,0.7)' : THEME.textMuted }}>
-                    {preset}
-                  </button>
-                );
-              })}
-              <button onClick={() => setDateRange('custom')}
-                className="h-6 px-2 rounded text-[10px] font-mono uppercase tracking-wider transition-colors"
-                style={dateRange === 'custom'
-                  ? { background: theme === 'light' ? 'rgba(255,255,255,0.35)' : 'rgba(26,188,156,0.35)', border: theme === 'light' ? '1px solid rgba(255,255,255,0.6)' : '1px solid rgba(26,188,156,0.7)', color: theme === 'light' ? '#ffffff' : '#1ABC9C', fontWeight: 600 }
-                  : { background: 'transparent', border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? 'rgba(255,255,255,0.7)' : THEME.textMuted }}>
-                Custom
-              </button>
-            </div>
+            {/* PR4b6: Removed the dim 7d/30d/90d/Custom preset buttons. PR4b3's gray-bar
+                dropdown already covers all four presets including Custom From/To inputs, so
+                this header strip was strictly redundant. dateRange / customRange state are
+                preserved — the dropdown still uses them. */}
             {/* PR4b2: Split page hook source indicator (LIVE / MOCK / MOCK-FALLBACK).
                 Shown only when activePage === 'split' since the hook only runs there. */}
             {activePage === 'split' && splitSource && (

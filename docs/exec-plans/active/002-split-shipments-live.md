@@ -845,6 +845,36 @@ No changes to `useSplitShipments`, the adapter, server.js, the mock
 generator, or any other page. The only other `CHANNELS.map(…)` call
 sites (Admin SLA page, AI Risk page, etc.) remain unaffected.
 
+**PR4b6 header buttons removal (2026-05-11, this commit):**
+
+PR4b3 demoted the header's `[7D][30D][90D][Custom]` buttons to 50%
+opacity secondary indicators with the rationale "keep the Custom date
+picker available." But PR4b3's gray-bar dropdown *already* includes the
+Custom range option plus inline From/To inputs — the header strip was
+genuinely redundant. User reviewing the running dashboard caught it.
+
+**Resolution — option 1 (complete removal):**
+
+- Deleted the `<div className="hidden md:flex … opacity-50 …">` block
+  (~25 lines) that wrapped the four preset buttons.
+- All other header items untouched: LIVE/MOCK badge, data-source toggle,
+  refresh timestamp, theme toggle, Upload CSV, user badge, sign-out.
+
+**State preserved:**
+
+- `dateRange` (`useState('7d')`) and `customRange` (`useState({})`) live
+  on — the gray-bar dropdown still consumes them.
+- `setDateRange` / `setCustomRange` calls inside the dropdown rows and
+  Custom From/To inputs continue working unchanged.
+
+**Safe for other pages:** Geo / FlightBoard / Costs / etc. still use
+mock data and never read `dateRange`, so removing the header buttons
+changes nothing for them visually or functionally. Future live-wiring
+PRs for those pages can mount their own dropdowns following PR4b3's
+pattern.
+
+Pure visual cleanup — no data flow, no hook, no adapter changes.
+
 **Field-shape gap (resolved by PR4b1 adapter):** server returns flat
 per-container rows (`do_num`, `container_id`, `tracking_num`,
 `is_split_shipment`, `split_status`, `channel`, `channel_code`, …),
