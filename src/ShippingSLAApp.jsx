@@ -27,8 +27,8 @@ const CUSTOMER_TIERS = {
 const CHANNELS = [
   'CS - Bulk',
   'CS - DSDC',
-  'BS - IVY',
-  'BS - RED',
+  'BS-IVY',
+  'BS-RED',
   'VIVACE',
   'AST',
   'IIO',
@@ -100,8 +100,8 @@ const generateMockShipments = () => {
   const channelWeights = [
     { ch: 'CS - Bulk',         w: 15 },
     { ch: 'CS - DSDC',         w: 10 },
-    { ch: 'BS - IVY',          w: 8 },
-    { ch: 'BS - RED',          w: 8 },
+    { ch: 'BS-IVY',          w: 8 },
+    { ch: 'BS-RED',          w: 8 },
     { ch: 'VIVACE',            w: 6 },
     { ch: 'AST',               w: 7 },
     { ch: 'IIO',               w: 5 },
@@ -455,14 +455,14 @@ const MOCK_EVENTS = [
   { id: 1, name: 'Spring Beauty BOGO Promotion', type: 'Promotion', startDate: new Date(2026, 3, 1), endDate: new Date(2026, 3, 7), impact: 'High', channels: ['CS - Bulk', 'CS - DSDC', 'ECOM - DTC'], volumeImpact: '+45%', notes: 'Major BOGO across all beauty SKUs. Expect heavy CS and ECOM volume.', contributor: 'GMC', contributedAt: new Date(2026, 2, 25), sourceDoc: 'spring-bogo-brief.pdf' },
   { id: 2, name: 'Ulta Q2 Prepack Build', type: 'Prepack', startDate: new Date(2026, 3, 5), endDate: new Date(2026, 3, 12), impact: 'High', channels: ['CS - Bulk'], volumeImpact: '+60%', notes: 'Ulta Beauty prepacks for Q2 floor reset. 2,400 prepack units.', contributor: 'Mike Ops', contributedAt: new Date(2026, 2, 28), sourceDoc: 'ulta-q2-prepack-spec.xlsx' },
   { id: 3, name: 'Amazon Prime Day Prep', type: 'Pre-sale', startDate: new Date(2026, 3, 10), endDate: new Date(2026, 3, 14), impact: 'High', channels: ['ECOM - AMAZON 1P', 'ECOM - AMAZON 3P'], volumeImpact: '+80%', notes: 'Prime Day prep shipments. Must clear by 4/14.', contributor: 'GMC', contributedAt: new Date(2026, 3, 1), sourceDoc: 'prime-day-forecast.pdf' },
-  { id: 4, name: 'Cosmoprof North America', type: 'Show/Expo', startDate: new Date(2026, 3, 15), endDate: new Date(2026, 3, 17), impact: 'Medium', channels: ['BS - IVY', 'BS - RED', 'VIVACE'], volumeImpact: '+20%', notes: 'Trade show samples and booth inventory. Ship by 4/12.', contributor: 'Mike Ops', contributedAt: new Date(2026, 3, 2), sourceDoc: null },
+  { id: 4, name: 'Cosmoprof North America', type: 'Show/Expo', startDate: new Date(2026, 3, 15), endDate: new Date(2026, 3, 17), impact: 'Medium', channels: ['BS-IVY', 'BS-RED', 'VIVACE'], volumeImpact: '+20%', notes: 'Trade show samples and booth inventory. Ship by 4/12.', contributor: 'Mike Ops', contributedAt: new Date(2026, 3, 2), sourceDoc: null },
   { id: 5, name: 'Easter Holiday', type: 'Holiday/Closure', startDate: new Date(2026, 3, 5), endDate: new Date(2026, 3, 6), impact: 'Medium', channels: [], volumeImpact: '-100%', notes: 'DC closed Easter Sunday. Saturday skeleton crew.', contributor: 'GMC', contributedAt: new Date(2026, 2, 15), sourceDoc: null },
   { id: 6, name: 'Kiss Lash Launch — Summer Collection', type: 'Product Launch', startDate: new Date(2026, 3, 20), endDate: new Date(2026, 3, 25), impact: 'High', channels: ['CS - Bulk', 'CS - DSDC', 'ECOM - DTC', 'ECOM - AMAZON 1P'], volumeImpact: '+55%', notes: 'New 5D lash collection. Marketing push starts 4/18. Pre-orders shipping 4/20.', contributor: 'GMC', contributedAt: new Date(2026, 3, 5), sourceDoc: 'summer-lash-launch-plan.pdf' },
   { id: 7, name: 'Target Seasonal Endcap', type: 'Seasonal Push', startDate: new Date(2026, 3, 22), endDate: new Date(2026, 4, 5), impact: 'Medium', channels: ['CS - Bulk'], volumeImpact: '+30%', notes: 'Target seasonal endcap refresh. Nail care + lip category.', contributor: 'Mike Ops', contributedAt: new Date(2026, 3, 8), sourceDoc: 'target-endcap-q2.xlsx' },
   { id: 8, name: 'CVS Planogram Reset', type: 'Prepack', startDate: new Date(2026, 3, 28), endDate: new Date(2026, 4, 3), impact: 'Medium', channels: ['CS - DSDC'], volumeImpact: '+25%', notes: 'CVS planogram reset wave 2. Prepack assembly required.', contributor: 'Mike Ops', contributedAt: new Date(2026, 3, 10), sourceDoc: 'cvs-plano-wave2.pdf' },
   { id: 9, name: 'Memorial Day Sale Prep', type: 'Pre-sale', startDate: new Date(2026, 4, 18), endDate: new Date(2026, 4, 22), impact: 'High', channels: ['ECOM - DTC', 'ECOM - AMAZON 1P', 'ECOM - AMAZON 3P'], volumeImpact: '+70%', notes: 'Memorial Day weekend sale. Ship all pre-sale orders by 5/22.', contributor: 'GMC', contributedAt: new Date(2026, 3, 15), sourceDoc: null },
   { id: 10, name: 'Walmart Summer Beauty Reset', type: 'Prepack', startDate: new Date(2026, 4, 1), endDate: new Date(2026, 4, 8), impact: 'High', channels: ['CS - Bulk'], volumeImpact: '+50%', notes: 'Full beauty aisle reset for Walmart. 3,600 prepack units.', contributor: 'Mike Ops', contributedAt: new Date(2026, 3, 18), sourceDoc: 'walmart-summer-reset.xlsx' },
-  { id: 11, name: 'Sally Beauty Promo Week', type: 'Promotion', startDate: new Date(2026, 3, 14), endDate: new Date(2026, 3, 20), impact: 'Medium', channels: ['BS - IVY', 'BS - RED'], volumeImpact: '+25%', notes: 'Bi-annual promo. BS channels see uplift.', contributor: 'GMC', contributedAt: new Date(2026, 3, 3), sourceDoc: 'sally-promo-brief.pdf' },
+  { id: 11, name: 'Sally Beauty Promo Week', type: 'Promotion', startDate: new Date(2026, 3, 14), endDate: new Date(2026, 3, 20), impact: 'Medium', channels: ['BS-IVY', 'BS-RED'], volumeImpact: '+25%', notes: 'Bi-annual promo. BS channels see uplift.', contributor: 'GMC', contributedAt: new Date(2026, 3, 3), sourceDoc: 'sally-promo-brief.pdf' },
   { id: 12, name: 'IIO Warehouse Maintenance', type: 'Holiday/Closure', startDate: new Date(2026, 3, 19), endDate: new Date(2026, 3, 19), impact: 'Low', channels: ['IIO'], volumeImpact: '-50%', notes: 'Half-day maintenance window. IIO orders delayed.', contributor: 'Mike Ops', contributedAt: new Date(2026, 3, 12), sourceDoc: null },
   { id: 13, name: 'DTC Flash Sale', type: 'Promotion', startDate: new Date(2026, 3, 25), endDate: new Date(2026, 3, 26), impact: 'Medium', channels: ['ECOM - DTC'], volumeImpact: '+40%', notes: '48-hour flash sale on kissusa.com', contributor: 'GMC', contributedAt: new Date(2026, 3, 14), sourceDoc: null },
   { id: 14, name: 'AST Quarterly Review Ship', type: 'Seasonal Push', startDate: new Date(2026, 3, 8), endDate: new Date(2026, 3, 10), impact: 'Low', channels: ['AST'], volumeImpact: '+15%', notes: 'Quarterly review samples for AST accounts.', contributor: 'Mike Ops', contributedAt: new Date(2026, 3, 6), sourceDoc: null },
@@ -1306,6 +1306,27 @@ function countBy(arr, key) {
   return m;
 }
 
+// PR4b2: SCALE container status is numeric (700/800/900 …). The mock used
+// UPS-style strings and the table colors keyed off those — map for parity
+// so the existing badge styling renders.
+function mapScaleStatusToUps(scaleStatus) {
+  if (scaleStatus == null) return 'LABEL_CREATED';
+  const n = parseInt(String(scaleStatus), 10);
+  if (!Number.isFinite(n)) return 'LABEL_CREATED';
+  if (n >= 900) return 'DELIVERED';
+  if (n >= 800) return 'OUT_FOR_DELIVERY';
+  if (n >= 700) return 'IN_TRANSIT';
+  if (n >= 400) return 'PICKED_UP';
+  return 'LABEL_CREATED';
+}
+
+// PR4b2: tolerate Snowflake's mixed string/null timestamp output; Date(null) is epoch which is misleading.
+function toDateOrNull(v) {
+  if (v == null) return null;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 /**
  * useSplitShipments — fetch split-shipment data with mock fallback.
  *
@@ -1419,15 +1440,69 @@ function useSplitShipments(dateRange = '7d', customRange = {}) {
 // ============================================================
 // SPLIT SHIPMENT PAGE
 // ============================================================
-const SplitShipmentPage = ({ filtered }) => {
+const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], onSourceChange }) => {
   const [expandedOrder, setExpandedOrder] = useState(null);
+
+  // PR4b2: Live data via hook; mock-fallback preserves the page when API is unreachable.
+  // Trust hierarchy: server (master query) → adapter (PR4b1) → this page.
+  const { data: hookData, error: hookError, loading: hookLoading, source } = useSplitShipments(dateRange, customRange);
+
+  // Lift the hook's `source` up to the parent so the header badge and channel-chips hint can react.
+  useEffect(() => {
+    if (onSourceChange) onSourceChange(source);
+  }, [source, onSourceChange]);
+  // Clear the lifted state on unmount so the badge disappears when leaving the page.
+  useEffect(() => () => { if (onSourceChange) onSourceChange(null); }, [onSourceChange]);
+
+  const isLive = source === 'live';
+
+  // Choose data source: live/mock from hook; channel-chip filter applied on top.
+  // The legacy `filtered` prop carries header-bar filtering for the mock path on other pages —
+  // for the Split page we own filtering ourselves so the hook output (live OR mock) flows through.
+  //
+  // Live mode: containers[] carries raw server rows (snake_case, status as numeric string).
+  // Normalize to the mock shape so the existing table JSX renders without per-cell null guards
+  // and without modifying the PR4b1 adapter.
+  const pageData = useMemo(() => {
+    const base = hookData || [];
+    const channelFiltered = selectedChannels.length === 0
+      ? base
+      : base.filter(o => selectedChannels.includes(o.channel));
+    if (!isLive) return channelFiltered;
+    return channelFiltered.map(o => ({
+      ...o,
+      containers: (o.containers || []).map(c => ({
+        ...c,
+        containerId:    c.container_id,
+        trackingNumber: c.tracking_num || '—',
+        status:         mapScaleStatusToUps(c.container_status),
+        shipDate:       toDateOrNull(c.container_status_time),
+        expectedDelivery: null,                              // §7c #18 - not yet sourced
+        actualDelivery:   toDateOrNull(c.delivered_date),
+        isLate: false,                                       // derive in PR6
+        deliveredDifferentDay: false,                        // derive in PR6
+        weight: null,
+        items: null,
+        lastLocation: c.delivered_state || null,
+      })),
+    }));
+  }, [hookData, selectedChannels, isLive]);
+
   const splitData = useMemo(() => {
-    const split = filtered.filter(o => o.isSplit);
-    const splitRate = filtered.length ? split.length / filtered.length : 0;
+    // PR4b2 Split Rate definition (user decision): settled basis only —
+    // denominator excludes PENDING / UNKNOWN. Stable metric over time
+    // since short windows are noisy due to in-flight orders.
+    const settled = pageData.filter(o => o.split_status !== 'PENDING' && o.split_status !== 'UNKNOWN');
+    const split = settled.filter(o => o.isSplit);
+    const splitRate = settled.length ? split.length / settled.length : 0;
+
+    // PR4b2: In Transit (PENDING) — surfaced as its own KPI to keep the settled rate clean.
+    const pending = pageData.filter(o => o.split_status === 'PENDING');
+    const pendingRate = pageData.length ? pending.length / pageData.length : 0;
 
     // By customer
     const byCustomer = {};
-    filtered.forEach(o => {
+    pageData.forEach(o => {
       if (!byCustomer[o.customer]) byCustomer[o.customer] = { customer: o.customer, tier: o.tier, total: 0, split: 0 };
       byCustomer[o.customer].total++;
       if (o.isSplit) byCustomer[o.customer].split++;
@@ -1436,12 +1511,13 @@ const SplitShipmentPage = ({ filtered }) => {
       ...c, splitRate: c.total ? c.split/c.total : 0
     })).sort((a,b) => b.splitRate - a.splitRate);
 
-    // By shift
+    // By shift (mock-only field; live mode produces a single 'unknown' bucket)
     const byShift = {};
-    filtered.forEach(o => {
-      if (!byShift[o.shift]) byShift[o.shift] = { shift: o.shift, total: 0, split: 0 };
-      byShift[o.shift].total++;
-      if (o.isSplit) byShift[o.shift].split++;
+    pageData.forEach(o => {
+      const key = o.shift || (isLive ? 'N/A (live)' : 'unknown');
+      if (!byShift[key]) byShift[key] = { shift: key, total: 0, split: 0 };
+      byShift[key].total++;
+      if (o.isSplit) byShift[key].split++;
     });
     const shiftList = Object.values(byShift).map(s => ({
       ...s, splitRate: s.total ? s.split/s.total : 0
@@ -1449,36 +1525,65 @@ const SplitShipmentPage = ({ filtered }) => {
 
     // By reason
     const byReason = {};
-    split.forEach(o => { byReason[o.splitReason] = (byReason[o.splitReason]||0)+1; });
+    split.forEach(o => { const k = o.splitReason || 'Unspecified'; byReason[k] = (byReason[k]||0)+1; });
     const reasonList = Object.entries(byReason).map(([k,v]) => ({ reason: k, count: v })).sort((a,b) => b.count - a.count);
 
-    // By channel
+    // By channel — settled basis
     const byChannel = {};
-    filtered.forEach(o => {
+    settled.forEach(o => {
       if (!byChannel[o.channel]) byChannel[o.channel] = { channel: o.channel, total: 0, split: 0, chargeback: 0 };
       byChannel[o.channel].total++;
       if (o.isSplit) {
         byChannel[o.channel].split++;
-        byChannel[o.channel].chargeback += o.chargeback;
+        byChannel[o.channel].chargeback += (o.chargeback || 0);
       }
     });
+    // PR4b2: In live mode the server scopes data to BS-IVY/BS-RED/VIVACE.
+    // BS-RED can return zero rows in a short window — keep an explicit 0-row card
+    // (grayed) so users see the channel exists rather than wondering where it went.
+    if (isLive) {
+      const ensure = ['BS-IVY', 'BS-RED', 'VIVACE'];
+      ensure.forEach(name => {
+        if (!byChannel[name]) byChannel[name] = { channel: name, total: 0, split: 0, chargeback: 0 };
+      });
+    }
     const channelList = Object.values(byChannel).map(c => ({
       ...c,
       splitRate: c.total ? c.split/c.total : 0,
       group: getChannelGroup(c.channel),
     })).sort((a,b) => b.splitRate - a.splitRate);
 
-    // Chargebacks from splits
-    const splitChargebacks = split.reduce((s,o) => s + o.chargeback, 0);
+    // Chargebacks from splits (mock-only — null-safe in live mode)
+    const splitChargebacks = split.reduce((s,o) => s + (o.chargeback || 0), 0);
 
-    // Avg gap
-    const avgGap = split.length ? split.reduce((s,o) => s + o.splitGapDays, 0) / split.length : 0;
+    // Avg gap (mock-only — null-safe in live mode)
+    const gapItems = split.filter(o => o.splitGapDays != null);
+    const avgGap = gapItems.length ? gapItems.reduce((s,o) => s + o.splitGapDays, 0) / gapItems.length : 0;
 
-    return { split, splitRate, customerList, shiftList, reasonList, channelList, splitChargebacks, avgGap };
-  }, [filtered]);
+    return {
+      split, splitRate, settledCount: settled.length, pendingCount: pending.length, pendingRate, totalCount: pageData.length,
+      customerList, shiftList, reasonList, channelList, splitChargebacks, avgGap,
+    };
+  }, [pageData, isLive]);
+
+  if (hookLoading) {
+    return <div className="p-8 text-center text-[12px] font-mono" style={{ color: 'var(--text-muted)' }}>Loading split-shipment data…</div>;
+  }
 
   return (
     <>
+      {/* PR4b2: Mock-fallback banner — server unreachable, page is showing degraded mock data.
+          Per core-beliefs §6: never blank the page; clearly label degraded mode. */}
+      {source === 'mock-fallback' && (
+        <div className="rounded p-2.5 mb-4 flex items-start gap-2" style={{ background: '#E74C6F10', border: '1px solid #E74C6F30' }}>
+          <AlertTriangle size={14} className="text-[#E74C6F] mt-0.5 flex-shrink-0"/>
+          <div className="text-[12px]" style={{ color: 'var(--text-primary)' }}>
+            <span className="font-semibold text-[#E74C6F]">Live data unavailable</span>
+            {hookError?.message && <span className="font-mono text-[11px] ml-1.5" style={{ color: 'var(--text-secondary)' }}>({hookError.message})</span>}
+            <span className="ml-1.5" style={{ color: 'var(--text-secondary)' }}>— showing mock data. Check that <code className="font-mono">node server.js</code> is running.</span>
+          </div>
+        </div>
+      )}
       <div className="bg-gradient-to-r from-[#E74C6F]/20 to-transparent border-l-2 border-[#E74C6F] rounded p-3 mb-4">
         <div className="flex items-center gap-2 text-[12px] text-[#E74C6F] font-semibold uppercase tracking-wider">
           <AlertTriangle size={14}/> Customer Hard Requirement
@@ -1507,12 +1612,24 @@ const SplitShipmentPage = ({ filtered }) => {
         );
       })()}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
-        <KPI label="Split Shipment Rate" value={fmtPct(splitData.splitRate)} delta={`Target: 0.0%`} deltaType="bad" icon={Split}/>
-        <KPI label="Orders Split" value={splitData.split.length} delta={`of ${filtered.length} total`} deltaType="bad" icon={Package}/>
-        <KPI label="Avg Gap" value={splitData.avgGap.toFixed(1)} unit="days" delta="Between partials" deltaType="bad" icon={Clock}/>
-        <KPI label="Chargebacks" value={`$${fmtNum(splitData.splitChargebacks.toFixed(0))}`} delta="Split penalty $" deltaType="bad" icon={DollarSign}/>
-        <KPI label="Key Acct Impact" value={splitData.customerList.filter(c => c.tier === 'Key').reduce((s,c) => s+c.split, 0)} delta="Split orders to Key" deltaType="bad" icon={Users}/>
+      {/* PR4b2 KPI cards: live data has 3 settled-basis metrics + 3 mock-only N/A in live mode. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
+        <KPI label="Split Rate" value={fmtPct(splitData.splitRate)} delta={`${splitData.split.length} of ${splitData.settledCount} settled`} deltaType="bad" icon={Split}/>
+        <KPI label="Orders Split" value={splitData.split.length} delta={`of ${splitData.settledCount} settled`} deltaType="bad" icon={Package}/>
+        <KPI label="In Transit" value={fmtPct(splitData.pendingRate)} delta={`${splitData.pendingCount} of ${splitData.totalCount} pending`} icon={Clock}/>
+        {isLive ? (
+          <>
+            <KPI label="Avg Gap" value="N/A" delta="Not available in live data" icon={Clock}/>
+            <KPI label="Chargebacks" value="N/A" delta="Not available in live data" icon={DollarSign}/>
+            <KPI label="Key Acct Impact" value="N/A" delta="Not available in live data" icon={Users}/>
+          </>
+        ) : (
+          <>
+            <KPI label="Avg Gap" value={splitData.avgGap.toFixed(1)} unit="days" delta="Between partials" deltaType="bad" icon={Clock}/>
+            <KPI label="Chargebacks" value={`$${fmtNum(splitData.splitChargebacks.toFixed(0))}`} delta="Split penalty $" deltaType="bad" icon={DollarSign}/>
+            <KPI label="Key Acct Impact" value={splitData.customerList.filter(c => c.tier === 'Key').reduce((s,c) => s+c.split, 0)} delta="Split orders to Key" deltaType="bad" icon={Users}/>
+          </>
+        )}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
@@ -1560,23 +1677,31 @@ const SplitShipmentPage = ({ filtered }) => {
       </div>
 
       <SectionCard title="Split Rate by Distribution Channel" subtitle="ECOM channels typically have zero tolerance for splits" tag="CHANNEL IMPACT" className="mb-4">
-        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-11 gap-2 mb-3">
-          {splitData.channelList.map(c => (
-            <div key={c.channel} className="bg-[#1a2129] rounded border p-2"
-              style={{ borderColor: c.splitRate > 0.2 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2d3744' }}>
-              <div className="flex items-center gap-1 mb-1">
-                <div className="w-1.5 h-1.5 rounded-sm" style={{ background: CHANNEL_GROUP_COLORS[c.group] || '#8a95a3' }}/>
-                <div className="text-[10px] font-mono uppercase tracking-wider text-[#8a95a3] truncate">{c.channel}</div>
+        <div className={`grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 ${isLive ? 'lg:grid-cols-3' : 'lg:grid-cols-11'} gap-2 mb-3`}>
+          {splitData.channelList.map(c => {
+            // PR4b2: BS-RED commonly has 0 settled rows in a short window — gray it instead of 0.0%.
+            const isEmpty = c.total === 0;
+            return (
+              <div key={c.channel} className={`rounded border p-2 ${isEmpty ? 'opacity-40' : ''}`}
+                style={{ background: '#1a2129', borderColor: isEmpty ? '#2d3744' : (c.splitRate > 0.2 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2d3744') }}>
+                <div className="flex items-center gap-1 mb-1">
+                  <div className="w-1.5 h-1.5 rounded-sm" style={{ background: CHANNEL_GROUP_COLORS[c.group] || '#8a95a3' }}/>
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-[#8a95a3] truncate">{c.channel}</div>
+                </div>
+                {isEmpty ? (
+                  <div className="font-mono text-sm font-semibold text-[#5d6b7a]">─</div>
+                ) : (
+                  <div className={`font-mono text-sm font-semibold ${c.splitRate > 0.2 ? 'text-[#E74C6F]' : c.splitRate > 0.1 ? 'text-[#f5a623]' : 'text-[#2ECC71]'}`}>
+                    {fmtPct(c.splitRate)}
+                  </div>
+                )}
+                <div className="font-mono text-[10px] text-[#5d6b7a]">{isEmpty ? '0 orders' : `${c.split}/${c.total}`}</div>
+                <div className="mt-1 h-0.5 bg-[#0f1419] rounded overflow-hidden">
+                  <div className="h-full" style={{ width: isEmpty ? '0%' : `${Math.min(c.splitRate*100*3, 100)}%`, background: c.splitRate > 0.2 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2ECC71' }}/>
+                </div>
               </div>
-              <div className={`font-mono text-sm font-semibold ${c.splitRate > 0.2 ? 'text-[#E74C6F]' : c.splitRate > 0.1 ? 'text-[#f5a623]' : 'text-[#2ECC71]'}`}>
-                {fmtPct(c.splitRate)}
-              </div>
-              <div className="font-mono text-[10px] text-[#5d6b7a]">{c.split}/{c.total}</div>
-              <div className="mt-1 h-0.5 bg-[#0f1419] rounded overflow-hidden">
-                <div className="h-full" style={{ width: `${Math.min(c.splitRate*100*3, 100)}%`, background: c.splitRate > 0.2 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2ECC71' }}/>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
         {splitData.channelList[0] && splitData.channelList[0].splitRate > 0.15 && (
           <div className="bg-[#1a2129] rounded p-3 border-l-2 border-[#E74C6F]">
@@ -1585,7 +1710,7 @@ const SplitShipmentPage = ({ filtered }) => {
               <span className="font-semibold">{splitData.channelList[0].channel}</span> has the highest split rate at <span className="font-mono text-[#E74C6F]">{fmtPct(splitData.channelList[0].splitRate)}</span>.
               {splitData.channelList[0].channel.startsWith('ECOM') && ' ECOM channel customers are the most sensitive to splits — expect chargebacks and reviews.'}
               {splitData.channelList[0].channel.startsWith('CS - Bulk') && ' CS Bulk splits often indicate upstream allocation issues. Check TPA confirmation gaps.'}
-              {' '}Chargeback exposure: <span className="font-mono text-[#E74C6F]">${fmtNum(splitData.channelList[0].chargeback)}</span>.
+              {splitData.channelList[0].chargeback > 0 && <>{' '}Chargeback exposure: <span className="font-mono text-[#E74C6F]">${fmtNum(splitData.channelList[0].chargeback)}</span>.</>}
             </div>
           </div>
         )}
@@ -1623,10 +1748,10 @@ const SplitShipmentPage = ({ filtered }) => {
                       <td className="py-2.5 pr-3">
                         <span className="text-[10px] px-1.5 py-0.5 rounded font-mono" style={{ background: (CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)]||'#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)]||'#8a95a3' }}>{o.channel}</span>
                       </td>
-                      <td className="py-2.5 pr-3 text-center font-mono">{o.containers?.length || o.splitCartons}x</td>
-                      <td className="py-2.5 pr-3 text-center font-mono text-[#E74C6F]">{o.splitGapDays}d</td>
-                      <td className="py-2.5 pr-3 text-[11px]" style={{ color: 'var(--text-secondary)' }}>{o.splitReason}</td>
-                      <td className="py-2.5 pr-3 text-right font-mono" style={{ color: 'var(--text-primary)' }}>${fmtNum(o.orderValue)}</td>
+                      <td className="py-2.5 pr-3 text-center font-mono">{o.containers?.length || o.splitCartons || 0}x</td>
+                      <td className="py-2.5 pr-3 text-center font-mono text-[#E74C6F]">{o.splitGapDays != null ? `${o.splitGapDays}d` : '—'}</td>
+                      <td className="py-2.5 pr-3 text-[11px]" style={{ color: 'var(--text-secondary)' }}>{o.splitReason || (isLive ? 'TBD (Phase B)' : '—')}</td>
+                      <td className="py-2.5 pr-3 text-right font-mono" style={{ color: 'var(--text-primary)' }}>{o.orderValue != null ? `$${fmtNum(o.orderValue)}` : '—'}</td>
                       <td className="py-2.5 text-center">
                         {hasAlert && <AlertTriangle size={14} className="text-[#E74C6F] mx-auto"/>}
                       </td>
@@ -1650,22 +1775,24 @@ const SplitShipmentPage = ({ filtered }) => {
                             <span style={{ color: 'var(--text-muted)' }}>{isLastContainer ? '\u2514\u2500' : '\u251C\u2500'}</span> {c.containerId}
                           </td>
                           <td className="py-2 pr-3 font-mono text-[11px]" style={{ color: 'var(--text-primary)' }}>
-                            {c.trackingNumber}
-                            <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>{c.lastLocation}</div>
+                            {c.trackingNumber || '—'}
+                            {c.lastLocation && <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>{c.lastLocation}</div>}
                           </td>
                           <td className="py-2 pr-3">
                             <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono font-semibold" style={{ background: sc.bg, color: sc.text }}>
-                              {c.status.replace(/_/g, ' ')}
+                              {(c.status || 'LABEL_CREATED').replace(/_/g, ' ')}
                             </span>
                           </td>
                           <td className="py-2 pr-3 text-center font-mono text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                            {c.items} items · {c.weight} lb
+                            {c.items != null || c.weight != null ? `${c.items ?? '—'} items · ${c.weight ?? '—'} lb` : '—'}
                           </td>
                           <td className="py-2 pr-3 text-center font-mono text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                            {c.shipDate.toLocaleDateString('en-US', {month:'short',day:'numeric'})}
+                            {c.shipDate ? c.shipDate.toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '—'}
                           </td>
                           <td className="py-2 pr-3 text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                            Exp: {c.expectedDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric'})}
+                            {c.expectedDelivery
+                              ? `Exp: ${c.expectedDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric'})}`
+                              : <span style={{ color: 'var(--text-muted)' }}>Exp: —</span>}
                             {c.actualDelivery && (
                               <span className="ml-1" style={{ color: c.isLate ? '#E74C6F' : '#2ECC71' }}>
                                 {'\u2192'} {c.actualDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric'})}
@@ -1698,7 +1825,7 @@ const SplitShipmentPage = ({ filtered }) => {
                                 <span className="font-semibold text-[#E74C6F]">Split Delivery Alert:</span>{' '}
                                 {deliveryDates.length > 1 && `Containers delivered across ${deliveryDates.length} different days. `}
                                 {lateContainers.length > 0 && `${lateContainers.length} container(s) delivered late or on a different day than the first carton. `}
-                                Customer requirement: all cartons same day. Chargeback: <span className="font-mono font-semibold">${fmtNum(o.chargeback)}</span>
+                                Customer requirement: all cartons same day.{o.chargeback != null && <> Chargeback: <span className="font-mono font-semibold">${fmtNum(o.chargeback)}</span></>}
                               </div>
                             </div>
                           </td>
@@ -1934,7 +2061,7 @@ const CustomerImpactPage = ({ filtered }) => {
                   <div className="flex gap-0.5 flex-wrap">
                     {c.channelList.slice(0, 4).map(ch => {
                       const color = CHANNEL_GROUP_COLORS[getChannelGroup(ch)] || '#8a95a3';
-                      return <span key={ch} className="text-[10px] font-mono px-1 py-0.5 rounded" style={{ background: color+'20', color: color }} title={ch}>{ch.replace('ECOM - ', '').replace('CS - ', 'CS-').replace('BS - ', 'BS-')}</span>;
+                      return <span key={ch} className="text-[10px] font-mono px-1 py-0.5 rounded" style={{ background: color+'20', color: color }} title={ch}>{ch.replace('ECOM - ', '').replace('CS - ', 'CS-')}</span>;
                     })}
                     {c.channelList.length > 4 && <span className="text-[10px] font-mono text-[#5d6b7a]">+{c.channelList.length - 4}</span>}
                   </div>
@@ -2637,7 +2764,7 @@ const AdminPortalPage = ({ currentUser }) => {
   const initUsers = () => MOCK_USERS.map(u => ({
     ...u,
     channels: u.role === 'admin' ? [...CHANNELS] :
-              u.role === 'manager' ? ['CS - Bulk', 'CS - DSDC', 'BS - IVY', 'BS - RED', 'VIVACE', 'AST', 'ECOM - AMAZON 1P', 'ECOM - AMAZON 3P', 'ECOM - DTC'] :
+              u.role === 'manager' ? ['CS - Bulk', 'CS - DSDC', 'BS-IVY', 'BS-RED', 'VIVACE', 'AST', 'ECOM - AMAZON 1P', 'ECOM - AMAZON 3P', 'ECOM - DTC'] :
               ['CS - Bulk', 'CS - DSDC'],
   }));
 
@@ -4303,7 +4430,7 @@ const DATA_HUB_PREVIEW_DATA = {
     { order: 'SO-120002', customer: 'Ulta Beauty', items: 12, value: '$1,890', channel: 'CS - DSDC' },
     { order: 'SO-120003', customer: 'Amazon FBA', items: 48, value: '$6,720', channel: 'ECOM - AMAZON 1P' },
     { order: 'SO-120004', customer: 'Target DC', items: 36, value: '$3,150', channel: 'CS - Bulk' },
-    { order: 'SO-120005', customer: 'CVS Warehouse', items: 8, value: '$920', channel: 'BS - IVY' },
+    { order: 'SO-120005', customer: 'CVS Warehouse', items: 8, value: '$920', channel: 'BS-IVY' },
   ],
   'Dock Events': [
     { dock: 'D-04', type: 'Outbound', carrier: 'UPS', trailers: 2, status: 'Loading', time: '14:30' },
@@ -4330,7 +4457,7 @@ const DATA_HUB_PREVIEW_DATA = {
     { channel: 'CS - Bulk', volume: 1240, onTime: '94.2%', avgCycle: '18.4h', sla: 'Met' },
     { channel: 'ECOM - AMAZON 1P', volume: 890, onTime: '91.8%', avgCycle: '12.1h', sla: 'Met' },
     { channel: 'ECOM - DTC', volume: 760, onTime: '88.5%', avgCycle: '8.6h', sla: 'At Risk' },
-    { channel: 'BS - IVY', volume: 420, onTime: '96.1%', avgCycle: '22.3h', sla: 'Met' },
+    { channel: 'BS-IVY', volume: 420, onTime: '96.1%', avgCycle: '22.3h', sla: 'Met' },
     { channel: 'VIVACE', volume: 310, onTime: '85.2%', avgCycle: '26.7h', sla: 'Breached' },
   ],
   'Customer Scorecards': [
@@ -4359,7 +4486,7 @@ const DATA_HUB_PREVIEW_DATA = {
     { date: '2026-04-19', channel: 'ECOM - DTC', predicted: 98, confidence: '±8', trend: 'Stable' },
     { date: '2026-04-20', channel: 'CS - Bulk', predicted: 156, confidence: '±15', trend: 'Up' },
     { date: '2026-04-20', channel: 'ECOM - AMAZON 1P', predicted: 110, confidence: '±10', trend: 'Up' },
-    { date: '2026-04-21', channel: 'BS - IVY', predicted: 45, confidence: '±6', trend: 'Down' },
+    { date: '2026-04-21', channel: 'BS-IVY', predicted: 45, confidence: '±6', trend: 'Down' },
   ],
   'Cost Optimization': [
     { lane: 'SAV→NYC', current: 'UPS Ground', savings: '$1,240/mo', recommendation: 'Switch to FedEx Ground', risk: 'Low' },
@@ -5271,7 +5398,12 @@ export default function ShippingSLAApp() {
     });
   };
   const [filterCause, setFilterCause] = useState('all');
-  const [dateRange, setDateRange] = useState('90d');
+  // PR4b2: default 7d (was 90d) keeps initial Snowflake payload small (~6MB for 1 week)
+  const [dateRange, setDateRange] = useState('7d');
+  // PR4b2: custom date range {from, to} as YYYY-MM-DD strings (only used when dateRange === 'custom')
+  const [customRange, setCustomRange] = useState({});
+  // PR4b2: lifted from SplitShipmentPage hook so header badge + filter-bar hint can react to live/mock/fallback state
+  const [splitSource, setSplitSource] = useState(null);
   const [filterRegion, setFilterRegion] = useState('all');
   const [selectedChannels, setSelectedChannels] = useState([]); // empty = All channels
   const [selectedShipment, setSelectedShipment] = useState(null);
@@ -5844,16 +5976,55 @@ export default function ShippingSLAApp() {
             </div>
           </div>
           <div className="flex items-center gap-1.5 font-mono text-[11px]">
-            {/* Date range selector */}
-            <select value={dateRange} onChange={e => setDateRange(e.target.value)}
-              className="h-8 px-2 rounded text-[11px] font-mono outline-none appearance-none cursor-pointer"
-              style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textPrimary }}>
-              <option value="7d">7d</option>
-              <option value="30d">30d</option>
-              <option value="90d">90d</option>
-              <option value="ytd">YTD</option>
-              <option value="1y">12m</option>
-            </select>
+            {/* PR4b2: Date range presets — 7d/30d/90d/Custom (was: 5-option select).
+                Drives useSplitShipments hook on the Split page; other pages ignore dateRange today. */}
+            <div className="flex items-center gap-1">
+              {['7d', '30d', '90d'].map(preset => {
+                const active = dateRange === preset;
+                return (
+                  <button key={preset}
+                    onClick={() => { setDateRange(preset); setCustomRange({}); }}
+                    className="h-8 px-2.5 rounded text-[11px] font-mono uppercase tracking-wider transition-colors"
+                    style={active
+                      ? { background: theme === 'light' ? '#ffffff' : '#1ABC9C', border: theme === 'light' ? '1px solid #ffffff' : '1px solid #1ABC9C', color: theme === 'light' ? THEME.brandRed : '#0a0e12', fontWeight: 600 }
+                      : { background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
+                    {preset}
+                  </button>
+                );
+              })}
+              <button onClick={() => setDateRange('custom')}
+                className="h-8 px-2.5 rounded text-[11px] font-mono uppercase tracking-wider transition-colors"
+                style={dateRange === 'custom'
+                  ? { background: theme === 'light' ? '#ffffff' : '#1ABC9C', border: theme === 'light' ? '1px solid #ffffff' : '1px solid #1ABC9C', color: theme === 'light' ? THEME.brandRed : '#0a0e12', fontWeight: 600 }
+                  : { background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
+                Custom
+              </button>
+              {dateRange === 'custom' && (
+                <div className="flex items-center gap-1 ml-1">
+                  <input type="date" value={customRange.from || ''}
+                    onChange={e => setCustomRange(r => ({ ...r, from: e.target.value }))}
+                    className="h-8 px-2 rounded text-[11px] font-mono outline-none"
+                    style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textPrimary, colorScheme: theme === 'light' ? 'light' : 'dark' }}/>
+                  <span className="text-[10px]" style={{ color: theme === 'light' ? 'rgba(255,255,255,0.7)' : THEME.textMuted }}>~</span>
+                  <input type="date" value={customRange.to || ''}
+                    onChange={e => setCustomRange(r => ({ ...r, to: e.target.value }))}
+                    className="h-8 px-2 rounded text-[11px] font-mono outline-none"
+                    style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textPrimary, colorScheme: theme === 'light' ? 'light' : 'dark' }}/>
+                </div>
+              )}
+            </div>
+            {/* PR4b2: Split page hook source indicator (LIVE / MOCK / MOCK-FALLBACK).
+                Shown only when activePage === 'split' since the hook only runs there. */}
+            {activePage === 'split' && splitSource && (
+              <span className="h-8 flex items-center px-2 rounded text-[10px] font-mono uppercase tracking-wider"
+                style={
+                  splitSource === 'live' ? { background: '#2ECC7120', border: '1px solid #2ECC7160', color: '#2ECC71', fontWeight: 600 } :
+                  splitSource === 'mock-fallback' ? { background: '#E74C6F20', border: '1px solid #E74C6F60', color: '#E74C6F', fontWeight: 600 } :
+                  { background: '#f5a62320', border: '1px solid #f5a62360', color: '#f5a623', fontWeight: 600 }
+                }>
+                {splitSource === 'mock-fallback' ? 'MOCK-FALLBACK' : splitSource.toUpperCase()}
+              </span>
+            )}
             {/* Data source toggle */}
             <button onClick={handleDataSourceToggle} disabled={isConnecting}
               title={dataSource === 'mock' ? 'Switch to Live Snowflake data' : 'Switch to Mock data'}
@@ -5978,6 +6149,14 @@ export default function ShippingSLAApp() {
             </button>
           )}
         </div>
+        {/* PR4b2: Inline hint — live mode on Split page is server-scoped to BS-IVY/BS-RED/VIVACE.
+            Selecting other channels above produces empty results until the server filter widens. */}
+        {activePage === 'split' && splitSource === 'live' && (
+          <div className="text-[10px] font-mono text-[#8a95a3] flex items-center gap-1">
+            <span className="text-[#1ABC9C]">ⓘ</span>
+            Live mode: Split Shipments page is server-scoped to BS-IVY / BS-RED / VIVACE only.
+          </div>
+        )}
       </div>
 
       <div className="max-w-[2560px] mx-auto p-3 sm:p-4 md:p-6">
@@ -6394,7 +6573,7 @@ export default function ShippingSLAApp() {
           <>
             {activePage === 'geo' && <GeoPage filtered={filtered} />}
             {activePage === 'ai' && <AIRiskPage filtered={filtered} data={data}/>}
-            {activePage === 'split' && <SplitShipmentPage filtered={filtered}/>}
+            {activePage === 'split' && <SplitShipmentPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} onSourceChange={setSplitSource}/>}
             {activePage === 'costs' && <CostsPage filtered={filtered}/>}
             {activePage === 'customers' && <CustomerImpactPage filtered={filtered}/>}
             {activePage === 'sku' && <SKUProblemPage filtered={filtered}/>}

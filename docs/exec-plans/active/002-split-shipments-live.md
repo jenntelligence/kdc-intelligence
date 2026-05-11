@@ -633,6 +633,77 @@ and revert:
   `tier`); custom date picker; channel-scope inline hint;
   mock-fallback banner. Visual validation in browser.
 
+**PR4b2 completion (2026-05-11, this commit):**
+
+`SplitShipmentPage` now consumes `useSplitShipments` directly. Live data
+flows master query → endpoint → adapter → page. Mock fallback path
+preserved. UI changes:
+
+- **Header date selector:** 7d / 30d / 90d / Custom buttons replace the
+  prior 5-option `<select>`. Custom shows two `<input type="date">`
+  inputs (theme-aware via `colorScheme`).
+- **Default range:** `7d` (was `90d`) — keeps initial Snowflake payload
+  small (~6 MB for 1 week) and matches the hook's `presetToDateRange`
+  default.
+- **`customRange` state** added next to `dateRange`; the hook re-fetches
+  whenever either changes (custom uses `JSON.stringify` dep-stability).
+- **KPI cards (6 instead of 5):**
+  - "Split Rate" = SPLIT / (SPLIT + NOT_SPLIT + SINGLE_SHIPMENT)
+    — PENDING / UNKNOWN excluded per user decision (settled basis,
+    stable over short windows).
+  - "Orders Split" same denominator (settled count, was total count).
+  - **NEW:** "In Transit" surfaces PENDING% with absolute count, so
+    short-window noise is visible without polluting the settled rate.
+  - "Avg Gap" / "Chargebacks" / "Key Acct Impact" render `N/A` with
+    "Not available in live data" subtitle when `source === 'live'`
+    (the three fields the PR3 SQL doesn't compute).
+- **Header badge:** new `LIVE` / `MOCK` / `MOCK-FALLBACK` chip reflects
+  the hook's `source`. Visible only when `activePage === 'split'` since
+  the hook only runs on that page. The existing `dataSource` toggle
+  button (left intact) is independent — it reflects user choice, not
+  the actual hook source.
+- **Mock-fallback banner:** prominent red banner when server unreachable;
+  surfaces error message and points users to `node server.js`.
+- **Channel chips:** all 11 chips kept. Inline hint below the chips
+  ("Live mode: page is server-scoped to BS-IVY / BS-RED / VIVACE only")
+  appears only on the Split page in live mode.
+- **BS-RED 0-count handling:** in live mode the page synthesizes empty
+  cards for BS-IVY/BS-RED/VIVACE so BS-RED appears even when the
+  short-window query returns zero rows. Empty cards render at 40%
+  opacity with `─` + "0 orders" text instead of "0.0%".
+- **Channel-card grid:** `lg:grid-cols-3` in live mode (3 channels)
+  vs `lg:grid-cols-11` in mock (11 channels) — tighter layout per
+  source.
+- **Mock generator format alignment:** all `'BS - IVY'` / `'BS - RED'`
+  references renamed to `'BS-IVY'` / `'BS-RED'` (matches server's
+  `COMPANY_NAME_MAP`). `CHANNELS` array, `channelWeights` in the
+  generator, event mocks, admin role channels, DataHub mock tables,
+  and the dead `ch.replace('BS - ', 'BS-')` display call all updated.
+  `grep "BS - " src/ShippingSLAApp.jsx` returns 0.
+- **Container row null-safety:** the page normalizes live container
+  rows (`container_id` → `containerId`, `container_status` → mapped
+  UPS-style status via new `mapScaleStatusToUps`, `container_status_time`
+  → `shipDate` as Date, etc.) so the existing drill-down JSX renders
+  without per-cell null checks. `expectedDelivery` / `weight` / `items`
+  / `lastLocation` stay null (sourced in PR6) and render as `—`.
+- **Hook source lifted via callback:** `SplitShipmentPage` calls
+  `onSourceChange(source)` on every source change so the parent's
+  header badge + channel-chip hint can react. State cleared on unmount.
+
+Trust hierarchy enforced: live data flows master query → endpoint →
+adapter → page. Mock-only fields are explicitly N/A in live mode (no
+synthetic values). Cross-validation against direct Snowflake query
+pending in browser smoke (next step).
+
+**Outstanding for PR5 / Phase B:**
+- `splitReason` shows "TBD (Phase B)" in live mode (root-cause
+  classification deferred per PR3 scope update).
+- `splitGapDays`, `chargeback`, `tier`, `shift`, `orderValue` — null
+  in live mode. Long-term plan tracked in §7 open question D.
+
+PR4 complete. Phase 1 page 1 (split shipments) renders live data when
+`VITE_DATA_SOURCE=live` and falls back to mock on server unreachable.
+
 **Field-shape gap (resolved by PR4b1 adapter):** server returns flat
 per-container rows (`do_num`, `container_id`, `tracking_num`,
 `is_split_shipment`, `split_status`, `channel`, `channel_code`, …),
