@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ComposedChart, Area, Scatter, Legend } from 'recharts';
-import { Upload, AlertTriangle, TrendingDown, TrendingUp, Package, Truck, MapPin, Clock, Database, Filter, Download, Activity, ChevronRight, ChevronLeft, Brain, Split, DollarSign, Users, Layers, Zap, Mail, Phone, CheckCircle2, XCircle, Lock, Settings, Shield, UserCog, Eye, LogOut, Save, RotateCcw, Anchor, Warehouse, HardHat, Waves, Cpu, Radar, PiggyBank, MessageCircle, Send, X, Menu, Sun, Moon, Search, FileDown, Calendar, FileText, Trash2, Plus, RefreshCw, UserPlus, Star } from 'lucide-react';
+import { Upload, AlertTriangle, TrendingDown, TrendingUp, Package, Truck, MapPin, Clock, Database, Filter, Download, Activity, ChevronRight, ChevronLeft, ChevronDown, Brain, Split, DollarSign, Users, Layers, Zap, Mail, Phone, CheckCircle2, XCircle, Lock, Settings, Shield, UserCog, Eye, LogOut, Save, RotateCcw, Anchor, Warehouse, HardHat, Waves, Cpu, Radar, PiggyBank, MessageCircle, Send, X, Menu, Sun, Moon, Search, FileDown, Calendar, FileText, Trash2, Plus, RefreshCw, UserPlus, Star } from 'lucide-react';
 
 // ============================================================
 // MOCK DATA
@@ -1327,6 +1327,23 @@ function toDateOrNull(v) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+// PR4b3: 'YYYY-MM-DD' → 'May 4'. Avoids new Date(yyyymmdd) timezone shifts (it would parse as UTC).
+const MONTH_ABBR = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function formatShortDate(yyyymmdd) {
+  if (!yyyymmdd || typeof yyyymmdd !== 'string') return '';
+  const m = yyyymmdd.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return yyyymmdd;
+  const mon = MONTH_ABBR[parseInt(m[2], 10) - 1] || '?';
+  return `${mon} ${parseInt(m[3], 10)}`;
+}
+
+const PRESET_LABELS = {
+  '7d': 'Last 7 days',
+  '30d': 'Last 30 days',
+  '90d': 'Last 90 days',
+  'custom': 'Custom range',
+};
+
 /**
  * useSplitShipments — fetch split-shipment data with mock fallback.
  *
@@ -1440,19 +1457,22 @@ function useSplitShipments(dateRange = '7d', customRange = {}) {
 // ============================================================
 // SPLIT SHIPMENT PAGE
 // ============================================================
-const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], onSourceChange }) => {
+const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], onMetaChange }) => {
   const [expandedOrder, setExpandedOrder] = useState(null);
 
   // PR4b2: Live data via hook; mock-fallback preserves the page when API is unreachable.
   // Trust hierarchy: server (master query) → adapter (PR4b1) → this page.
-  const { data: hookData, error: hookError, loading: hookLoading, source } = useSplitShipments(dateRange, customRange);
+  const { data: hookData, error: hookError, loading: hookLoading, source, filter } = useSplitShipments(dateRange, customRange);
 
-  // Lift the hook's `source` up to the parent so the header badge and channel-chips hint can react.
+  // PR4b3: Lift hook meta (source + count + filter) up so the header summary dropdown,
+  // LIVE/MOCK badge, and channel-chips hint can all react. Single object keeps the
+  // interface small and lets the parent treat it as one snapshot.
   useEffect(() => {
-    if (onSourceChange) onSourceChange(source);
-  }, [source, onSourceChange]);
-  // Clear the lifted state on unmount so the badge disappears when leaving the page.
-  useEffect(() => () => { if (onSourceChange) onSourceChange(null); }, [onSourceChange]);
+    if (!onMetaChange) return;
+    onMetaChange({ source, count: hookData ? hookData.length : 0, filter: filter ?? null });
+  }, [source, hookData, filter, onMetaChange]);
+  // Clear the lifted state on unmount so the badge + summary disappear when leaving the page.
+  useEffect(() => () => { if (onMetaChange) onMetaChange(null); }, [onMetaChange]);
 
   const isLive = source === 'live';
 
@@ -5402,8 +5422,13 @@ export default function ShippingSLAApp() {
   const [dateRange, setDateRange] = useState('7d');
   // PR4b2: custom date range {from, to} as YYYY-MM-DD strings (only used when dateRange === 'custom')
   const [customRange, setCustomRange] = useState({});
-  // PR4b2: lifted from SplitShipmentPage hook so header badge + filter-bar hint can react to live/mock/fallback state
-  const [splitSource, setSplitSource] = useState(null);
+  // PR4b2/PR4b3: lifted from SplitShipmentPage hook so header summary + badge + filter-bar hint can react to it.
+  // Shape: { source: 'live'|'mock'|'mock-fallback', count: number, filter: {from, to}|null } | null
+  const [splitMeta, setSplitMeta] = useState(null);
+  const splitSource = splitMeta?.source ?? null;  // legacy alias used by badge/hint
+  // PR4b3: drives the header summary dropdown on the Split page.
+  const [datePickerOpen, setDatePickerOpen] = useState(false);
+  const datePickerRef = useRef(null);
   const [filterRegion, setFilterRegion] = useState('all');
   const [selectedChannels, setSelectedChannels] = useState([]); // empty = All channels
   const [selectedShipment, setSelectedShipment] = useState(null);
@@ -5453,6 +5478,23 @@ export default function ShippingSLAApp() {
       .then(d => { if (d.success) setLiveKpis(d.data); })
       .catch(() => {});
   }, [dataSource, lastRefresh]);
+
+  // PR4b3: Close date-picker dropdown when clicking outside it.
+  useEffect(() => {
+    if (!datePickerOpen) return;
+    const onMouseDown = (e) => {
+      if (datePickerRef.current && !datePickerRef.current.contains(e.target)) {
+        setDatePickerOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, [datePickerOpen]);
+
+  // PR4b3: Close the dropdown automatically when leaving the Split page.
+  useEffect(() => {
+    if (activePage !== 'split') setDatePickerOpen(false);
+  }, [activePage]);
 
   // Data refresh handler
   const handleDataRefresh = useCallback(() => {
@@ -5976,42 +6018,30 @@ export default function ShippingSLAApp() {
             </div>
           </div>
           <div className="flex items-center gap-1.5 font-mono text-[11px]">
-            {/* PR4b2: Date range presets — 7d/30d/90d/Custom (was: 5-option select).
-                Drives useSplitShipments hook on the Split page; other pages ignore dateRange today. */}
-            <div className="flex items-center gap-1">
+            {/* PR4b3: Preset buttons demoted to a dim secondary indicator. Primary action moved
+                to the gray-bar summary dropdown below. Still clickable as a shortcut so the active
+                state can be flipped without opening the dropdown. */}
+            <div className="hidden md:flex items-center gap-1 opacity-50 hover:opacity-100 transition-opacity">
               {['7d', '30d', '90d'].map(preset => {
                 const active = dateRange === preset;
                 return (
                   <button key={preset}
                     onClick={() => { setDateRange(preset); setCustomRange({}); }}
-                    className="h-8 px-2.5 rounded text-[11px] font-mono uppercase tracking-wider transition-colors"
+                    className="h-6 px-2 rounded text-[10px] font-mono uppercase tracking-wider transition-colors"
                     style={active
-                      ? { background: theme === 'light' ? '#ffffff' : '#1ABC9C', border: theme === 'light' ? '1px solid #ffffff' : '1px solid #1ABC9C', color: theme === 'light' ? THEME.brandRed : '#0a0e12', fontWeight: 600 }
-                      : { background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
+                      ? { background: theme === 'light' ? 'rgba(255,255,255,0.35)' : 'rgba(26,188,156,0.35)', border: theme === 'light' ? '1px solid rgba(255,255,255,0.6)' : '1px solid rgba(26,188,156,0.7)', color: theme === 'light' ? '#ffffff' : '#1ABC9C', fontWeight: 600 }
+                      : { background: 'transparent', border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? 'rgba(255,255,255,0.7)' : THEME.textMuted }}>
                     {preset}
                   </button>
                 );
               })}
               <button onClick={() => setDateRange('custom')}
-                className="h-8 px-2.5 rounded text-[11px] font-mono uppercase tracking-wider transition-colors"
+                className="h-6 px-2 rounded text-[10px] font-mono uppercase tracking-wider transition-colors"
                 style={dateRange === 'custom'
-                  ? { background: theme === 'light' ? '#ffffff' : '#1ABC9C', border: theme === 'light' ? '1px solid #ffffff' : '1px solid #1ABC9C', color: theme === 'light' ? THEME.brandRed : '#0a0e12', fontWeight: 600 }
-                  : { background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textSecondary }}>
+                  ? { background: theme === 'light' ? 'rgba(255,255,255,0.35)' : 'rgba(26,188,156,0.35)', border: theme === 'light' ? '1px solid rgba(255,255,255,0.6)' : '1px solid rgba(26,188,156,0.7)', color: theme === 'light' ? '#ffffff' : '#1ABC9C', fontWeight: 600 }
+                  : { background: 'transparent', border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? 'rgba(255,255,255,0.7)' : THEME.textMuted }}>
                 Custom
               </button>
-              {dateRange === 'custom' && (
-                <div className="flex items-center gap-1 ml-1">
-                  <input type="date" value={customRange.from || ''}
-                    onChange={e => setCustomRange(r => ({ ...r, from: e.target.value }))}
-                    className="h-8 px-2 rounded text-[11px] font-mono outline-none"
-                    style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textPrimary, colorScheme: theme === 'light' ? 'light' : 'dark' }}/>
-                  <span className="text-[10px]" style={{ color: theme === 'light' ? 'rgba(255,255,255,0.7)' : THEME.textMuted }}>~</span>
-                  <input type="date" value={customRange.to || ''}
-                    onChange={e => setCustomRange(r => ({ ...r, to: e.target.value }))}
-                    className="h-8 px-2 rounded text-[11px] font-mono outline-none"
-                    style={{ background: theme === 'light' ? 'rgba(255,255,255,0.15)' : THEME.bgPanelAlt, border: theme === 'light' ? '1px solid rgba(255,255,255,0.2)' : `1px solid ${THEME.border}`, color: theme === 'light' ? '#ffffff' : THEME.textPrimary, colorScheme: theme === 'light' ? 'light' : 'dark' }}/>
-                </div>
-              )}
             </div>
             {/* PR4b2: Split page hook source indicator (LIVE / MOCK / MOCK-FALLBACK).
                 Shown only when activePage === 'split' since the hook only runs there. */}
@@ -6100,9 +6130,84 @@ export default function ShippingSLAApp() {
             className="bg-[#232c37] border border-[#2d3744] text-[12px] font-mono px-2 py-1 rounded text-[#e8ecef] focus:border-[#1ABC9C] outline-none">
             {regions.map(r => <option key={r} value={r}>{r === 'all' ? 'All regions' : r}</option>)}
           </select>
-          <div className="ml-auto text-[11px] font-mono text-[#5d6b7a] hidden sm:block">
-            {fmtNum(filtered.length)} / {fmtNum(data.length)} shipments · Apr 1–17, 2026
-          </div>
+          {/* PR4b3: Split page gets the live, clickable summary dropdown.
+              Other pages keep the legacy mock-driven text (unchanged on purpose). */}
+          {activePage === 'split' ? (
+            <div className="ml-auto relative hidden sm:block" ref={datePickerRef}>
+              <button
+                onClick={() => setDatePickerOpen(o => !o)}
+                className="text-[11px] font-mono flex items-center gap-1.5 px-2 py-1 rounded transition-colors"
+                style={{ color: THEME.textSecondary, background: datePickerOpen ? THEME.bgPanelAlt : 'transparent', border: `1px solid ${datePickerOpen ? THEME.border : 'transparent'}` }}>
+                <Calendar size={11} style={{ color: THEME.textMuted }}/>
+                <span>{PRESET_LABELS[dateRange] || PRESET_LABELS['7d']}</span>
+                <span style={{ color: THEME.textMuted }}>·</span>
+                <span style={{ color: THEME.textPrimary }}>
+                  {fmtNum(splitMeta?.count ?? 0)} {splitMeta?.source === 'live' ? 'DOs' : 'shipments'}
+                </span>
+                {splitMeta?.filter?.from && splitMeta?.filter?.to && (
+                  <>
+                    <span style={{ color: THEME.textMuted }}>·</span>
+                    <span style={{ color: THEME.textSecondary }}>{formatShortDate(splitMeta.filter.from)} – {formatShortDate(splitMeta.filter.to)}</span>
+                  </>
+                )}
+                <ChevronDown size={11} style={{ color: THEME.textMuted, transform: datePickerOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}/>
+              </button>
+
+              {datePickerOpen && (
+                <div className="absolute right-0 top-full mt-1 rounded-md shadow-lg z-50 min-w-[240px] p-1"
+                  style={{ background: THEME.bgPanelAlt, border: `1px solid ${THEME.border}` }}>
+                  {Object.entries(PRESET_LABELS).map(([value, label]) => {
+                    const active = dateRange === value;
+                    return (
+                      <button key={value}
+                        onClick={() => {
+                          setDateRange(value);
+                          if (value !== 'custom') {
+                            setCustomRange({});
+                            setDatePickerOpen(false);
+                          }
+                        }}
+                        className="w-full text-left px-3 py-1.5 text-[12px] font-mono rounded transition-colors flex items-center justify-between"
+                        style={active
+                          ? { background: '#1ABC9C20', color: '#1ABC9C', fontWeight: 600 }
+                          : { color: THEME.textSecondary, background: 'transparent' }}>
+                        <span>{label}</span>
+                        {active && <CheckCircle2 size={11}/>}
+                      </button>
+                    );
+                  })}
+
+                  {dateRange === 'custom' && (
+                    <div className="mt-1 pt-2 px-2 pb-1" style={{ borderTop: `1px solid ${THEME.border}` }}>
+                      <div className="text-[10px] uppercase tracking-wider mb-1" style={{ color: THEME.textMuted }}>From</div>
+                      <input type="date" value={customRange.from || ''}
+                        onChange={e => setCustomRange(r => ({ ...r, from: e.target.value }))}
+                        className="w-full h-7 px-2 rounded text-[11px] font-mono outline-none mb-2"
+                        style={{ background: THEME.bgPrimary, border: `1px solid ${THEME.border}`, color: THEME.textPrimary, colorScheme: theme === 'light' ? 'light' : 'dark' }}/>
+                      <div className="text-[10px] uppercase tracking-wider mb-1" style={{ color: THEME.textMuted }}>To</div>
+                      <input type="date" value={customRange.to || ''}
+                        onChange={e => setCustomRange(r => ({ ...r, to: e.target.value }))}
+                        className="w-full h-7 px-2 rounded text-[11px] font-mono outline-none"
+                        style={{ background: THEME.bgPrimary, border: `1px solid ${THEME.border}`, color: THEME.textPrimary, colorScheme: theme === 'light' ? 'light' : 'dark' }}/>
+                      <button
+                        onClick={() => setDatePickerOpen(false)}
+                        disabled={!customRange.from || !customRange.to}
+                        className="mt-2 w-full h-7 text-[11px] font-mono uppercase tracking-wider rounded transition-colors"
+                        style={(!customRange.from || !customRange.to)
+                          ? { background: THEME.bgPanelAlt, border: `1px solid ${THEME.border}`, color: THEME.textMuted, cursor: 'not-allowed' }
+                          : { background: '#1ABC9C', border: '1px solid #1ABC9C', color: '#0a0e12', fontWeight: 600 }}>
+                        Apply
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="ml-auto text-[11px] font-mono text-[#5d6b7a] hidden sm:block">
+              {fmtNum(filtered.length)} / {fmtNum(data.length)} shipments · Apr 1–17, 2026
+            </div>
+          )}
         </div>
 
         {/* Channel multi-select — hidden on mobile */}
@@ -6573,7 +6678,7 @@ export default function ShippingSLAApp() {
           <>
             {activePage === 'geo' && <GeoPage filtered={filtered} />}
             {activePage === 'ai' && <AIRiskPage filtered={filtered} data={data}/>}
-            {activePage === 'split' && <SplitShipmentPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} onSourceChange={setSplitSource}/>}
+            {activePage === 'split' && <SplitShipmentPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} onMetaChange={setSplitMeta}/>}
             {activePage === 'costs' && <CostsPage filtered={filtered}/>}
             {activePage === 'customers' && <CustomerImpactPage filtered={filtered}/>}
             {activePage === 'sku' && <SKUProblemPage filtered={filtered}/>}

@@ -704,6 +704,53 @@ pending in browser smoke (next step).
 PR4 complete. Phase 1 page 1 (split shipments) renders live data when
 `VITE_DATA_SOURCE=live` and falls back to mock on server unreachable.
 
+**PR4b3 UX refinement (2026-05-11, this commit):**
+
+Post-PR4b2 user review on the running dashboard surfaced two issues:
+
+1. The right-side filter-bar text still read `320 / 320 shipments · Apr
+   1–17, 2026` on the Split page — mock-data residue that the new live
+   wiring did not touch. Users expected to see the *actual* number of
+   DOs and the *actual* date window the page was rendering.
+2. The 7d/30d/90d/Custom buttons in the red header bar were the primary
+   action surface in PR4b2 but felt visually heavy. Users wanted the
+   date range edited at the summary text itself, with the buttons
+   demoted to a secondary "current range" indicator.
+
+Changes (UI-only, no data-flow changes):
+
+- **Header summary dropdown (Split page only):** the gray filter-bar
+  text is replaced with a clickable button that reads, e.g.,
+  `📅 Last 7 days · 1,501 DOs · May 4 – May 11`. Click opens a
+  dropdown with 4 preset rows (7d / 30d / 90d / Custom) plus inline
+  From/To inputs + Apply button when Custom is active. Click-outside
+  closes; the dropdown also auto-closes when leaving the Split page.
+- **Red-bar preset buttons demoted:** kept as a compact at-a-glance
+  indicator at `opacity-50` (full opacity on hover). They are still
+  clickable as a keyboard-/mouse-friendly shortcut, but the primary
+  click target is now the summary button. Inline Custom date inputs
+  removed from the red bar — they live only in the dropdown now to
+  avoid two competing input surfaces.
+- **`splitMeta` state replaces `splitSource`:** lifted state now
+  carries `{ source, count, filter }` so both the badge AND the new
+  summary button can read from one source-of-truth snapshot reported
+  by `SplitShipmentPage`'s `onMetaChange` callback. Cleared on
+  unmount and on page change.
+- **`formatShortDate` helper:** parses `YYYY-MM-DD` string manually
+  (regex + `MONTH_ABBR` table) to avoid `new Date('2026-05-04')`
+  reading the string as UTC midnight and rolling back a day in
+  negative-offset timezones.
+- **`PRESET_LABELS` table:** single source of truth for the
+  human-readable preset names, shared between the summary button and
+  the dropdown rows.
+- **Other pages unchanged on purpose:** the existing
+  `320 / 320 shipments · Apr 1–17, 2026` text remains on non-Split
+  pages until those pages get their own live wiring.
+
+No changes to `useSplitShipments`, `serverRowsToShipments`, the server
+endpoint, the mock generator, or the channel-chip filter logic — PR4b3
+is a pure UI re-arrangement.
+
 **Field-shape gap (resolved by PR4b1 adapter):** server returns flat
 per-container rows (`do_num`, `container_id`, `tracking_num`,
 `is_split_shipment`, `split_status`, `channel`, `channel_code`, …),
