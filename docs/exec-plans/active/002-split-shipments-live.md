@@ -787,6 +787,64 @@ No data-flow changes — same `splitData.channelList` calculation, same
 `isLive` switch, same `lg:grid-cols-3` (live) vs `lg:grid-cols-11`
 (mock) layout, same channel-chip filter. PR4b4 is layout + style only.
 
+**PR4b5 channel chips conditional + hint removal (2026-05-11, this commit):**
+
+Post-PR4b4 user review surfaced a UX papercut: 8 of the 11 global chips
+(CS-Bulk, CS-DSDC, AST, IIO, KIO, ECOM-AMAZON 1P, ECOM-AMAZON 3P,
+ECOM-DTC) produce no rows on the Split page in live mode because the
+server-side scope is fixed to BS-IVY / BS-RED / VIVACE via UPS (002
+plan §6b). Clicking them on the Split page is a dead end.
+
+User explicitly raised the right concern: the chips bar is global, so
+trimming it unconditionally would break Geo / FlightBoard / other pages
+that still expect all 11 channels to render against mock data.
+
+**Resolution — option E (page + source conditional):**
+
+```javascript
+const LIVE_SPLIT_CHANNELS = ['BS-IVY', 'BS-RED', 'VIVACE'];
+
+// In the global filter-bar chip loop:
+(activePage === 'split' && splitSource === 'live'
+  ? LIVE_SPLIT_CHANNELS
+  : CHANNELS
+).map(ch => …)
+```
+
+Behavior table:
+
+| Scenario                              | Chips shown |
+|---------------------------------------|-------------|
+| Split page + live source              | 3           |
+| Split page + mock                     | 11          |
+| Split page + mock-fallback            | 11          |
+| Geo / FlightBoard / any other page    | 11          |
+
+Multi-layer safety so the 3-chip mode can never get stuck:
+
+- **`activePage` check** — leaving Split immediately restores 11 chips.
+- **`splitSource` check** — mock or mock-fallback never trigger the
+  3-chip subset, so a server outage doesn't hide chips.
+- **PR4b2 unmount cleanup** — `onMetaChange(null)` on
+  `SplitShipmentPage` unmount nullifies `splitMeta`, which makes
+  `splitSource === 'live'` false on stale renders. Three independent
+  conditions all have to hold to show 3 chips; only one has to fail
+  to restore 11.
+
+The PR4b2 inline hint
+("ⓘ Live mode: Split Shipments page is server-scoped to
+BS-IVY / BS-RED / VIVACE only.") is removed — the chip set itself now
+communicates the scope, so the hint became redundant.
+
+`selectedChannels` state is untouched. A user's BS-IVY pick on the
+Split page survives a navigation to Geo (which shows 11 chips again),
+and the picked filter applies to the Geo data — that's the existing
+global-filter semantic, preserved on purpose.
+
+No changes to `useSplitShipments`, the adapter, server.js, the mock
+generator, or any other page. The only other `CHANNELS.map(…)` call
+sites (Admin SLA page, AI Risk page, etc.) remain unaffected.
+
 **Field-shape gap (resolved by PR4b1 adapter):** server returns flat
 per-container rows (`do_num`, `container_id`, `tracking_num`,
 `is_split_shipment`, `split_status`, `channel`, `channel_code`, …),

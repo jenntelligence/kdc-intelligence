@@ -38,6 +38,12 @@ const CHANNELS = [
   'ECOM - DTC',
 ];
 
+// PR4b5: Live-mode subset for the Split page only — server-side scope
+// is BS-IVY / BS-RED / VIVACE via UPS (see 002 plan §6b). The global
+// header filter narrows to these chips so clicking a channel that has
+// no live data is no longer possible. Other pages always show all 11.
+const LIVE_SPLIT_CHANNELS = ['BS-IVY', 'BS-RED', 'VIVACE'];
+
 // Channel group colors (for pills)
 const CHANNEL_GROUP_COLORS = {
   'CS': '#1ABC9C',       // Hark Turquoise
@@ -6241,7 +6247,11 @@ export default function ShippingSLAApp() {
             className={`px-2.5 py-1 rounded text-[11px] font-mono uppercase tracking-wider border transition-all ${selectedChannels.length === 0 ? 'border-[#1ABC9C] bg-[#1ABC9C]/20 text-[#1ABC9C]' : 'border-[#2d3744] text-[#8a95a3] hover:border-[#1ABC9C]'}`}>
             All
           </button>
-          {CHANNELS.map(ch => {
+          {/* PR4b5: Narrow the chip set to live-mode subset only on Split + live. Other
+              pages keep all 11 chips so their mock data renders correctly. selectedChannels
+              state is untouched — a user's BS-IVY pick survives page changes (Geo etc. still
+              show all 11 chips and can use that selection). Replaces PR4b2's inline hint. */}
+          {(activePage === 'split' && splitSource === 'live' ? LIVE_SPLIT_CHANNELS : CHANNELS).map(ch => {
             const group = getChannelGroup(ch);
             const color = CHANNEL_GROUP_COLORS[group] || '#8a95a3';
             const active = selectedChannels.includes(ch);
@@ -6276,14 +6286,6 @@ export default function ShippingSLAApp() {
             </button>
           )}
         </div>
-        {/* PR4b2: Inline hint — live mode on Split page is server-scoped to BS-IVY/BS-RED/VIVACE.
-            Selecting other channels above produces empty results until the server filter widens. */}
-        {activePage === 'split' && splitSource === 'live' && (
-          <div className="text-[10px] font-mono text-[#8a95a3] flex items-center gap-1">
-            <span className="text-[#1ABC9C]">ⓘ</span>
-            Live mode: Split Shipments page is server-scoped to BS-IVY / BS-RED / VIVACE only.
-          </div>
-        )}
       </div>
 
       <div className="max-w-[2560px] mx-auto p-3 sm:p-4 md:p-6">
