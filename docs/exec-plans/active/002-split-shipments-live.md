@@ -1518,6 +1518,126 @@ commit if/when it becomes relevant.
 
 ---
 
+### PR7a — SPLIT GAP + VALUE columns on DO row (completed 2026-05-12)
+
+User reviewed the PR6 dashboard and identified that the Container
+Tracking — Split Orders table was still rendering `—` for both
+`SPLIT GAP` and `VALUE` columns even though the underlying data
+(`delivered_date` and `invoice_amount`) has been flowing since PR5a.
+
+This is the first of three PR7 commits — PR7a wires the **DO-row**
+SPLIT GAP and VALUE; PR7b will handle per-container drill-down (delivered
+date + `OK / SPLIT DAY` indicator inside the expand row); PR7c adds the
+bottom Split Delivery Alert banner.
+
+**Definitions (from user sample):**
+
+- **`SPLIT GAP`** = `max(delivered_date) − min(delivered_date)` across
+  the DO's distinct tracking_nums, in whole days. Any tracking still
+  PENDING delivery → `null` (UI renders `—`).
+- **`VALUE`** = `sum(invoice_amount)` over distinct billing dates per DO.
+  Billing is LEFT JOIN (PR5a), so DOs without any billing row → `null`
+  (UI renders `—`).
+
+**Where it lives:**
+
+`serverRowsToShipments` is already the DO-level aggregator — it groups
+rows by `do_num` and exposes the `containers` array. PR7a converts the
+existing arrow-returns-object map into a block body and computes both
+values from that `containers` closure, in the same pass.
+
+```javascript
+// SPLIT GAP — per distinct tracking_num
+const trackingDelivered = new Map();
+for (const c of containers) {
+  if (!c.tracking_num) continue;
+  if (!trackingDelivered.has(c.tracking_num)) {
+    trackingDelivered.set(c.tracking_num, c.delivered_date || null);
+  }
+}
+// If any tracking is null → splitGapDays = null; else max-min in days
+
+// VALUE — per distinct billing_date (de-dupe across container fan-out)
+const billingByDate = new Map();
+for (const c of containers) {
+  if (c.billing_date && c.invoice_amount != null) {
+    billingByDate.set(c.billing_date, Number(c.invoice_amount));
+  }
+}
+// Sum the deduped invoice_amounts
+```
+
+**Why the dedupe matters for VALUE:**
+
+PR5a's master query GROUPs `base` by `1..22` which includes
+`billing_date`, so the server response has one row per
+`(container_id × billing_date)` pair. The billing join is at SO level
+(`sh.user_def4 = b."Sales_document"`), so the same `billing_date`
+carries the **same** `NET($)` value across every container row in
+the DO that fans out from it. Naively summing every row's
+`invoice_amount` would multiply the true total by the container count.
+The dedupe-by-billing-date Map collapses each unique billing
+date to a single contribution.
+
+**SPLIT GAP edge cases:**
+
+| DO state                                  | trackingDelivered | result          |
+|-------------------------------------------|--------------------|-----------------|
+| All tracking_nums delivered, single date  | size N, all set    | `0` (renders `0d`) |
+| All tracking_nums delivered, multiple     | size N, all set    | `max − min` in days |
+| Some tracking_num pending                 | size N, some null  | `null` (renders `—`) |
+| No tracking_nums (PENDING DO)             | size 0             | `null` (renders `—`) |
+
+The `0d` rendering for NOT_SPLIT and SINGLE_SHIPMENT DOs is intentional —
+zero is a meaningful answer ("delivered same day"). If user prefers `—`
+for those, that's a one-line `splitGapDays || null` tweak in a future PR.
+
+**Changes:**
+
+- `serverRowsToShipments` (line ~1295): arrow-returns-object map →
+  block body. Computes `splitGapDays` and `orderValue` from the
+  `containers` closure; previous `splitGapDays: null` and
+  `orderValue: null` lines removed.
+- Container Tracking table SPLIT GAP / VALUE columns (lines 1836,
+  1838): **no change required** — the existing `o.splitGapDays != null`
+  and `o.orderValue != null` null-checks from PR4b2 automatically pick
+  up the computed values.
+
+**Trust hierarchy preserved:**
+
+- Server: `delivered_date` + `invoice_amount` (PR5a)
+- Adapter: pass-through per-container fields **plus** new DO-level
+  `splitGapDays` + `orderValue` aggregations
+- UI: existing null-check render
+
+**Mock fallback unchanged.** Mock generator (line ~193, ~207) already
+populates `splitGapDays` (per-DO) and `orderValue` (per-DO) with
+synthetic values. Mock mode keeps using those; live mode now also
+gets real values via the new adapter pass.
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (`VITE_DATA_SOURCE=live`):
+  - Container Tracking — Split Orders table SPLIT GAP column shows
+    e.g. `3d` for delivered SPLIT DOs; `—` for PENDING.
+  - VALUE column shows e.g. `$5,297.82` for DOs with billing records;
+    `—` for DOs without (LEFT JOIN nulls).
+- Mock fallback: unchanged numbers.
+
+**Not in scope (PR7b / PR7c):**
+
+- Per-container `delivered_date` display inside the expand row
+- `OK / SPLIT DAY` indicator per container based on whether it matches
+  the DO's modal delivered date
+- Bottom Split Delivery Alert banner aggregating across DOs
+
+**Depends on:** PR5a (delivered_date + invoice_amount on the wire),
+PR5a LEFT JOIN billing change.
+**Blocks:** PR7b (per-container drill-down detail).
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

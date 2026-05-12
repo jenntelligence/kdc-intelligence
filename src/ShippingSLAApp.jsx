@@ -1292,60 +1292,109 @@ function serverRowsToShipments(rows) {
     byDoNum.get(row.do_num).containers.push(row);
   }
 
-  return Array.from(byDoNum.values()).map(({ do: doRow, containers }) => ({
-    // Identifiers
-    id: doRow.do_num,
-    do_num: doRow.do_num,
-    so_num: doRow.so_num,
-    wave_num: doRow.wave_num,
-    internal_shipment_num: doRow.internal_shipment_num,
+  return Array.from(byDoNum.values()).map(({ do: doRow, containers }) => {
+    // PR7a: SPLIT GAP — max(delivered_date) - min(delivered_date) across
+    // distinct tracking_nums. delivered_date is per-tracking_num (LEFT JOIN
+    // ups_data on tracking_num) so a tracking appearing multiple times due
+    // to billing fan-out has a stable delivered value — pick once per
+    // tracking_num. Returns null if any tracking is still PENDING delivery
+    // or if there are no tracking_nums yet; the UI renders '—' for null.
+    const trackingDelivered = new Map();
+    for (const c of containers) {
+      if (!c.tracking_num) continue; // null tracking = container not yet shipped
+      if (!trackingDelivered.has(c.tracking_num)) {
+        trackingDelivered.set(c.tracking_num, c.delivered_date || null);
+      }
+    }
+    let splitGapDays = null;
+    if (trackingDelivered.size > 0) {
+      const dates = Array.from(trackingDelivered.values());
+      if (dates.every(d => d != null)) {
+        const times = dates
+          .map(d => new Date(d).getTime())
+          .filter(t => Number.isFinite(t));
+        if (times.length === dates.length) {
+          splitGapDays = Math.round((Math.max(...times) - Math.min(...times)) / 86400000);
+        }
+      }
+    }
 
-    // Channel (PR4a: server already maps code -> name)
-    channel: doRow.channel,            // 'BS-IVY' / 'BS-RED' / 'VIVACE'
-    channel_code: doRow.channel_code,  // '1100' / '1400' / '1900'
+    // PR7a: VALUE — sum invoice_amount per distinct billing_date.
+    // Billing joins SO-level (not container-level) so the same billing_date
+    // carries the same NET($) across every container row that fans out
+    // from it — take it once per billing_date and sum. Billing is LEFT
+    // JOIN (PR5a), so DOs without any billing record produce no entries
+    // and orderValue stays null (UI renders '—').
+    const billingByDate = new Map();
+    for (const c of containers) {
+      if (c.billing_date && c.invoice_amount != null) {
+        billingByDate.set(c.billing_date, Number(c.invoice_amount));
+      }
+    }
+    let orderValue = null;
+    if (billingByDate.size > 0) {
+      orderValue = Array.from(billingByDate.values())
+        .reduce((sum, v) => sum + (Number.isFinite(v) ? v : 0), 0);
+    }
 
-    // Customer (server toFactShape lowercases CUST_* into camel)
-    customer: doRow.customer,
-    customer_state: doRow.state,
-    customer_city: doRow.city,
-    customer_zipcode: doRow.zipcode,
-    state: doRow.state, // alias for mock-page filter compatibility
+    return {
+      // Identifiers
+      id: doRow.do_num,
+      do_num: doRow.do_num,
+      so_num: doRow.so_num,
+      wave_num: doRow.wave_num,
+      internal_shipment_num: doRow.internal_shipment_num,
 
-    // Dates (already EST-converted in SQL)
-    so_created_date: doRow.so_created_date,
-    delivered_date: doRow.delivered_date,
+      // Channel (PR4a: server already maps code -> name)
+      channel: doRow.channel,            // 'BS-IVY' / 'BS-RED' / 'VIVACE'
+      channel_code: doRow.channel_code,  // '1100' / '1400' / '1900'
 
-    // Split classification (live, settled basis)
-    split_status: doRow.split_status,
-    isSplit: doRow.is_split_shipment,           // alias for mock-page compatibility
-    is_split_shipment: doRow.is_split_shipment,
-    has_null_tracking: doRow.has_null_tracking,
-    has_null_delivered_date: doRow.has_null_delivered_date,
+      // Customer (server toFactShape lowercases CUST_* into camel)
+      customer: doRow.customer,
+      customer_state: doRow.state,
+      customer_city: doRow.city,
+      customer_zipcode: doRow.zipcode,
+      state: doRow.state, // alias for mock-page filter compatibility
 
-    // DO-level aggregations
-    tracking_cnt: doRow.tracking_cnt,
-    container_cnt: doRow.container_cnt,
-    manifest_cnt: doRow.manifest_cnt,
-    delivered_date_cnt: doRow.delivered_date_cnt,
+      // Dates (already EST-converted in SQL)
+      so_created_date: doRow.so_created_date,
+      delivered_date: doRow.delivered_date,
 
-    // Container array (mock-shape compatibility — nested per-DO)
-    containers,
+      // Split classification (live, settled basis)
+      split_status: doRow.split_status,
+      isSplit: doRow.is_split_shipment,           // alias for mock-page compatibility
+      is_split_shipment: doRow.is_split_shipment,
+      has_null_tracking: doRow.has_null_tracking,
+      has_null_delivered_date: doRow.has_null_delivered_date,
 
-    // Mock-only fields → null in live mode (PR4b2 will render as N/A)
-    splitGapDays: null,
-    chargeback: null,
-    tier: null,
-    // PR5b: splitReason now sourced from PR5a backend split_root_cause.
-    // Only populated when split_status = 'SPLIT'; null for SINGLE / PENDING /
-    // NOT_SPLIT / UNKNOWN — preserved as null to keep existing null-checks valid.
-    splitReason: doRow.split_root_cause,
-    cause: null,
-    shift: null,
-    orderValue: null,
+      // DO-level aggregations
+      tracking_cnt: doRow.tracking_cnt,
+      container_cnt: doRow.container_cnt,
+      manifest_cnt: doRow.manifest_cnt,
+      delivered_date_cnt: doRow.delivered_date_cnt,
 
-    // Source marker (debug)
-    _source: 'live',
-  }));
+      // Container array (mock-shape compatibility — nested per-DO)
+      containers,
+
+      // PR7a: SPLIT GAP + VALUE computed above from the containers
+      // closure. UI null-check from PR4b2 handles render fallback to '—'.
+      splitGapDays,
+      orderValue,
+
+      // Mock-only fields → null in live mode (PR4b2 renders as N/A)
+      chargeback: null,
+      tier: null,
+      // PR5b: splitReason now sourced from PR5a backend split_root_cause.
+      // Only populated when split_status = 'SPLIT'; null for SINGLE / PENDING /
+      // NOT_SPLIT / UNKNOWN — preserved as null to keep existing null-checks valid.
+      splitReason: doRow.split_root_cause,
+      cause: null,
+      shift: null,
+
+      // Source marker (debug)
+      _source: 'live',
+    };
+  });
 }
 
 /**
