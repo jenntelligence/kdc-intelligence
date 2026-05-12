@@ -1734,13 +1734,21 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     // Chargebacks from splits (mock-only — null-safe in live mode)
     const splitChargebacks = split.reduce((s,o) => s + (o.chargeback || 0), 0);
 
-    // Avg gap (mock-only — null-safe in live mode)
+    // Avg gap — settled SPLIT DOs only. splitGapDays is populated by the
+    // mock generator (mock mode) or PR7a's adapter (live mode = max-min of
+    // tracking delivered_dates per DO). PENDING SPLITs have splitGapDays
+    // null and are excluded from the average.
     const gapItems = split.filter(o => o.splitGapDays != null);
-    const avgGap = gapItems.length ? gapItems.reduce((s,o) => s + o.splitGapDays, 0) / gapItems.length : 0;
+    const gapItemsCount = gapItems.length;
+    const avgGap = gapItemsCount ? gapItems.reduce((s,o) => s + o.splitGapDays, 0) / gapItemsCount : 0;
+    // PR8: Worst-case gap surfaces outlier customers that average alone
+    // hides (e.g. avg 1.7d but one DO at 20d). Pair with avgGap for the
+    // "AVG vs Worst" framing in the KPI card subtitle.
+    const worstGap = gapItemsCount ? gapItems.reduce((m,o) => o.splitGapDays > m ? o.splitGapDays : m, 0) : 0;
 
     return {
       split, splitRate, settledCount: settled.length, pendingCount: pending.length, pendingRate, totalCount: pageData.length,
-      customerList, shiftList, reasonList, channelList, splitChargebacks, avgGap,
+      customerList, shiftList, reasonList, channelList, splitChargebacks, avgGap, worstGap, gapItemsCount,
     };
   }, [pageData, isLive]);
 
@@ -1819,15 +1827,23 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
         <KPI label="Split Rate" value={fmtPct(splitData.splitRate)} delta={`${splitData.split.length} of ${splitData.settledCount} settled`} deltaType="bad" icon={Split}/>
         <KPI label="Orders Split" value={splitData.split.length} delta={`of ${splitData.settledCount} settled`} deltaType="bad" icon={Package}/>
         <KPI label="In Transit" value={fmtPct(splitData.pendingRate)} delta={`${splitData.pendingCount} of ${splitData.totalCount} pending`} icon={Clock}/>
+        {/* PR8: Avg Gap is now live-computed too (PR7a's splitGapDays per DO
+            flows through both mock and live paths). Subtitle uses Worst (max)
+            instead of "Between partials" so outliers surface even when the
+            average looks fine. Chargebacks + Key Acct Impact remain N/A in
+            live mode — no SLA penalty data source, no customer tier classification. */}
+        {splitData.gapItemsCount > 0 ? (
+          <KPI label="Avg Gap" value={`${splitData.avgGap.toFixed(1)}d`} delta={`Worst: ${splitData.worstGap}d`} deltaType="bad" icon={Clock}/>
+        ) : (
+          <KPI label="Avg Gap" value="—" delta="No settled splits in window" icon={Clock}/>
+        )}
         {isLive ? (
           <>
-            <KPI label="Avg Gap" value="N/A" delta="Not available in live data" icon={Clock}/>
             <KPI label="Chargebacks" value="N/A" delta="Not available in live data" icon={DollarSign}/>
             <KPI label="Key Acct Impact" value="N/A" delta="Not available in live data" icon={Users}/>
           </>
         ) : (
           <>
-            <KPI label="Avg Gap" value={splitData.avgGap.toFixed(1)} unit="days" delta="Between partials" deltaType="bad" icon={Clock}/>
             <KPI label="Chargebacks" value={`$${fmtNum(splitData.splitChargebacks.toFixed(0))}`} delta="Split penalty $" deltaType="bad" icon={DollarSign}/>
             <KPI label="Key Acct Impact" value={splitData.customerList.filter(c => c.tier === 'Key').reduce((s,c) => s+c.split, 0)} delta="Split orders to Key" deltaType="bad" icon={Users}/>
           </>

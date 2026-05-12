@@ -1777,6 +1777,117 @@ generator, `pageData` container-shape transform.
 **Depends on:** PR7a (adapter block body + containers exposure).
 **Blocks:** PR7c (bottom Split Delivery Alert banner).
 
+### PR8 — AVG GAP KPI card activation (completed 2026-05-12)
+
+User reviewed the PR7a/PR7b dashboard and identified one easy win:
+
+> "Avg Gap KPI card 도 넣을 수 있겠어 그치?"
+
+PR7a's `splitGapDays` per DO (max − min `delivered_date` across distinct
+tracking_nums) is exactly the field this KPI needs. Pre-PR8 the
+`AVG GAP` card in the live branch was hardcoded `"N/A"` while the mock
+branch already rendered the same value — purely a JSX gate, no missing
+data. PR8 lifts the gate and adds an outlier-aware subtitle.
+
+**Source filter:**
+
+- DO is in `splitData.split` (i.e. `split_status = 'SPLIT'` on the
+  settled basis — `o.isSplit === true`)
+- `o.splitGapDays != null` (excludes PENDING SPLITs where one or more
+  trackings haven't been delivered yet — the gap is unknown for those)
+
+**Display (user-chosen format):**
+
+- Value: `'X.Xd'` — one decimal, suffixed `d` (e.g. `'2.3d'`).
+- Subtitle: `'Worst: Xd'` — the max splitGapDays in the same set.
+  Reason: average alone hides outliers; pairing avg with worst makes
+  "AVG vs Worst" framing immediate. If avg is `1.7d` but one customer
+  waited `20d`, the average looks fine while a single customer had a
+  three-week split. The Worst value surfaces that.
+- Empty state: value `—`, subtitle `'No settled splits in window'`.
+
+**Why these two values together:**
+
+Operations interprets the pair quickly:
+- `Avg 0.5d · Worst 1d` — clean operations, splits resolve in one day.
+- `Avg 1.7d · Worst 20d` — average is fine, one customer is hurting.
+- `Avg 5d · Worst 5d` — uniformly slow, systemic issue.
+
+**Computation lives in the existing `splitData` `useMemo`:**
+
+```javascript
+const gapItems = split.filter(o => o.splitGapDays != null);
+const gapItemsCount = gapItems.length;
+const avgGap   = gapItemsCount ? gapItems.reduce((s,o) => s + o.splitGapDays, 0) / gapItemsCount : 0;
+const worstGap = gapItemsCount ? gapItems.reduce((m,o) => o.splitGapDays > m ? o.splitGapDays : m, 0) : 0;
+```
+
+`avgGap` already existed (mock-only consumption in the prior branch);
+PR8 adds `worstGap` and `gapItemsCount` alongside and surfaces them in
+the KPI card branch.
+
+**JSX change:**
+
+Pre-PR8:
+```jsx
+{isLive ? (
+  <>
+    <KPI label="Avg Gap" value="N/A" delta="Not available in live data" .../>
+    <KPI label="Chargebacks" value="N/A" .../>
+    <KPI label="Key Acct Impact" value="N/A" .../>
+  </>
+) : ( /* mock branch — avgGap rendered live */ )}
+```
+
+Post-PR8:
+```jsx
+{splitData.gapItemsCount > 0 ? (
+  <KPI label="Avg Gap" value={`${splitData.avgGap.toFixed(1)}d`}
+       delta={`Worst: ${splitData.worstGap}d`} deltaType="bad" .../>
+) : (
+  <KPI label="Avg Gap" value="—" delta="No settled splits in window" .../>
+)}
+{isLive ? ( /* Chargebacks + Key Acct still N/A */ )
+       : ( /* mock-only computed values */ )}
+```
+
+`Avg Gap` is now mode-agnostic (mock and live render the same way).
+`Chargebacks` and `Key Acct Impact` remain inside the `isLive` ? N/A
+branch — explicitly deferred:
+
+| KPI            | Why still N/A in live                                          | Future PR |
+|----------------|----------------------------------------------------------------|-----------|
+| Chargebacks    | No SLA-penalty data source on the wire — billing $ from PR5a is invoice total, not chargeback | Phase 2 / SLA integration |
+| Key Acct Impact| `tier` field is mock-only; SAP customer master doesn't expose a `Key/Growth/Mid/Small` classification today | Customer-tier source PR |
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (`VITE_DATA_SOURCE=live`, 5/5–5/12 window):
+  - `Avg Gap` card: `'N/A · Not available in live data'` → `'2.Xd · Worst: Yd'`.
+  - Other 5 cards (Split Rate / Orders Split / In Transit / Chargebacks /
+    Key Acct Impact) unchanged.
+- Mock fallback: unchanged numbers (mock generator already populates
+  `splitGapDays`).
+- 0-splits edge case (e.g. an isolated short window where every SPLIT
+  is still PENDING): card renders `—` + `'No settled splits in window'`
+  rather than crashing on `(undefined).toFixed(1)`.
+
+**Trust hierarchy:**
+
+- Server: `delivered_date` (PR5a)
+- Adapter: `splitGapDays` per DO (PR7a)
+- `splitData.useMemo`: `avgGap`, `worstGap`, `gapItemsCount` (PR8)
+- UI: KPI card (PR8)
+
+**No changes to:** `server.js`, `useSplitShipments` hook, mock
+generator, PR7a/PR7b adapter logic, other sections (Container Tracking,
+Root Causes, Customer ranking, Channel cards).
+
+**Depends on:** PR7a (`splitGapDays` source).
+**Blocks:** Nothing further. Other N/A KPIs (Chargebacks, Key Acct
+Impact) need their own data-source PRs.
+
 ---
 
 ### PR5 — Validation with operations
