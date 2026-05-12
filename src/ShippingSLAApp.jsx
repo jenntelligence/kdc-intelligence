@@ -38,6 +38,29 @@ const CHANNELS = [
   'ECOM - DTC',
 ];
 
+// PR5b: Phase B root-cause categories — SQL category → friendly label.
+// All 5 categories are KDC-owned; UPS_TRAILER_SPLIT is named after the
+// symptom (different tracking_nums same manifest-close day) but represents
+// KDC's outbound trailer-loading decision. See plan §Phase B for the
+// CASE WHEN priority and 3-window smoke-test findings.
+const ROOT_CAUSE_LABELS = {
+  'MANIFEST_LEVEL_SPLIT': 'Manifest split',
+  'UPS_TRAILER_SPLIT':    'Trailer load split',
+  'ZONE_LEVEL_SPLIT':     'Zone split',
+  'WAVE_LEVEL_SPLIT':     'Wave split',
+  'UNCLASSIFIED_SPLIT':   'Other split',
+};
+
+// Stable display order — keeps empty-state rendering consistent across
+// short and long windows (sorted by count desc at render time).
+const ROOT_CAUSE_ORDER = [
+  'MANIFEST_LEVEL_SPLIT',
+  'UPS_TRAILER_SPLIT',
+  'ZONE_LEVEL_SPLIT',
+  'WAVE_LEVEL_SPLIT',
+  'UNCLASSIFIED_SPLIT',
+];
+
 // PR4b5: Live-mode subset for the Split page only — server-side scope
 // is BS-IVY / BS-RED / VIVACE via UPS (see 002 plan §6b). The global
 // header filter narrows to these chips so clicking a channel that has
@@ -165,8 +188,16 @@ const generateMockShipments = () => {
     const isSplit = Math.random() < baseSplitRate;
     const splitCartons = isSplit ? Math.floor(1 + Math.random() * 3) : 1; // number of separate shipments
     const splitGapDays = isSplit ? 1 + Math.floor(Math.random() * 4) : 0;
-    const splitReasons = ['Short pick - partial inventory', 'Wave cutoff missed', 'Trailer capacity', 'Pick exception', 'SAP-SCALE variance'];
-    const splitReason = isSplit ? splitReasons[Math.floor(Math.random()*splitReasons.length)] : '';
+    // PR5b: 5 Phase B SQL categories with weighted distribution loosely
+    // mirroring the live 8-day window (MANIFEST ~77%, UPS_TRAILER ~16%,
+    // ZONE ~6%, WAVE rare). Source: plan §Phase B smoke-test findings.
+    const splitReasonWeighted = [
+      ...Array(77).fill('MANIFEST_LEVEL_SPLIT'),
+      ...Array(16).fill('UPS_TRAILER_SPLIT'),
+      ...Array( 6).fill('ZONE_LEVEL_SPLIT'),
+      ...Array( 1).fill('WAVE_LEVEL_SPLIT'),
+    ];
+    const splitReason = isSplit ? splitReasonWeighted[Math.floor(Math.random()*splitReasonWeighted.length)] : '';
 
     // Primary SKU on the order
     const primarySku = SKUS[Math.floor(Math.random()*SKUS.length)];
@@ -1289,7 +1320,10 @@ function serverRowsToShipments(rows) {
     splitGapDays: null,
     chargeback: null,
     tier: null,
-    splitReason: null,
+    // PR5b: splitReason now sourced from PR5a backend split_root_cause.
+    // Only populated when split_status = 'SPLIT'; null for SINGLE / PENDING /
+    // NOT_SPLIT / UNKNOWN — preserved as null to keep existing null-checks valid.
+    splitReason: doRow.split_root_cause,
     cause: null,
     shift: null,
     orderValue: null,
@@ -1868,22 +1902,50 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
         </SectionCard>
 
         <SectionCard title="Root Causes of Splits" subtitle="Why orders are being split" tag="DIAGNOSIS">
+          {/* PR5b: 5 Phase B SQL categories with friendly labels via
+              ROOT_CAUSE_LABELS. Sorted by count desc; empty categories
+              render at 40% opacity so a window with no wave-level splits
+              still shows the row instead of disappearing. */}
           <div className="space-y-2">
-            {splitData.reasonList.map((r, i) => (
-              <div key={r.reason} className="bg-[#1a2129] rounded p-2.5 border-l-2" style={{ borderColor: ['#E74C6F','#f5a623','#2C3E9B','#1ABC9C','#8a95a3'][i % 5] }}>
-                <div className="flex justify-between items-center">
-                  <div className="text-[12px] font-semibold">{r.reason}</div>
-                  <div className="font-mono text-[12px]">{r.count} · {fmtPct(r.count/splitData.split.length)}</div>
-                </div>
-                <div className="text-[11px] text-[#8a95a3] mt-1">
-                  {r.reason.includes('Short pick') && 'Pick confirmed less than ordered qty. Check SAP-SCALE inventory sync.'}
-                  {r.reason.includes('Wave cutoff') && 'Part of order missed the wave. Review wave planning cutoffs and order timing.'}
-                  {r.reason.includes('Trailer capacity') && 'Load splitting to fit available trailers. Evaluate pallet consolidation.'}
-                  {r.reason.includes('Pick exception') && 'Physical pick issue (empty location, damage found). Cycle count priority SKU.'}
-                  {r.reason.includes('SAP-SCALE') && 'Layer 1/2 inventory discrepancy (phantom inventory). Audit allocation logic.'}
-                </div>
-              </div>
-            ))}
+            {(() => {
+              const causeCount = {};
+              for (const o of splitData.split) {
+                const cause = o.splitReason || 'UNCLASSIFIED_SPLIT';
+                causeCount[cause] = (causeCount[cause] || 0) + 1;
+              }
+              const total = splitData.split.length || 1;
+              const rows = ROOT_CAUSE_ORDER.map(cause => ({
+                cause,
+                label: ROOT_CAUSE_LABELS[cause] || cause,
+                count: causeCount[cause] || 0,
+                pct: (causeCount[cause] || 0) / total,
+              })).sort((a, b) => b.count - a.count);
+
+              return rows.map(r => {
+                const isEmpty = r.count === 0;
+                const barColor = r.pct > 0.5 ? '#E74C6F'
+                              : r.pct > 0.15 ? '#f5a623'
+                              : r.pct > 0 ? '#2ECC71'
+                              : 'transparent';
+                return (
+                  <div
+                    key={r.cause}
+                    className={`flex items-center gap-3 ${isEmpty ? 'opacity-40' : ''}`}
+                  >
+                    <div className="text-[12px] w-40 flex-shrink-0">{r.label}</div>
+                    <div className="flex-1 h-4 rounded overflow-hidden bg-[#1a2129]">
+                      <div className="h-full transition-all" style={{
+                        width: `${Math.min(r.pct * 100 * 1.2, 100)}%`,
+                        background: barColor,
+                      }} />
+                    </div>
+                    <div className="font-mono text-[11px] w-24 text-right text-[#8a95a3]">
+                      {r.count} · {fmtPct(r.pct)}
+                    </div>
+                  </div>
+                );
+              });
+            })()}
           </div>
         </SectionCard>
       </div>

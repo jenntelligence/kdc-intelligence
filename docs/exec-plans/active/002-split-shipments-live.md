@@ -1272,18 +1272,81 @@ something KDC can investigate, fix, or prevent.
 warehouse / upstream) rather than the raw SQL category names alone, so
 the "who fixes this" mapping is immediate for operations users.
 
-### PR5b — Frontend wiring (next PR)
+### PR5b — Frontend wiring (completed 2026-05-12)
 
-**Goal:** Surface `split_root_cause` in the page UI.
+PR5b ships in this commit. Surfaces `split_root_cause` through the
+adapter into the "Root Causes of Splits" section UI. Container Tracking
+table's ROOT CAUSE column is deferred to PR5c (immediately after this
+PR — same `splitReason` field, different render site).
 
-**Anticipated changes:**
+**User UI decisions (recorded for traceability):**
 
-- **"Root Causes of Splits" section:** replace the mock 5-reason labels
-  with the live 5 Phase B categories (driven by `split_root_cause`).
-- **Container Tracking table — Root Cause column:** value comes from
-  `split_root_cause` instead of the placeholder `primary_split_type`
-  derivation in `groupedByOrder`.
-- **(Other surfaces TBD)** per user review on the running dashboard.
+1. **Display:** simple list sorted by count desc; no KDC-operations-stage
+   grouping (despite the Phase B findings note suggesting it could be
+   useful — kept the simpler list for first cut, can re-evaluate after
+   ops feedback).
+2. **Container Tracking ROOT CAUSE column:** deferred to PR5c (immediately
+   after this PR).
+3. **Mock generator:** updated to the 5 SQL categories so mock-fallback
+   path renders the same UI as live.
+4. **Label style:** "X split" pattern — `Manifest split` /
+   `Trailer load split` / `Zone split` / `Wave split` / `Other split`.
+
+**Files modified:**
+- `src/ShippingSLAApp.jsx`
+- This sub-plan file (this section)
+
+**Changes:**
+
+- **`ROOT_CAUSE_LABELS` + `ROOT_CAUSE_ORDER` constants** added near
+  `CHANNELS` (line ~40). `LABELS` is the SQL-category → friendly-label
+  map; `ORDER` is the stable iteration order for empty-state consistency
+  (the renderer still sorts by count desc, but ORDER makes the empty
+  rows stable across windows).
+- **Mock generator (line ~168):** the 5 mock reasons
+  (`'Short pick - partial inventory'`, `'Wave cutoff missed'`,
+  `'Trailer capacity'`, `'Pick exception'`, `'SAP-SCALE variance'`) replaced
+  with a weighted array of the 5 SQL categories. Distribution loosely
+  mirrors the live 8-day window (MANIFEST 77%, UPS_TRAILER 16%, ZONE 6%,
+  WAVE 1%; UNCLASSIFIED intentionally absent in mock since live shows 0%).
+- **Adapter (`serverRowsToShipments`, line ~1292):** `splitReason: null`
+  → `splitReason: doRow.split_root_cause`. For non-SPLIT rows the value
+  remains null (the CTE only populates `split_root_cause` when
+  `split_status = 'SPLIT'`), preserving existing null-check semantics.
+- **"Root Causes of Splits" section (line ~1870):** rewritten from the
+  mock `reasonList` iteration (which carried hardcoded explanatory text
+  per mock-reason name) to a simple 5-row list. Each row: friendly label
+  + progress bar + `count · pct`. Rows sorted by count desc. Empty
+  categories (e.g. `Wave split` with 0 splits in short windows) render
+  at 40% opacity instead of disappearing. Bar color is a soft
+  green/amber/red ramp keyed off the percentage.
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke against live (`VITE_DATA_SOURCE=live`) on the 8-day
+  window: 5 rows render with friendly labels; `Manifest split` at the
+  top (~77%); `Wave split` and `Other split` render at 40% opacity (0%).
+- Mock fallback path (`VITE_DATA_SOURCE=mock` or server stopped): same 5
+  rows from the weighted mock generator. UI is symmetric across modes.
+
+**Not in scope (PR5c — next):**
+
+- Container Tracking table's ROOT CAUSE column (`src/ShippingSLAApp.jsx`
+  line ~1756) still renders `o.splitReason || (isLive ? 'TBD (Phase B)' : '—')`.
+  In live mode that now shows the SQL category names (because
+  `o.splitReason` is no longer null), but the friendly-label transform is
+  not yet applied — PR5c wires `ROOT_CAUSE_LABELS[o.splitReason]` at that
+  render site.
+
+**Trust hierarchy preserved:**
+- Server: `split_root_cause` (PR5a)
+- Adapter: `splitReason` ← `doRow.split_root_cause`
+- UI: `ROOT_CAUSE_LABELS` lookup
+- Mock fallback: same 5 SQL categories via the weighted mock generator
+
+**No changes to:** `useSplitShipments` hook, other pages, `server.js`,
+master plan 001.
 
 **Depends on:** PR5a
 **Blocks:** PR5 (operations validation now covers Phase B categories too)
