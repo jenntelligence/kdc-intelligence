@@ -386,6 +386,7 @@ with base as (
         sh.launch_num as wave_num,
         sh.shipment_id as do_num,
         sh.internal_shipment_num,
+        sh.launch_num,
         cm.shiptoparty_key,
         cm.name as cust_name,
         cm.region as cust_state,
@@ -400,16 +401,20 @@ with base as (
         sc.manifest_id,
         cast(concat(left(SALESDOCDATE, 4) , '-' , SUBSTRING(SALESDOCDATE, 5, 2) ,'-' , right(SALESDOCDATE, 2)) as date) so_created_date,
         convert_timezone('UTC', 'America/New_York', sc.date_time_stamp) as container_status_time,
-        convert_timezone('UTC', 'America/New_York', sc.manifest_close_date_time) as manifest_close_time
+        convert_timezone('UTC', 'America/New_York', sc.manifest_close_date_time) as manifest_close_time,
+        b."Calendar_day" as billing_date,
+        sum(b."NET($)") as invoice_amount
     from sci.l0.shipping_container sc
     join sci.l0.shipment_header sh on sc.internal_shipment_num = sh.internal_shipment_num
     join kdb.pbi_sf.sap_customer_master cm on sh.ship_to = cm.shiptoparty_key and sh.route = cm.salesorg_key
     join kdb.pbi_sf.zsdrordr so on sh.user_def4 = so.salesdocnumber
+    left join kdb.pbi_sf.zsd_c01_billing b on ltrim(sh.user_def4, '0') = b."Sales_document"
     where sc.company in ('Ivy', 'Red', 'Vivace')
     and lower(sc.container_type) in ('as inner', 'as outer', 'car', 'ip', 'ivy inner', 'ivy outer')
     and sh.carrier = 'UPS'
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') >= ?
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') <= ?
+    group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22
 )
 , ia_work_instruction as (
     select
@@ -427,7 +432,7 @@ with base as (
     group by 1, 2
 )
 , ups_data as (
-    select 
+    select
         tracking_num,
         max(case when status_type = 'Origin' then datetime end) as origin_date,
         max(case when status_type = 'Generic' then datetime end) as processing_date,
@@ -437,11 +442,13 @@ with base as (
     group by 1
 )
 , final as (
-    select 
+    select
         b.company,
         b.so_num,
         b.so_created_date,
         b.do_num,
+        ls.date_time_stamp as wave_launch_date,
+        ls.launch_flow,
         ia.work_type,
         ia.zone,
         ia.picking_completion_time,
@@ -458,16 +465,20 @@ with base as (
         ud.processing_date,
         ud.delivered_date,
         ud.delivered_state,
+        b.billing_date,
+        b.invoice_amount,
         b.cust_state,
         b.shiptoparty_key,
         b.cust_name,
         b.cust_city,
         b.cust_zipcode,
         b.wave_num,
+        ls.internal_launch_num,
         b.internal_shipment_num
     from base b
     left join ia_work_instruction ia on b.do_num = ia.do and b.container_id = ia.container_id
     left join ups_data ud on b.tracking_number = ud.tracking_num
+    left join sci.l0.launch_statistics ls on b.launch_num = ls.internal_launch_num
 )
 , do_level as (
     select
@@ -499,13 +510,51 @@ with base as (
     from final b
     left join do_level d on b.do_num = d.do_num
 )
+, split_root_cause as (
+    select
+        do_num,
+        count(distinct internal_launch_num) as wave_cnt,
+        count(distinct date_trunc('day', wave_launch_date)) as wave_launch_time_cnt,
+        count(distinct manifest_id) as manifest_cnt,
+        count(distinct date_trunc('day', manifest_close_time)) as manifest_close_date_cnt,
+        count(distinct zone) as zone_cnt,
+        count(distinct date_trunc('day', picking_completion_time)) as picking_completion_date_cnt,
+        count(distinct tracking_num) as tracking_cnt,
+        case
+            when count(distinct wave_num) > 1
+              or count(distinct date_trunc('minute', wave_launch_date)) > 1
+                then 'WAVE_LEVEL_SPLIT'
+            when count(distinct manifest_id) > 1
+             and count(distinct date_trunc('day', manifest_close_time)) > 1
+                then 'MANIFEST_LEVEL_SPLIT'
+            when count(distinct zone) > 1
+             and count(distinct date_trunc('day', picking_completion_time)) > 1
+                then 'ZONE_LEVEL_SPLIT'
+            when count(distinct tracking_num) > 1
+             and count(distinct date_trunc('day', manifest_close_time)) = 1
+                then 'UPS_TRAILER_SPLIT'
+            else 'UNCLASSIFIED_SPLIT'
+        end as split_root_cause
+    from classified
+    where split_status = 'SPLIT'
+    group by do_num
+)
 select
     c.*,
-    case when c.split_status = 'SPLIT' then 'Y' else 'N'
-         end as is_split_shipment
+    case when c.split_status = 'SPLIT' then 'Y' else 'N' end as is_split_shipment,
+    r.split_root_cause
 from classified c
+left join split_root_cause r on c.do_num = r.do_num
 order by c.do_num, c.container_status_time;
 ```
+
+**Updated 2026-05-11 (PR5a):** SQL extended from 6 CTE → 7 CTE; new
+`split_root_cause` CTE adds 5-category root-cause classification on top
+of Phase A's split detection. New joins: `kdb.pbi_sf.zsd_c01_billing`
+(in `base` CTE — adds `billing_date` + `invoice_amount`) and
+`sci.l0.launch_statistics` (in `final` CTE — adds `wave_launch_date`,
+`launch_flow`, `internal_launch_num`). See **Phase B section below**
+for the 5-category definitions and CASE WHEN priority.
 
 2. Endpoint code (mirrors existing `server.js` patterns):
 
@@ -1051,6 +1100,193 @@ Mock fallback path preserved.
 
 **Depends on:** PR1, PR2, PR3
 **Blocks:** PR5
+
+---
+
+## Phase B — Root Cause Classification
+
+**Status:** In progress (PR5a + PR5b)
+
+User added `split_root_cause` CTE to the master query (2026-05-11)
+classifying each SPLIT DO into one of 5 categories:
+
+| Category               | Condition                                                                  |
+|------------------------|----------------------------------------------------------------------------|
+| WAVE_LEVEL_SPLIT       | `count(distinct wave_num) > 1` OR multiple wave_launch minutes             |
+| MANIFEST_LEVEL_SPLIT   | `manifest_cnt > 1` AND multiple manifest_close days                        |
+| ZONE_LEVEL_SPLIT       | `zone_cnt > 1` AND multiple picking_completion days                        |
+| UPS_TRAILER_SPLIT      | `tracking_cnt > 1` AND single manifest_close day                           |
+| UNCLASSIFIED_SPLIT     | (else) — none of the above match                                           |
+
+**CASE WHEN priority (top to bottom):** wave > manifest > zone > UPS
+trailer > unclassified. A single SPLIT can satisfy multiple conditions;
+only the first match wins.
+
+**Operational meaning:**
+
+- **WAVE_LEVEL_SPLIT:** split started at wave planning — the SO's
+  containers were launched on different waves entirely.
+- **MANIFEST_LEVEL_SPLIT:** split at outbound — genuinely different
+  trucks on different manifest-close days.
+- **ZONE_LEVEL_SPLIT:** split in picking — different warehouse zones
+  picked on different days.
+- **UPS_TRAILER_SPLIT:** split during UPS transit — KDC sent everything
+  together on a single manifest-close day, but UPS separated it.
+  **NOT KDC's fault** — UPS routing artifact.
+- **UNCLASSIFIED_SPLIT:** data ambiguity or edge case requiring
+  individual investigation.
+
+**Why this matters:** operations needs to know *why* a split happened,
+not just *that* it happened. Each category points to a different
+process owner.
+
+### Master query (updated 2026-05-11) — byte-exact
+
+The complete 7-CTE master query is in PR3 task 1 above (which has been
+updated in-place as part of PR5a). Trust hierarchy preserved:
+
+1. User operational fact: the 5 root-cause categories + CASE WHEN priority
+2. User master query → PR3 plan SQL block (byte-exact paste)
+3. Plan SQL → `server.js` `SPLIT_SHIPMENTS_SQL` (byte-exact paste)
+4. Endpoint response → `split_root_cause` column flowing through `toFactShape`
+
+Hardcoded test dates (`'2026-05-01'` / `'2026-05-13'`) from user's
+master-query draft were restored to `?` bind in both plan and
+`server.js` — consistent with PR3 / PR4a date-range semantics.
+
+### PR5a — Backend wiring (split_root_cause CTE + endpoint surface)
+
+**Goal:** Wire Phase B's root-cause classification through the existing
+`/api/scale/split-shipments` endpoint without touching UI / adapter /
+mock / hook layers (those land in PR5b).
+
+**Files modified:**
+- `docs/exec-plans/active/002-split-shipments-live.md` — Phase B
+  section + PR3 master query updated in place
+- `server.js` — `SPLIT_SHIPMENTS_SQL` byte-exact paste; `toFactShape`
+  extended with 6 new columns
+
+**Specific tasks:**
+
+1. Replace the master query SQL block in PR3 task 1 with the new
+   7-CTE version. `?` bind retained for date range (no hardcoded dates).
+2. Byte-exact paste the new SQL into `server.js`
+   `SPLIT_SHIPMENTS_SQL` template literal.
+3. Extend `toFactShape` to project the 6 new columns:
+   - `wave_launch_date`, `launch_flow`, `internal_launch_num`
+     (from `launch_statistics` join)
+   - `billing_date`, `invoice_amount` (from `zsd_c01_billing` join)
+   - `split_root_cause` (from `split_root_cause` CTE — only populated
+     when `split_status = 'SPLIT'`)
+4. Restart `node server.js` (background task). Smoke-test the endpoint
+   with the same window that produced Phase A's ~313 SPLIT DOs.
+5. Verify the 5 root-cause categories all appear in the response and
+   the SPLIT DO total is unchanged (Phase B does not change the SPLIT
+   detection logic; only adds classification).
+
+**Validation:**
+
+- `curl http://localhost:3001/api/scale/split-shipments?from=2026-05-04&to=2026-05-11`
+  returns successfully (< 30s cold, < 5s warm).
+- `Object.keys(rows[0])` includes `split_root_cause`, `wave_launch_date`,
+  `launch_flow`, `internal_launch_num`, `billing_date`, `invoice_amount`.
+- Total SPLIT DOs ≈ 313 (Phase A baseline). A drift here would mean the
+  new joins (billing / launch_statistics) altered base CTE row counts —
+  requires user review of the `group by 1..22` change.
+- All 5 categories represented in the distribution (`WAVE_LEVEL_SPLIT`,
+  `MANIFEST_LEVEL_SPLIT`, `ZONE_LEVEL_SPLIT`, `UPS_TRAILER_SPLIT`,
+  `UNCLASSIFIED_SPLIT`).
+
+**Out of scope for PR5a (lands in PR5b):**
+- `serverRowsToShipments` adapter changes
+- `useSplitShipments` hook changes
+- Mock generator updates
+- `SplitShipmentPage` UI — "Root Causes of Splits" section will be
+  rewired to display the 5 Phase B categories instead of mock's 5 reasons
+- Channel-card / table label changes
+
+**Depends on:** PR3, PR4 (Phase A wiring stable on the live page)
+**Blocks:** PR5b
+
+### Phase B smoke test findings (2026-05-12)
+
+3-window comparison confirms classifier behavior and reveals operational
+insights for PR5b UI design.
+
+**Window comparison:**
+
+| Window      | DOs   | SPLIT | PENDING% | Settled SPLIT% | Top cause            |
+|-------------|-------|-------|----------|----------------|----------------------|
+| 8d recent   | 1,927 |   382 |   36.2%  |     31.1%      | MANIFEST_LEVEL (77%) |
+| 13d range   | 2,300 |   535 |   31.3%  |     33.8%      | MANIFEST_LEVEL (62%) |
+| 30d mature  | 6,662 | 2,713 |    0.4%  |     40.9%      | UPS_TRAILER (65%)    |
+
+**Data maturation pattern:**
+
+- `PENDING%` collapses as the window ages (36% → 0.4% at 30 days).
+- Settled-basis `SPLIT%` climbs as `PENDING` resolves (31% → 41%).
+- Recent windows under-count splits — many `PENDING` rows resolve to
+  `SPLIT` later, as UPS delivery scans arrive.
+- The PR4 baseline (~313 `SPLIT` DOs for 5/4-5/11) was captured days
+  earlier when more DOs were `PENDING`; today's 382 for the same window
+  is normal maturation, not a SQL bug.
+
+**Operational findings from the 30-day mature window:**
+
+| Category             | Count | %      | KDC operations stage          |
+|----------------------|-------|--------|-------------------------------|
+| UPS_TRAILER_SPLIT    | 1,768 | 65.2%  | Outbound (trailer loading)    |
+| MANIFEST_LEVEL_SPLIT |   819 | 30.2%  | Outbound (manifest building)  |
+| ZONE_LEVEL_SPLIT     |   123 |  4.5%  | Warehouse (picking)           |
+| WAVE_LEVEL_SPLIT     |     3 |  0.1%  | Upstream (wave planning)      |
+| UNCLASSIFIED_SPLIT   |     0 |  0.0%  | —                             |
+
+**All 5 categories are KDC-owned.** `UPS_TRAILER_SPLIT` is named after
+the *condition* (same manifest-close day, different `tracking_num`) but
+represents **KDC's outbound trailer-loading decision** — cartons that
+should have been loaded onto the same trailer for the same SO were split
+into different packages. UPS sees them as separate parcels, but the
+decision was KDC's. The "UPS_TRAILER" name describes the symptom (UPS
+later delivers on different days), not the owner. All splits are
+something KDC can investigate, fix, or prevent.
+
+**Key takeaways for PR5b UI:**
+
+- **Outbound stage dominates** at steady state (~95% of splits at 30-day
+  maturity): manifest building + trailer loading decisions. Both are
+  KDC outbound process. Warehouse picking (zone) is a small contributor.
+- **Recent vs. mature pattern shift:** at 8 days `MANIFEST_LEVEL` appears
+  dominant (77%); at 30 days `UPS_TRAILER` overtakes (65%).
+  `UPS_TRAILER` splits emerge later because their classification depends
+  on multiple delivery scans landing on different days from the same
+  manifest. Worth a "data still maturing" hint on short windows so
+  operations doesn't conclude "manifest is the main problem" from
+  short-window data alone.
+- **`WAVE_LEVEL` is rare** (0.1% at 30 days): wave planning rarely
+  produces same-DO splits. Either operationally clean, or the detection
+  condition is too strict — worth a future review with operations.
+- **`UNCLASSIFIED` = 0 across all windows:** the 5-category framework
+  covers every real split. No "other" bucket needed.
+
+**Future PR5b UI direction:** group by KDC operations stage (outbound /
+warehouse / upstream) rather than the raw SQL category names alone, so
+the "who fixes this" mapping is immediate for operations users.
+
+### PR5b — Frontend wiring (next PR)
+
+**Goal:** Surface `split_root_cause` in the page UI.
+
+**Anticipated changes:**
+
+- **"Root Causes of Splits" section:** replace the mock 5-reason labels
+  with the live 5 Phase B categories (driven by `split_root_cause`).
+- **Container Tracking table — Root Cause column:** value comes from
+  `split_root_cause` instead of the placeholder `primary_split_type`
+  derivation in `groupedByOrder`.
+- **(Other surfaces TBD)** per user review on the running dashboard.
+
+**Depends on:** PR5a
+**Blocks:** PR5 (operations validation now covers Phase B categories too)
 
 ---
 

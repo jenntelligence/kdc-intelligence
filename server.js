@@ -322,6 +322,26 @@ function toFactShape(row) {
     // Split classification (classified CTE + outer SELECT)
     split_status: row.SPLIT_STATUS,
     is_split_shipment: row.IS_SPLIT_SHIPMENT === 'Y',
+
+    // ── PR5a (Phase B) — root cause classification columns ──────
+    // Per docs/exec-plans/active/002-split-shipments-live.md Phase B.
+    // Populated by /api/scale/split-shipments after master query was
+    // extended to 7 CTEs (split_root_cause CTE + launch_statistics
+    // and zsd_c01_billing joins).
+
+    // Wave-launch context (LEFT JOIN sci.l0.launch_statistics)
+    wave_launch_date: row.WAVE_LAUNCH_DATE,
+    launch_flow: row.LAUNCH_FLOW,
+    internal_launch_num: row.INTERNAL_LAUNCH_NUM,
+
+    // Billing aggregation (JOIN kdb.pbi_sf.zsd_c01_billing in base CTE)
+    billing_date: row.BILLING_DATE,
+    invoice_amount: row.INVOICE_AMOUNT,
+
+    // Root cause (split_root_cause CTE; only non-null where split_status = 'SPLIT').
+    // One of: WAVE_LEVEL_SPLIT, MANIFEST_LEVEL_SPLIT, ZONE_LEVEL_SPLIT,
+    // UPS_TRAILER_SPLIT, UNCLASSIFIED_SPLIT.
+    split_root_cause: row.SPLIT_ROOT_CAUSE,
   };
 }
 
@@ -979,6 +999,7 @@ with base as (
         sh.launch_num as wave_num,
         sh.shipment_id as do_num,
         sh.internal_shipment_num,
+        sh.launch_num,
         cm.shiptoparty_key,
         cm.name as cust_name,
         cm.region as cust_state,
@@ -993,16 +1014,20 @@ with base as (
         sc.manifest_id,
         cast(concat(left(SALESDOCDATE, 4) , '-' , SUBSTRING(SALESDOCDATE, 5, 2) ,'-' , right(SALESDOCDATE, 2)) as date) so_created_date,
         convert_timezone('UTC', 'America/New_York', sc.date_time_stamp) as container_status_time,
-        convert_timezone('UTC', 'America/New_York', sc.manifest_close_date_time) as manifest_close_time
+        convert_timezone('UTC', 'America/New_York', sc.manifest_close_date_time) as manifest_close_time,
+        b."Calendar_day" as billing_date,
+        sum(b."NET($)") as invoice_amount
     from sci.l0.shipping_container sc
     join sci.l0.shipment_header sh on sc.internal_shipment_num = sh.internal_shipment_num
     join kdb.pbi_sf.sap_customer_master cm on sh.ship_to = cm.shiptoparty_key and sh.route = cm.salesorg_key
     join kdb.pbi_sf.zsdrordr so on sh.user_def4 = so.salesdocnumber
+    left join kdb.pbi_sf.zsd_c01_billing b on ltrim(sh.user_def4, '0') = b."Sales_document"
     where sc.company in ('Ivy', 'Red', 'Vivace')
     and lower(sc.container_type) in ('as inner', 'as outer', 'car', 'ip', 'ivy inner', 'ivy outer')
     and sh.carrier = 'UPS'
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') >= ?
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') <= ?
+    group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22
 )
 , ia_work_instruction as (
     select
@@ -1020,7 +1045,7 @@ with base as (
     group by 1, 2
 )
 , ups_data as (
-    select 
+    select
         tracking_num,
         max(case when status_type = 'Origin' then datetime end) as origin_date,
         max(case when status_type = 'Generic' then datetime end) as processing_date,
@@ -1030,11 +1055,13 @@ with base as (
     group by 1
 )
 , final as (
-    select 
+    select
         b.company,
         b.so_num,
         b.so_created_date,
         b.do_num,
+        ls.date_time_stamp as wave_launch_date,
+        ls.launch_flow,
         ia.work_type,
         ia.zone,
         ia.picking_completion_time,
@@ -1051,16 +1078,20 @@ with base as (
         ud.processing_date,
         ud.delivered_date,
         ud.delivered_state,
+        b.billing_date,
+        b.invoice_amount,
         b.cust_state,
         b.shiptoparty_key,
         b.cust_name,
         b.cust_city,
         b.cust_zipcode,
         b.wave_num,
+        ls.internal_launch_num,
         b.internal_shipment_num
     from base b
     left join ia_work_instruction ia on b.do_num = ia.do and b.container_id = ia.container_id
     left join ups_data ud on b.tracking_number = ud.tracking_num
+    left join sci.l0.launch_statistics ls on b.launch_num = ls.internal_launch_num
 )
 , do_level as (
     select
@@ -1092,11 +1123,41 @@ with base as (
     from final b
     left join do_level d on b.do_num = d.do_num
 )
+, split_root_cause as (
+    select
+        do_num,
+        count(distinct internal_launch_num) as wave_cnt,
+        count(distinct date_trunc('day', wave_launch_date)) as wave_launch_time_cnt,
+        count(distinct manifest_id) as manifest_cnt,
+        count(distinct date_trunc('day', manifest_close_time)) as manifest_close_date_cnt,
+        count(distinct zone) as zone_cnt,
+        count(distinct date_trunc('day', picking_completion_time)) as picking_completion_date_cnt,
+        count(distinct tracking_num) as tracking_cnt,
+        case
+            when count(distinct wave_num) > 1
+              or count(distinct date_trunc('minute', wave_launch_date)) > 1
+                then 'WAVE_LEVEL_SPLIT'
+            when count(distinct manifest_id) > 1
+             and count(distinct date_trunc('day', manifest_close_time)) > 1
+                then 'MANIFEST_LEVEL_SPLIT'
+            when count(distinct zone) > 1
+             and count(distinct date_trunc('day', picking_completion_time)) > 1
+                then 'ZONE_LEVEL_SPLIT'
+            when count(distinct tracking_num) > 1
+             and count(distinct date_trunc('day', manifest_close_time)) = 1
+                then 'UPS_TRAILER_SPLIT'
+            else 'UNCLASSIFIED_SPLIT'
+        end as split_root_cause
+    from classified
+    where split_status = 'SPLIT'
+    group by do_num
+)
 select
     c.*,
-    case when c.split_status = 'SPLIT' then 'Y' else 'N'
-         end as is_split_shipment
+    case when c.split_status = 'SPLIT' then 'Y' else 'N' end as is_split_shipment,
+    r.split_root_cause
 from classified c
+left join split_root_cause r on c.do_num = r.do_num
 order by c.do_num, c.container_status_time;
 `;
 
