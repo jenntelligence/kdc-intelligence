@@ -1351,6 +1351,66 @@ master plan 001.
 **Depends on:** PR5a
 **Blocks:** PR5 (operations validation now covers Phase B categories too)
 
+### PR5c — Friendly label consistency + Container Tracking column (completed 2026-05-12)
+
+PR5b shipped with the "X split" label pattern (`Manifest split` /
+`Trailer load split` / `Zone split` / `Wave split` / `Other split`). User
+reviewed the running dashboard and requested two refinements:
+
+1. **Label naming consistency** — switch to Title Case mirroring the SQL
+   category names: `MANIFEST_LEVEL_SPLIT` → `Manifest Level Split`,
+   etc. Reasoning: 1:1 mapping with SQL names, easier debugging, no
+   name-translation gap between SQL / adapter / UI / docs. A developer
+   can grep any of the four representations and find the same concept.
+
+2. **Container Tracking column** — same friendly labels at that render
+   site. After PR5b, the adapter had begun populating `splitReason`, so
+   the column was rendering the raw SQL category name (e.g.
+   `MANIFEST_LEVEL_SPLIT`) instead of the previous `TBD (Phase B)`
+   fallback. PR5c routes that render through `ROOT_CAUSE_LABELS` and
+   removes the obsolete `TBD (Phase B)` fallback.
+
+**Changes:**
+
+- `ROOT_CAUSE_LABELS` values updated (5 entries) and comment notes the
+  Title Case convention.
+  - `MANIFEST_LEVEL_SPLIT`: `Manifest split` → `Manifest Level Split`
+  - `UPS_TRAILER_SPLIT`: `Trailer load split` → `UPS Trailer Split`
+  - `ZONE_LEVEL_SPLIT`: `Zone split` → `Zone Level Split`
+  - `WAVE_LEVEL_SPLIT`: `Wave split` → `Wave Level Split`
+  - `UNCLASSIFIED_SPLIT`: `Other split` → `Unclassified Split`
+- Container Tracking ROOT CAUSE column render (one line in
+  `src/ShippingSLAApp.jsx`):
+  - Before: `{o.splitReason || (isLive ? 'TBD (Phase B)' : '—')}`
+  - After:  `{o.splitReason ? (ROOT_CAUSE_LABELS[o.splitReason] || o.splitReason) : '—'}`
+  - `TBD (Phase B)` fallback removed (Phase B complete).
+
+**Trust hierarchy now end-to-end consistent:**
+
+| Layer          | Representation                              |
+|----------------|----------------------------------------------|
+| SQL category   | `MANIFEST_LEVEL_SPLIT`                       |
+| Adapter field  | `splitReason: 'MANIFEST_LEVEL_SPLIT'`        |
+| UI label       | `Manifest Level Split`                       |
+| Docs           | Same naming throughout                       |
+
+**Phase B end-to-end (PR5a + PR5b + PR5c) complete:**
+
+- Server: `split_root_cause` CTE in master query (PR5a)
+- Adapter: `splitReason ← doRow.split_root_cause` (PR5b)
+- UI surface 1: "Root Causes of Splits" section (PR5b)
+- UI surface 2: Container Tracking ROOT CAUSE column (PR5c)
+
+No further Phase B work — operations team can now see both per-DO root
+cause (Container Tracking table, one row per shipment) and aggregate
+distribution (Root Causes section, summary by category).
+
+**No data flow changes** in PR5c — pure label/render refinement.
+
+**Depends on:** PR5b
+**Blocks:** Nothing further; Phase B end-to-end now sits on top of the
+Phase A foundation and feeds into the existing PR5 operations validation.
+
 ---
 
 ### PR5 — Validation with operations

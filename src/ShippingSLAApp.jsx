@@ -38,17 +38,20 @@ const CHANNELS = [
   'ECOM - DTC',
 ];
 
-// PR5b: Phase B root-cause categories — SQL category → friendly label.
+// PR5b/PR5c: Phase B root-cause categories — SQL category → friendly label.
+// Convention (PR5c user decision): SQL name Title Case, 1:1 mapping with
+// SQL category names. Lets a developer grep the same identifier across
+// SQL / adapter / UI / docs without any name-translation gap.
 // All 5 categories are KDC-owned; UPS_TRAILER_SPLIT is named after the
 // symptom (different tracking_nums same manifest-close day) but represents
 // KDC's outbound trailer-loading decision. See plan §Phase B for the
 // CASE WHEN priority and 3-window smoke-test findings.
 const ROOT_CAUSE_LABELS = {
-  'MANIFEST_LEVEL_SPLIT': 'Manifest split',
-  'UPS_TRAILER_SPLIT':    'Trailer load split',
-  'ZONE_LEVEL_SPLIT':     'Zone split',
-  'WAVE_LEVEL_SPLIT':     'Wave split',
-  'UNCLASSIFIED_SPLIT':   'Other split',
+  'MANIFEST_LEVEL_SPLIT': 'Manifest Level Split',
+  'UPS_TRAILER_SPLIT':    'UPS Trailer Split',
+  'ZONE_LEVEL_SPLIT':     'Zone Level Split',
+  'WAVE_LEVEL_SPLIT':     'Wave Level Split',
+  'UNCLASSIFIED_SPLIT':   'Unclassified Split',
 };
 
 // Stable display order — keeps empty-state rendering consistent across
@@ -1787,7 +1790,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
                       </td>
                       <td className="py-2.5 pr-3 text-center font-mono">{o.containers?.length || o.splitCartons || 0}x</td>
                       <td className="py-2.5 pr-3 text-center font-mono text-[#E74C6F]">{o.splitGapDays != null ? `${o.splitGapDays}d` : '—'}</td>
-                      <td className="py-2.5 pr-3 text-[11px]" style={{ color: 'var(--text-secondary)' }}>{o.splitReason || (isLive ? 'TBD (Phase B)' : '—')}</td>
+                      <td className="py-2.5 pr-3 text-[11px]" style={{ color: 'var(--text-secondary)' }}>{o.splitReason ? (ROOT_CAUSE_LABELS[o.splitReason] || o.splitReason) : '—'}</td>
                       <td className="py-2.5 pr-3 text-right font-mono" style={{ color: 'var(--text-primary)' }}>{o.orderValue != null ? `$${fmtNum(o.orderValue)}` : '—'}</td>
                       <td className="py-2.5 text-center">
                         {hasAlert && <AlertTriangle size={14} className="text-[#E74C6F] mx-auto"/>}
