@@ -1413,6 +1413,111 @@ Phase A foundation and feeds into the existing PR5 operations validation.
 
 ---
 
+### PR6 — Customer ranking YTD top 10 (completed 2026-05-12)
+
+User reviewed the PR5c running dashboard and identified that the
+"Split Rate by Customer" section was showing all customers at 100%
+split rate (1/1) in the 7-day window — statistical noise, not signal.
+The section needed a stable, sample-large window so operations could
+identify "who is most affected by splits this year" as an actionable
+list.
+
+**Why:**
+
+| Window           | Per-customer sample | Signal |
+|------------------|---------------------|--------|
+| 7d (main window) | ~1 order            | 100% (1/1) — noise |
+| YTD              | ~hundreds of orders | top-10 absolute split count — actionable |
+
+**Architecture:**
+
+The Customer ranking section uses a **separate `useSplitShipments` hook
+call** with the new `'ytd'` preset, independent from the page's main
+`dateRange`. All other sections (KPI, Channel, Container Tracking,
+Root Causes) continue using the main `dateRange`.
+
+```javascript
+const mainSplitData = useSplitShipments(dateRange, customRange);  // 7d / 30d / 90d / custom
+const ytdSplitData  = useSplitShipments('ytd');                   // Jan 1 of current year → today
+```
+
+The two calls fire in **parallel** on mount (each instance of the hook
+manages its own `useState` / `useEffect` / cancellation). The page's
+existing global loading gate (`if (hookLoading) return ...`) waits only
+on the main call, so:
+
+1. Page mounts → both fetches start
+2. Main fetch returns (~1-2s, 7d payload ~8k rows) → page renders all
+   sections with main data; Customer section shows "Loading YTD data…"
+3. YTD fetch returns (~4-5s, ~24k DOs / ~30 MB) → Customer section
+   populates with the top 10
+
+No hook-internal changes — PR4b1's `(dateRange, customRange)` signature
+handles this design natively.
+
+**Changes:**
+
+- `presetToDateRange` helper: new `'ytd'` branch returning
+  `{ from: 'YYYY-01-01', to: today }` (uses `formatDateLocal` to avoid
+  the UTC timezone shift PR4b1 already documented).
+- `SplitShipmentPage` body: second `useSplitShipments('ytd')` call
+  added; existing main hook call untouched.
+- New `ytdCustomerList` `useMemo` computed off `ytdHookData`:
+  groups by customer, sums splits and totals, filters to customers
+  with `splits > 0`, sorts by split count desc, slices top 10,
+  attaches `splitRate` as supplementary info.
+- "Split Rate by Customer" section JSX (single section, ~22 lines):
+  - Subtitle: `Sorted highest violation` → `Year to date · Top 10 by split count` (with `· Loading…` suffix while YTD fetch is in flight).
+  - Tag: `VIOLATION LIST` → `YTD`.
+  - Data source: `splitData.customerList` → `ytdCustomerList`.
+  - Bar scale: was rate-relative (`splitRate × 4`, capped at 100%); now count-relative to the top entry (`splits / maxSplits × 100`) so the #1 customer fills the bar and the rest scale proportionally. Color thresholds unchanged (red >25%, amber >10%, green otherwise — still rate-based, used to flag customers whose share of orders that split is high even if absolute count isn't #1).
+  - Right-aligned numeric: `{split}/{total}` → `{splits} · {pct}` (count primary, rate secondary).
+  - Loading state: explicit `"Loading YTD data…"` while `ytdLoading`.
+  - Empty state: `"No split data in YTD window."` if zero customers have any splits in YTD.
+
+**Preserved on the page** (no change):
+
+- `splitData.customerList` still computed off `pageData` (main dateRange)
+  — used by the "Key Acct Impact" KPI at the top of the page.
+- All other section data sources unchanged.
+
+**Trade-offs and backlog:**
+
+- YTD response is ~30 MB / 4-5s. Acceptable as a one-time page-load cost
+  but worth caching at hook level if a user navigates away and back.
+  Backlog item: hook-level cache keyed by `(dateRange, customKey)` —
+  trivial extension, deferred to keep this PR focused.
+- Browser memory: keeping both 7d (~8k rows) and YTD (~24k DOs ≈ 6 MB
+  in adapted shape) in memory simultaneously is well within budget.
+- Mock mode: each `useSplitShipments` call generates its own
+  `generateMockShipments()` dataset, so the main section and YTD section
+  see slightly different random mock data. Acceptable in mock mode;
+  invisible in live mode (which is the real use case).
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (`VITE_DATA_SOURCE=live`):
+  - Page renders KPI / Channel / Root Causes / Container Tracking
+    immediately from the main fetch.
+  - Customer ranking section shows "Loading YTD data…" for ~4-5s.
+  - Then top 10 customers populate, sorted by split count desc (large
+    absolute numbers, e.g. hundreds of splits per top-tier customer).
+- Browser smoke (mock fallback): same UI, mock-generated YTD customers.
+
+**No changes to:** `server.js`, `useSplitShipments` hook internals,
+mock generator, adapter, other pages, master plan 001.
+
+**Depends on:** PR4b1 (hook with `(dateRange, customRange)` signature)
+**Blocks:** Nothing further. Note: there is also an existing
+`### PR6 (conditional) — Drill-down columns + performance tuning`
+later in this file; that section is conditional and not yet shipped,
+so the numbering collision is acknowledged but not auto-renamed in
+this PR. Renumber to `PR7 (conditional)` in a follow-up doc-cleanup
+commit if/when it becomes relevant.
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

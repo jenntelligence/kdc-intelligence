@@ -1225,7 +1225,7 @@ function formatDateLocal(d) {
  * Server endpoint /api/scale/split-shipments expects YYYY-MM-DD
  * (per snowflake-schema.md § Verified facts — Date handling).
  *
- * @param {string} preset - One of '7d', '30d', '90d', 'custom'
+ * @param {string} preset - One of '7d', '30d', '90d', 'ytd', 'custom'
  * @param {{from?: string, to?: string}} customRange - Used only when preset === 'custom'
  * @returns {{from: string, to: string}}
  */
@@ -1234,6 +1234,18 @@ function presetToDateRange(preset, customRange = {}) {
     return {
       from: customRange.from || formatDateLocal(new Date(Date.now() - 7 * 86400000)),
       to: customRange.to || formatDateLocal(new Date()),
+    };
+  }
+
+  // PR6: 'ytd' preset — Customer ranking section uses Jan 1 of the current
+  // year through today, independent of the page's main dateRange. Gives
+  // sufficient sample size for a meaningful top-10 customer list (short
+  // windows show statistical noise like "100% (1/1)").
+  if (preset === 'ytd') {
+    const today = new Date();
+    return {
+      from: formatDateLocal(new Date(today.getFullYear(), 0, 1)),
+      to: formatDateLocal(today),
     };
   }
 
@@ -1507,6 +1519,14 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
   // Trust hierarchy: server (master query) → adapter (PR4b1) → this page.
   const { data: hookData, error: hookError, loading: hookLoading, source, filter } = useSplitShipments(dateRange, customRange);
 
+  // PR6: parallel YTD fetch — the Customer ranking section needs a stable,
+  // sample-large window (Jan 1 → today) independent of the page's main
+  // dateRange. All other sections continue using the main hook. The two
+  // calls fire in parallel on mount; YTD response (~30 MB / 4-5s on live)
+  // arrives after the main response so the section shows a loading state
+  // while other sections render immediately.
+  const { data: ytdHookData, loading: ytdLoading } = useSplitShipments('ytd');
+
   // PR4b3: Lift hook meta (source + count + filter) up so the header summary dropdown,
   // LIVE/MOCK badge, and channel-chips hint can all react. Single object keeps the
   // interface small and lets the parent treat it as one snapshot.
@@ -1628,6 +1648,30 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
       customerList, shiftList, reasonList, channelList, splitChargebacks, avgGap,
     };
   }, [pageData, isLive]);
+
+  // PR6: YTD customer ranking — top 10 by split count across the full
+  // year-to-date window. Independent of the page's main dateRange (so
+  // short windows don't show "100% (1/1)" noise). Sort by absolute split
+  // count desc; total orders included so we can show split rate as
+  // supplementary info on each row.
+  const ytdCustomerList = useMemo(() => {
+    if (!ytdHookData) return [];
+    const byCustomer = new Map();
+    for (const o of ytdHookData) {
+      const cust = o.customer || 'Unknown';
+      if (!byCustomer.has(cust)) {
+        byCustomer.set(cust, { customer: cust, tier: o.tier || null, total: 0, splits: 0 });
+      }
+      const entry = byCustomer.get(cust);
+      entry.total += 1;
+      if (o.isSplit) entry.splits += 1;
+    }
+    return Array.from(byCustomer.values())
+      .filter(c => c.splits > 0)
+      .sort((a, b) => b.splits - a.splits)
+      .slice(0, 10)
+      .map(c => ({ ...c, splitRate: c.total > 0 ? c.splits / c.total : 0 }));
+  }, [ytdHookData]);
 
   if (hookLoading) {
     return <div className="p-8 text-center text-[12px] font-mono" style={{ color: 'var(--text-muted)' }}>Loading split-shipment data…</div>;
@@ -1882,25 +1926,46 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
 
       {/* PR4b4: Customer + Root Cause grid moved here from above-channel. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
-        <SectionCard title="Split Rate by Customer" subtitle="Sorted highest violation" tag="VIOLATION LIST">
+        <SectionCard
+          title="Split Rate by Customer"
+          subtitle={`Year to date · Top 10 by split count${ytdLoading ? ' · Loading…' : ''}`}
+          tag="YTD"
+        >
+          {/* PR6: YTD top 10 customers by absolute split count. Independent
+              of the page's main dateRange — short windows show statistical
+              noise like "100% (1/1)" which isn't actionable. */}
           <div className="space-y-2">
-            {splitData.customerList.map(c => (
-              <div key={c.customer} className="flex items-center gap-3">
-                <div className="flex items-center gap-1.5 w-40">
-                  {c.tier === 'Key' && <span className="text-[10px] px-1 py-0.5 rounded bg-[#1ABC9C]/20 text-[#1ABC9C] font-mono">KEY</span>}
-                  <div className="text-[12px]">{c.customer}</div>
-                </div>
-                <div className="flex-1 h-4 bg-[#0f1419] rounded overflow-hidden">
-                  <div className="h-full flex items-center justify-end pr-1" style={{
-                    width: `${Math.min(c.splitRate*100*4, 100)}%`,
-                    background: c.splitRate > 0.25 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2ECC71'
-                  }}>
-                    <span className="font-mono text-[10px] text-white">{fmtPct(c.splitRate)}</span>
-                  </div>
-                </div>
-                <div className="font-mono text-[11px] text-[#5d6b7a] w-16 text-right">{c.split}/{c.total}</div>
+            {ytdLoading ? (
+              <div className="text-[12px] py-4" style={{ color: 'var(--text-muted)' }}>
+                Loading YTD data…
               </div>
-            ))}
+            ) : ytdCustomerList.length === 0 ? (
+              <div className="text-[12px] py-4" style={{ color: 'var(--text-muted)' }}>
+                No split data in YTD window.
+              </div>
+            ) : (() => {
+              const maxSplits = ytdCustomerList[0].splits; // top entry; bar scales relative to it
+              return ytdCustomerList.map(c => {
+                const barWidth = maxSplits > 0 ? (c.splits / maxSplits) * 100 : 0;
+                return (
+                  <div key={c.customer} className="flex items-center gap-3">
+                    <div className="flex items-center gap-1.5 w-40">
+                      {c.tier === 'Key' && <span className="text-[10px] px-1 py-0.5 rounded bg-[#1ABC9C]/20 text-[#1ABC9C] font-mono">KEY</span>}
+                      <div className="text-[12px] truncate" title={c.customer}>{c.customer}</div>
+                    </div>
+                    <div className="flex-1 h-4 bg-[#0f1419] rounded overflow-hidden">
+                      <div className="h-full" style={{
+                        width: `${barWidth}%`,
+                        background: c.splitRate > 0.25 ? '#E74C6F' : c.splitRate > 0.1 ? '#f5a623' : '#2ECC71',
+                      }} />
+                    </div>
+                    <div className="font-mono text-[11px] text-[#5d6b7a] w-28 text-right">
+                      {c.splits} · {fmtPct(c.splitRate)}
+                    </div>
+                  </div>
+                );
+              });
+            })()}
           </div>
         </SectionCard>
 
