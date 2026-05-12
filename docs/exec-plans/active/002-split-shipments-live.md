@@ -1636,6 +1636,147 @@ gets real values via the new adapter pass.
 PR5a LEFT JOIN billing change.
 **Blocks:** PR7b (per-container drill-down detail).
 
+### PR7b — Container expand correct fields + OK/SPLIT DAY indicator (completed 2026-05-12)
+
+User reviewed the PR7a dashboard and verified via direct Snowflake query
+that the Container expand rows were surfacing misleading information:
+
+1. **"DELIVERED" badge** driven by `c.status === 'DELIVERED'`, which in
+   live mode is `mapScaleStatusToUps(c.container_status)`. KDC SCALE
+   `container_status = 900` means "manifested out from KDC", not "UPS
+   delivered to customer". Pre-PR7b, packages still in UPS transit were
+   rendering as DELIVERED.
+2. **Date column** showing `c.shipDate` = `toDateOrNull(c.container_status_time)`,
+   i.e. KDC outbound time, not UPS-delivered time. This is the same field
+   in disguise — both columns 3 and 5 of the expand row leaned on the
+   wrong source.
+
+**User Snowflake verification cases:**
+
+- **0801932418 (GOLDEN BEAUTY)** — Row 2: `DELIVERED_DATE = NULL`,
+  `CONTAINER_STATUS = 900`, `CONTAINER_STATUS_TIME = 2026-05-09`. UI
+  was showing "DELIVERED · May 9". The package is still in transit per
+  UPS.
+- **0801932599 (SEVEN BEAUTY)** — All 3 trackings show
+  `CONTAINER_STATUS_TIME = 2026-05-08`, but actual `DELIVERED_DATE` is
+  May 8 for 2 trackings and May 11 for 1. PR7a's `SPLIT GAP = 3d` is
+  correct; the expand UI was hiding the variance by uniformly showing
+  May 8 for all three.
+
+PR7a's DO-row logic is 100% correct. PR7b corrects the Container
+expand UI to surface the same `delivered_date` PR7a aggregates from.
+
+**Changes:**
+
+- **Adapter (`serverRowsToShipments`):** new `modeDeliveredDay` computed
+  per DO. Local-day precision (`new Date(d).toDateString()`) so timezone
+  conversion doesn't shift the bucket. Tie-breaker: earliest day wins
+  (so the first cohort delivered is treated as the "expected" batch and
+  any later cohorts are flagged as the split).
+- **Adapter — dedupe pass:** `containers` array is now built from a
+  `distinctContainers` set keyed on `container_id`. Billing fan-out
+  produces duplicate rows (per `(container_id × billing_date)`) but
+  per-container fields are stable across the fan-out, so we keep the
+  first row and discard the rest. Pre-PR7b, the expand showed inflated
+  container counts and duplicate rows for DOs with multiple billing
+  dates; post-PR7b, one row per actual container.
+- **Adapter — deliveryStatus per container:** each entry in the
+  `distinctContainers` array carries `deliveryStatus`:
+
+  | State        | Condition                                       | UI display |
+  |--------------|-------------------------------------------------|-----------|
+  | `OK`         | Delivered day matches DO's modeDeliveredDay     | "OK" green |
+  | `SPLIT_DAY`  | Delivered day differs from mode                 | "SPLIT DAY" red |
+  | `PENDING`    | `delivered_date` is null (UPS scan not received) | "—" muted |
+
+- **Container expand row JSX:**
+  - **Column 3 (Status badge):** binary `DELIVERED` (green) / `IN TRANSIT`
+    (amber), gated on `c.actualDelivery` (= `delivered_date` in live).
+    Pre-PR7b granular states like `LABEL_CREATED` / `PICKED_UP` /
+    `OUT_FOR_DELIVERY` no longer rendered — the binary "is it actually
+    delivered to the customer" signal is what operations needs; SCALE's
+    granular status was misleading in live mode.
+  - **Column 5 (Date):** now shows `c.actualDelivery` (UPS-delivered
+    time), not `c.shipDate` (KDC outbound time). Null → "—".
+  - **Column 6 (Exp):** stripped the inline `→ delivered date` artifact —
+    column 5 now carries the delivered date directly, so the inline
+    arrow in column 6 was redundant. Column 6 keeps the "Exp: —"
+    placeholder pending future SLA-table integration.
+  - **Column 7 (Alert text):** `OK` / `SPLIT DAY` / `—` driven by
+    `deliveryStatus`. Pre-PR7b's `LATE` label removed (mock-only
+    concept, no live counterpart without SLA data).
+  - **Column 8 (Icon):** `AlertTriangle` shows iff `deliveryStatus === 'SPLIT_DAY'`.
+  - Removed `statusColors` map and `sc` local — unused after the badge
+    rewrite.
+
+**Mock fallback handling:**
+
+The `deliveryStatus` field is set by the live adapter. Mock containers
+don't carry it, so the JSX falls back to mock-specific fields:
+
+```javascript
+const deliveryStatus = c.deliveryStatus
+  || (c.deliveredDifferentDay ? 'SPLIT_DAY'
+    : c.actualDelivery ? 'OK'
+    : 'PENDING');
+```
+
+Mock generator is unchanged. The fallback keeps the UI consistent
+across both modes without leaking mock-specific concepts into the live
+path.
+
+**Trust hierarchy clarified (documented for the backlog):**
+
+Two related but semantically different fields in source data — pre-PR7b
+the UI conflated them:
+
+| Field                              | Source                          | Meaning |
+|------------------------------------|---------------------------------|---------|
+| `container_status` / `container_status_time` | `SHIPPING_CONTAINER` | KDC SCALE-internal outbound status. `900` = "manifested out". |
+| `delivered_date`                   | `UPS_TRACKING.datetime` where `status_type = 'Delivery'` | Real UPS delivered-to-customer timestamp. |
+
+Post-PR7b, the customer-facing "DELIVERED" semantic is driven by
+`delivered_date`. The SCALE status is no longer surfaced in the
+expand row.
+
+**Same-timestamp curiosity (SEVEN BEAUTY backlog note):**
+
+Snowflake query shows `tracking_num = 1Z1F1E240303599204` and
+`1Z1F1E240303601843` (different packages, same DO 0801932599) have
+identical `DELIVERED_DATE` of `2026-05-08 10:08:14` (also identical
+`PROCESSING_DATE`). This is **not** a SQL bug — it represents UPS
+delivering both packages on the same truck at the same stop. Verified
+by spot-checking `PICKING_COMPLETION_TIME` and `MANIFEST_DATE_TIME`
+which differ appropriately. Documented here for future reference if
+anyone investigates the `ups_data` CTE.
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (`VITE_DATA_SOURCE=live`, 5/5–5/12 window):
+  - **0801932418** expand: 1 row "DELIVERED · May 8 · OK", 1 row "IN
+    TRANSIT · — · —" (the previously-misleading "DELIVERED · May 9"
+    row is now correctly labeled in transit).
+  - **0801932599** expand: 2 rows "DELIVERED · May 8 · OK", 1 row
+    "DELIVERED · May 11 · SPLIT DAY · ⚠".
+  - DO-row SPLIT GAP unchanged from PR7a (`—` for 0801932418, `3d` for
+    0801932599).
+
+**Not in scope (PR7c — next):**
+
+- Bottom "Split Delivery Alert" banner inside the expand block at
+  line ~2007 — currently still keys off `c.isLate` (mock-only) and
+  needs the same `deliveryStatus`-driven rewrite. PR7c.
+- Expected delivery date data — no source field; pending SLA-table
+  integration. Future PR.
+- Chargeback amount — no source field. Future PR.
+
+**No changes to:** `server.js`, `useSplitShipments` hook, mock
+generator, `pageData` container-shape transform.
+
+**Depends on:** PR7a (adapter block body + containers exposure).
+**Blocks:** PR7c (bottom Split Delivery Alert banner).
+
 ---
 
 ### PR5 — Validation with operations

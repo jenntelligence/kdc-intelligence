@@ -1337,6 +1337,50 @@ function serverRowsToShipments(rows) {
         .reduce((sum, v) => sum + (Number.isFinite(v) ? v : 0), 0);
     }
 
+    // PR7b: mode of delivered-day across this DO's distinct tracking_nums.
+    // Used to classify each container as OK (matches mode) / SPLIT_DAY
+    // (differs from mode) / PENDING (no delivery scan yet). Tie-breaker
+    // when multiple days share the highest count: earliest day wins,
+    // i.e. the first delivered cohort is treated as the "expected" cohort
+    // and later ones are flagged as the split.
+    let modeDeliveredDay = null;
+    if (trackingDelivered.size > 0) {
+      const dayCounts = new Map();
+      for (const date of trackingDelivered.values()) {
+        if (!date) continue;
+        const day = new Date(date).toDateString(); // local-day precision; timezone-stable
+        if (Number.isNaN(new Date(date).getTime())) continue;
+        dayCounts.set(day, (dayCounts.get(day) || 0) + 1);
+      }
+      if (dayCounts.size > 0) {
+        const sorted = Array.from(dayCounts.entries()).sort((a, b) => {
+          if (b[1] !== a[1]) return b[1] - a[1];               // count desc
+          return new Date(a[0]).getTime() - new Date(b[0]).getTime(); // date asc (tie-breaker)
+        });
+        modeDeliveredDay = sorted[0][0];
+      }
+    }
+
+    // PR7b: dedupe containers by container_id (billing fan-out duplicates
+    // rows when an SO has multiple billing_dates — per-container fields
+    // like tracking_num, container_status, and delivered_date are stable
+    // across the fan-out, so we keep the first row and discard the rest).
+    // Each surviving container also gets a deliveryStatus field derived
+    // from modeDeliveredDay above.
+    const distinctContainers = [];
+    const seenContainerIds = new Set();
+    for (const c of containers) {
+      if (!c.container_id || seenContainerIds.has(c.container_id)) continue;
+      seenContainerIds.add(c.container_id);
+
+      let deliveryStatus = 'PENDING'; // delivered_date null = UPS scan not received
+      if (c.delivered_date) {
+        const day = new Date(c.delivered_date).toDateString();
+        deliveryStatus = (modeDeliveredDay && day === modeDeliveredDay) ? 'OK' : 'SPLIT_DAY';
+      }
+      distinctContainers.push({ ...c, deliveryStatus });
+    }
+
     return {
       // Identifiers
       id: doRow.do_num,
@@ -1373,8 +1417,10 @@ function serverRowsToShipments(rows) {
       manifest_cnt: doRow.manifest_cnt,
       delivered_date_cnt: doRow.delivered_date_cnt,
 
-      // Container array (mock-shape compatibility — nested per-DO)
-      containers,
+      // Container array (mock-shape compatibility — nested per-DO).
+      // PR7b: deduplicated by container_id + each entry carries
+      // `deliveryStatus` ('OK' | 'SPLIT_DAY' | 'PENDING').
+      containers: distinctContainers,
 
       // PR7a: SPLIT GAP + VALUE computed above from the containers
       // closure. UI null-check from PR4b2 handles render fallback to '—'.
@@ -1892,15 +1938,17 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
 
                     {/* Expanded container rows */}
                     {isExpanded && o.containers && o.containers.map((c, ci) => {
-                      const statusColors = {
-                        'LABEL_CREATED': { bg: '#7F8C8D20', text: '#7F8C8D' },
-                        'PICKED_UP': { bg: '#3498DB20', text: '#3498DB' },
-                        'IN_TRANSIT': { bg: '#1ABC9C20', text: '#1ABC9C' },
-                        'OUT_FOR_DELIVERY': { bg: '#F39C1220', text: '#F39C12' },
-                        'DELIVERED': { bg: '#2ECC7120', text: '#2ECC71' },
-                      };
-                      const sc = statusColors[c.status] || statusColors.LABEL_CREATED;
                       const isLastContainer = ci === o.containers.length - 1;
+
+                      // PR7b: deliveryStatus drives the OK / SPLIT DAY / — alert column.
+                      // Live mode: adapter (serverRowsToShipments) sets it from
+                      // mode-of-day across the DO's distinct tracking_nums.
+                      // Mock fallback: derive from mock-specific fields so the UI
+                      // stays consistent across both modes.
+                      const deliveryStatus = c.deliveryStatus
+                        || (c.deliveredDifferentDay ? 'SPLIT_DAY'
+                          : c.actualDelivery ? 'OK'
+                          : 'PENDING');
 
                       return (
                         <tr key={c.containerId} style={{ background: ci % 2 === 0 ? 'var(--bg-panel-alt)' : 'transparent', borderLeft: '3px solid #1ABC9C' }}>
@@ -1911,34 +1959,47 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
                             {c.trackingNumber || '—'}
                             {c.lastLocation && <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-muted)' }}>{c.lastLocation}</div>}
                           </td>
+                          {/* PR7b: DELIVERED badge gated on actualDelivery
+                              (= delivered_date in live mode), not on
+                              container_status. KDC SCALE container_status = 900
+                              means "manifested out from KDC", not "UPS delivered
+                              to customer" — pre-PR7b this misleadingly rendered
+                              "DELIVERED" for packages still in UPS transit. */}
                           <td className="py-2 pr-3">
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono font-semibold" style={{ background: sc.bg, color: sc.text }}>
-                              {(c.status || 'LABEL_CREATED').replace(/_/g, ' ')}
-                            </span>
+                            {c.actualDelivery ? (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono font-semibold" style={{ background: '#2ECC7120', color: '#2ECC71' }}>
+                                DELIVERED
+                              </span>
+                            ) : (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono font-semibold" style={{ background: '#F39C1220', color: '#F39C12' }}>
+                                IN TRANSIT
+                              </span>
+                            )}
                           </td>
                           <td className="py-2 pr-3 text-center font-mono text-[11px]" style={{ color: 'var(--text-secondary)' }}>
                             {c.items != null || c.weight != null ? `${c.items ?? '—'} items · ${c.weight ?? '—'} lb` : '—'}
                           </td>
                           <td className="py-2 pr-3 text-center font-mono text-[11px]" style={{ color: 'var(--text-secondary)' }}>
-                            {c.shipDate ? c.shipDate.toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '—'}
+                            {/* PR7b: was c.shipDate (KDC outbound) — now actualDelivery (UPS delivered_date). */}
+                            {c.actualDelivery ? c.actualDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '—'}
                           </td>
                           <td className="py-2 pr-3 text-[11px]" style={{ color: 'var(--text-secondary)' }}>
                             {c.expectedDelivery
                               ? `Exp: ${c.expectedDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric'})}`
                               : <span style={{ color: 'var(--text-muted)' }}>Exp: —</span>}
-                            {c.actualDelivery && (
-                              <span className="ml-1" style={{ color: c.isLate ? '#E74C6F' : '#2ECC71' }}>
-                                {'\u2192'} {c.actualDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric'})}
-                              </span>
-                            )}
+                            {/* PR7b: removed inline-arrow \u2192 delivered date \u2014 the
+                                Date column above now shows actualDelivery directly. */}
                           </td>
+                          {/* PR7b: OK / SPLIT DAY / — driven by deliveryStatus
+                              (mode-of-day across DO's tracking_nums; tie-breaker
+                              = earliest day wins). */}
                           <td className="py-2 pr-3 text-right font-mono text-[11px]">
-                            {c.deliveredDifferentDay ? <span className="text-[#E74C6F]">SPLIT DAY</span> : ''}
-                            {c.isLate && !c.deliveredDifferentDay ? <span className="text-[#E74C6F]">LATE</span> : ''}
-                            {!c.isLate && !c.deliveredDifferentDay && c.status === 'DELIVERED' ? <span className="text-[#2ECC71]">OK</span> : ''}
+                            {deliveryStatus === 'OK' && <span className="text-[#2ECC71]">OK</span>}
+                            {deliveryStatus === 'SPLIT_DAY' && <span className="text-[#E74C6F]">SPLIT DAY</span>}
+                            {deliveryStatus === 'PENDING' && <span style={{ color: 'var(--text-muted)' }}>—</span>}
                           </td>
                           <td className="py-2 text-center">
-                            {(c.isLate || c.deliveredDifferentDay) && <AlertTriangle size={12} className="text-[#E74C6F] mx-auto"/>}
+                            {deliveryStatus === 'SPLIT_DAY' && <AlertTriangle size={12} className="text-[#E74C6F] mx-auto"/>}
                           </td>
                         </tr>
                       );
