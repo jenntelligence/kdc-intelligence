@@ -1667,16 +1667,35 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
   }, [hookData, selectedChannels, isLive]);
 
   const splitData = useMemo(() => {
-    // PR4b2 Split Rate definition (user decision): settled basis only —
-    // denominator excludes PENDING / UNKNOWN. Stable metric over time
-    // since short windows are noisy due to in-flight orders.
-    const settled = pageData.filter(o => o.split_status !== 'PENDING' && o.split_status !== 'UNKNOWN');
+    // PR10 Split Rate definition (post-PR9 4-category SQL): settled basis is
+    // explicit — only DOs whose split outcome is operationally **decided**.
+    // That is `SPLIT` (multi-day or partial delivery) and `NOT_SPLIT` (all
+    // containers delivered same day, or single tracking already delivered).
+    //
+    // Excludes:
+    //  - PENDING (UPS hasn't scanned anything yet — unknown outcome)
+    //  - MISSING_TRACKING (data-integrity gap — surfaced via its own
+    //    banner; classifying it here would inflate the denominator)
+    //
+    // The pre-PR10 filter (`!== 'PENDING' && !== 'UNKNOWN'`) accidentally
+    // folded MISSING_TRACKING into settled after PR9 dropped UNKNOWN and
+    // added MISSING_TRACKING, deflating split rate by ~40%. The explicit
+    // allow-list is safer if more categories ever land.
+    const settled = pageData.filter(o => o.split_status === 'SPLIT' || o.split_status === 'NOT_SPLIT');
     const split = settled.filter(o => o.isSplit);
     const splitRate = settled.length ? split.length / settled.length : 0;
 
     // PR4b2: In Transit (PENDING) — surfaced as its own KPI to keep the settled rate clean.
     const pending = pageData.filter(o => o.split_status === 'PENDING');
     const pendingRate = pageData.length ? pending.length / pageData.length : 0;
+
+    // PR10: MISSING_TRACKING — DOs with at least one container missing a
+    // UPS `tracking_num`. These are data-integrity / handoff gaps, not
+    // operational outcomes. Surfaced via the amber banner above the KPI
+    // cards; excluded from `settled` (and therefore from `splitRate`) and
+    // from `pending` (since they're not in transit in the UPS-scan sense).
+    const missing = pageData.filter(o => o.split_status === 'MISSING_TRACKING');
+    const missingRate = pageData.length ? missing.length / pageData.length : 0;
 
     // By customer
     const byCustomer = {};
@@ -1748,6 +1767,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
 
     return {
       split, splitRate, settledCount: settled.length, pendingCount: pending.length, pendingRate, totalCount: pageData.length,
+      missing, missingCount: missing.length, missingRate,
       customerList, shiftList, reasonList, channelList, splitChargebacks, avgGap, worstGap, gapItemsCount,
     };
   }, [pageData, isLive]);
@@ -1839,6 +1859,31 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
           All cartons from a single order must be delivered on the same day. Any split shipment is a compliance violation. Target split rate: <span className="font-mono text-[#2ECC71]">0.0%</span>
         </div>
       </div>
+
+      {/* PR10: MISSING_TRACKING data-integrity banner. PR9's master query
+          classifies DOs with `has_null_tracking = 1` as a separate category
+          (one or more containers without a UPS tracking_num — either a fresh
+          SO not yet handed off, or a genuine data anomaly). These are
+          excluded from the split-rate denominator and the in-transit numerator
+          so the KPI cards reflect operational outcomes only. The banner
+          surfaces the count so operations knows to investigate. Amber matches
+          the warehouse "needs attention" convention from CLAUDE.md (amber
+          #f5a623) — distinct from the critical red on the requirement banner
+          above. Hidden when count = 0 so it doesn't add noise in clean windows. */}
+      {splitData.missingCount > 0 && (
+        <div className="bg-gradient-to-r from-[#f5a623]/15 to-transparent border-l-2 border-[#f5a623] rounded p-3 mb-4">
+          <div className="flex items-center gap-2 text-[12px] text-[#f5a623] font-semibold uppercase tracking-wider">
+            <AlertTriangle size={14}/> Data Integrity Alert
+          </div>
+          <div className="text-[13px] mt-1 text-[#c5ccd4]">
+            <span className="font-mono text-[#f5a623]">{fmtNum(splitData.missingCount)}</span> DOs
+            (<span className="font-mono text-[#f5a623]">{fmtPct(splitData.missingRate)}</span>)
+            have container(s) without a UPS tracking number. Excluded from split-rate
+            and in-transit metrics. Likely fresh SOs awaiting UPS handoff or genuine
+            data anomalies needing investigation.
+          </div>
+        </div>
+      )}
 
       {/* Container delivery mismatch summary */}
       {(() => {

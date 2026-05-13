@@ -2187,6 +2187,152 @@ not been restarted with the new SQL.
 
 ---
 
+### PR10 — Frontend: KPI settled basis + MISSING_TRACKING banner (completed 2026-05-13)
+
+PR9 shipped the 4-category SQL but `splitData.useMemo` was still using
+the pre-PR9 filter `o.split_status !== 'PENDING' && o.split_status !== 'UNKNOWN'`
+as its "settled" gate. After PR9 that gate accidentally folds
+`MISSING_TRACKING` into the settled denominator (since `'UNKNOWN'` no
+longer appears and `'MISSING_TRACKING'` passes both `!== 'PENDING'` and
+`!== 'UNKNOWN'`), deflating split rate by roughly 40%.
+
+**Pre-PR10 numbers (post-PR9 SQL, freshness-shifted 5/6–5/14):**
+
+| Quantity | Value |
+|----------|-------|
+| settled  | SPLIT + NOT_SPLIT + MISSING_TRACKING = 246 + 253 + 313 = **812** |
+| split    | 246 |
+| splitRate | 246 / 812 = **30.3%** ← inflated denominator |
+
+**Post-PR10 numbers (same window):**
+
+| Quantity | Value |
+|----------|-------|
+| settled  | SPLIT + NOT_SPLIT = 246 + 253 = **499** |
+| split    | 246 |
+| splitRate | 246 / 499 = **49.3%** ← operational truth |
+
+The operations team should never see the 30% reading; PR10 ships
+together with PR9 so the dashboard stays consistent end-to-end.
+
+**Changes:**
+
+1. **`splitData.useMemo` settled filter (explicit allow-list):**
+
+   ```javascript
+   // PR10: explicit — only DOs whose split outcome is operationally decided.
+   const settled = pageData.filter(o =>
+     o.split_status === 'SPLIT' || o.split_status === 'NOT_SPLIT'
+   );
+   ```
+
+   Allow-list (not deny-list) so the next time the SQL adds a category
+   the frontend errs on the safe side — a new category lands outside
+   `settled` by default rather than inside.
+
+2. **New `missing` / `missingCount` / `missingRate` fields:**
+
+   ```javascript
+   const missing = pageData.filter(o => o.split_status === 'MISSING_TRACKING');
+   const missingRate = pageData.length ? missing.length / pageData.length : 0;
+   ```
+
+   Surfaced via the `splitData` return alongside `pending` / `pendingCount`
+   / `pendingRate` for consistency.
+
+3. **MISSING_TRACKING banner (new):**
+
+   Position: directly below the existing red `Customer Hard Requirement`
+   banner, above the KPI grid. Visual pattern mirrors the existing
+   banner exactly (gradient + left border + uppercase tracking-wider
+   title + body) but swaps the critical red `#E74C6F` for warning amber
+   `#f5a623` from the CLAUDE.md design tokens.
+
+   Conditional render: `splitData.missingCount > 0` — hidden in clean
+   windows so it doesn't add noise when the data integrity is fine.
+
+   Copy: `"X DOs (X%) have container(s) without a UPS tracking number.
+   Excluded from split-rate and in-transit metrics. Likely fresh SOs
+   awaiting UPS handoff or genuine data anomalies needing investigation."`
+
+**Pending KPI card behavior:**
+
+`pendingRate` denominator stays `pageData.length` (all categories).
+This is intentional: "X% of orders are in transit" is the natural
+phrasing, and including MISSING_TRACKING in the denominator means the
+in-transit rate reads as a proportion of *all DOs in this window*.
+Alternative (PENDING / (SPLIT + NOT_SPLIT + PENDING)) would over-count
+because MISSING_TRACKING is real volume too. The banner's count makes
+the MISSING_TRACKING slice visible without distorting the in-transit
+proportion.
+
+**`containerMetrics` deliberately left alone:**
+
+Line 1778's `isSettled = o.split_status !== 'PENDING' && o.split_status !== 'UNKNOWN'`
+gate is **still** the pre-PR9 form. In practice this is currently
+harmless because `is_split_shipment` is set server-side as
+`split_status = 'SPLIT' then 'Y' else 'N'`, so MISSING_TRACKING DOs
+have `isSplit = false` and the `isSettled && isSplit` gate excludes them
+regardless of how `isSettled` is defined. PR11 will tidy this up for
+consistency along with the broader `totalContainers` denominator
+question (MISSING_TRACKING containers in the denominator inflates the
+container in-transit %).
+
+**Mock fallback behavior:**
+
+Mock generator (`generateMockData`) still emits the pre-PR9 fields
+(`isSplit`, `splitGapDays`, no `split_status`). The new `settled` filter
+checks `split_status === 'SPLIT'` which is `undefined === 'SPLIT'` →
+`false` for every mock row, collapsing `settled.length` to 0 and
+`splitRate` to 0% in mock-fallback mode. This is a regression we accept
+for now — the dashboard's mock path is a degraded-mode placeholder
+(per the PR4b2 banner) and live data is the source of truth.
+
+Backlog: update mock generator to emit `split_status` field consistent
+with the 4-category SQL so mock-fallback numbers remain meaningful. Out
+of scope for PR10 since the user's mandate was to fix live, and a mock
+update can land independently.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`:
+  - `splitData.useMemo`: settled filter + missing fields
+  - JSX: MISSING_TRACKING banner below Customer Hard Requirement
+- `docs/exec-plans/active/002-split-shipments-live.md`: this PR10 section
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (live, 5/6–5/14):
+  - SPLIT RATE card: ~49% (was ~30% on broken denominator).
+  - IN TRANSIT card: ~48% (unchanged, PENDING-only numerator already
+    correct pre-PR10).
+  - MISSING_TRACKING banner: amber, "313 DOs (20.0%)".
+- Browser smoke (mock fallback): banner hidden (mock has no
+  MISSING_TRACKING rows); SPLIT RATE shows 0% on mock until the mock
+  generator is updated (known regression, documented above).
+
+**Trust hierarchy:**
+
+- Server: 4-category `split_status` (PR9)
+- Adapter: `split_status` pass-through (PR4b1)
+- Page useMemo: explicit `SPLIT + NOT_SPLIT` settled + missing fields (NEW)
+- UI: KPI cards (corrected denominator) + amber banner (NEW)
+
+**No changes to:** `server.js`, `useSplitShipments` hook,
+`serverRowsToShipments` adapter, mock generator, KPI component, other
+sections (Channel / Container Tracking / Customer / Root Causes),
+master plan 001.
+
+**Depends on:** PR9 (4-category split_status reaching the page).
+**Blocks:**
+- PR11 — Container metrics denominator (MISSING_TRACKING containers
+  inflate `totalContainers` denominator on `Containers In Transit`).
+- Mock-generator update (backlog) — bring mock parity with 4-category
+  SQL so mock-fallback split rate isn't 0%.
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type
