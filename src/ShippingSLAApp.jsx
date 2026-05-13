@@ -1827,13 +1827,22 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
   // short windows don't show "100% (1/1)" noise). Sort by absolute split
   // count desc; total orders included so we can show split rate as
   // supplementary info on each row.
+  //
+  // PR13: capture state per customer for the new STATE column. The
+  // adapter exposes `state` as a customer-location alias (PR4b1 line
+  // 1401) and the mock generator emits the same field, so the lookup
+  // is mode-agnostic. A given customer's SOs almost always ship from
+  // the same store, so first-seen state is a reliable label; the rare
+  // multi-state customer would surface whichever appeared first in the
+  // input order. If that becomes a problem the aggregation can switch
+  // to "most common" without disturbing the rest of the pipeline.
   const ytdCustomerList = useMemo(() => {
     if (!ytdHookData) return [];
     const byCustomer = new Map();
     for (const o of ytdHookData) {
       const cust = o.customer || 'Unknown';
       if (!byCustomer.has(cust)) {
-        byCustomer.set(cust, { customer: cust, tier: o.tier || null, total: 0, splits: 0 });
+        byCustomer.set(cust, { customer: cust, tier: o.tier || null, state: o.state || '—', total: 0, splits: 0 });
       }
       const entry = byCustomer.get(cust);
       entry.total += 1;
@@ -2192,6 +2201,15 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
                     <div className="flex items-center gap-1.5 w-40">
                       {c.tier === 'Key' && <span className="text-[10px] px-1 py-0.5 rounded bg-[#1ABC9C]/20 text-[#1ABC9C] font-mono">KEY</span>}
                       <div className="text-[12px] truncate" title={c.customer}>{c.customer}</div>
+                    </div>
+                    {/* PR13: STATE column. Fixed narrow width — state codes are
+                        always 2 chars; '—' fallback when null. Reuses the
+                        muted secondary-text treatment from the row's right side
+                        so the eye reads CUSTOMER as the primary label and
+                        STATE / numbers as metadata. Operations can scan the
+                        column vertically to spot geographic clustering. */}
+                    <div className="font-mono text-[11px] w-8 text-center flex-shrink-0" style={{ color: 'var(--text-muted)' }} title={c.state}>
+                      {c.state}
                     </div>
                     <div className="flex-1 h-4 bg-[#0f1419] rounded overflow-hidden">
                       <div className="h-full" style={{

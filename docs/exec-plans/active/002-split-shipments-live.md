@@ -2628,6 +2628,137 @@ computation pattern is reusable there.
 
 ---
 
+### PR13 — Customer ranking: STATE column (completed 2026-05-13)
+
+User reviewed PR12 dashboard and queued a five-item follow-up list.
+PR13 is the first item — a quick win that unblocks downstream geographic
+filtering:
+
+> "Split Rate by Customer section 에 customer name 옆에 state 추가하고싶어"
+
+**Why this matters operationally:**
+
+- Operations can scan the YTD top-10 customer ranking and immediately
+  spot geographic clustering without leaving the page (e.g. "the top
+  three split offenders are all NY accounts").
+- PR15 (region filter) will use the same `state` field — building it
+  into the customer pipeline first means PR15 inherits a stable column
+  rather than scrambling the aggregation later.
+- Future Excel export (PR17 candidate) gets an accurate state column
+  rather than relying on the row's first delivery zip.
+
+**Where the data comes from:**
+
+`serverRowsToShipments` (PR4b1, line ~1401) already projects the
+`state` field as a customer-location alias on every DO row:
+
+```javascript
+customer_state: doRow.state,
+state: doRow.state, // alias for mock-page filter compatibility
+```
+
+The mock generator (line 270) emits the same `state` field directly.
+So `o.state` works in both live and mock without an adapter change.
+
+**`ytdCustomerList` change:**
+
+```javascript
+byCustomer.set(cust, {
+  customer: cust,
+  tier: o.tier || null,
+  state: o.state || '—',   // PR13
+  total: 0,
+  splits: 0,
+});
+```
+
+A customer's first-seen state is recorded; subsequent rows for the
+same customer don't overwrite it. This is correct for the dominant
+case (a customer = a single store) and acceptable for the rare
+multi-state customer (whichever ships earliest in the input wins,
+matching the existing tier-resolution behavior at this site).
+
+**UI change — STATE element, not column:**
+
+The user's spec described `RANK | CUSTOMER | STATE | SPLIT | TOTAL | RATE`
+as a table, but the actual Customer Ranking card is rendered as a
+**horizontal bar list**, not a table:
+
+```
+[KEY  Customer Name        ] [████████████░░░░] [splits · rate]
+   ^ w-40                     ^ flex-1            ^ w-28
+```
+
+PR13 inserts a fixed-width STATE element between the customer name
+area and the bar, preserving the bar-list visual language:
+
+```
+[KEY  Customer Name        ] [NY] [████████████░░░░] [splits · rate]
+   ^ w-40                     ^ w-8 ^ flex-1            ^ w-28
+```
+
+Styling:
+
+- `font-mono text-[11px]` — matches the right-side metadata.
+- `text-center` — centers the 2-char code in the narrow column.
+- `var(--text-muted)` color — same muted secondary tone as the
+  right-side numbers, so CUSTOMER remains the visual focus and STATE
+  reads as metadata (per the bar-list pattern's information hierarchy).
+- `flex-shrink-0` — locked width regardless of viewport.
+- `title={c.state}` — tooltip for accessibility (full text on hover,
+  matches the customer name's `title` attribute).
+
+No header row added. The neighboring Root Causes card uses the same
+header-less bar list, and adding a header here only would break
+the side-by-side visual symmetry. State is a label, not a sortable
+column in this view; sorting/filtering is a later PR concern.
+
+**Edge cases:**
+
+- Customer with null/empty `state` → `'—'` fallback.
+- Mock fallback: mock customers have real state codes (the mock
+  generator picks from a US state pool), so the column populates
+  normally in mock mode.
+- Customer name truncates to fit `w-40`; STATE column is unaffected
+  (separate flex child).
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`:
+  - `ytdCustomerList.useMemo`: added `state: o.state || '—'` to the
+    per-customer entry initializer.
+  - Customer Ranking row JSX: new STATE element between customer name
+    area and bar.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this PR13 section.
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke:
+  - Customer Ranking card shows the new STATE column between customer
+    name and bar across all 10 top rows.
+  - Mock fallback: STATE populates from mock-generator state field.
+  - State '—' would appear for any customer where the wire returned
+    null `state` (unlikely in this dataset but covered).
+
+**Trust hierarchy:**
+
+- Server: `state` (customer location, PR5a)
+- Adapter: `state` alias on every DO row (PR4b1, existing)
+- `ytdCustomerList.useMemo`: customer-aggregated state (PR13)
+- UI: STATE element in bar-list row (NEW)
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter,
+mock generator, KPI cards, banners, Container Tracking section,
+Channel section, Root Causes section, master plan 001.
+
+**Depends on:** PR6 (ytdCustomerList scaffolding).
+**Blocks:** PR15 (region filter) — will reuse the same `state` field
+on each row and the same first-seen aggregation pattern on the
+customer side.
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type
