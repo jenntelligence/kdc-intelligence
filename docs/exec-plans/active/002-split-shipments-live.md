@@ -2889,6 +2889,163 @@ natural "everything visible" mode for an export action.
 
 ---
 
+### PR15 — Container Tracking: pagination + page size (completed 2026-05-13)
+
+While auditing PR14 the working assistant noticed the hard cap baked
+into the Container Tracking section:
+
+```javascript
+{splitData.split.slice(0, 30).map(o => { ... })}
+```
+
+Pre-PR15 the table rendered only the first 30 SPLIT DOs from
+`splitData.split`. In typical windows that hid 200+ rows — making any
+filter / search / export operation incomplete by default. The subtitle
+counter (`"X split orders"`) showed the true cohort size, so users had
+no way to tell the table they were looking at was a 30-row slice.
+
+User decision: keep the bounded-render performance posture but expose
+the whole cohort through pagination. **Option 3 (pagination) +
+options 4/B (page size dropdown 10/30/50/100 with Prev/Next, default 30).**
+
+**Footer layout:**
+
+```
+Showing 1-30 of 268                Page size: [30 ▼]   [← Prev]  Page 1 of 9  [Next →]
+```
+
+- Range info on the left (1-indexed for humans).
+- Page-size dropdown (10 / 30 / 50 / 100) with default 30 so the
+  baseline view is identical to pre-PR15.
+- Prev / Next buttons that disable at the boundaries (no off-by-one
+  page navigation possible).
+
+**State:**
+
+```javascript
+const [pageSize, setPageSize] = useState(30);
+const [currentPage, setCurrentPage] = useState(0);   // 0-indexed
+```
+
+**Derived:**
+
+```javascript
+const splitTotalCount = splitData.split.length;
+const splitTotalPages = Math.max(1, Math.ceil(splitTotalCount / pageSize));
+const splitStartIdx   = currentPage * pageSize;
+const splitEndIdx     = Math.min(splitStartIdx + pageSize, splitTotalCount);
+const paginatedSplits = splitData.split.slice(splitStartIdx, splitEndIdx);
+```
+
+`splitTotalPages` is at least 1 so the footer reads coherently when
+there are zero SPLIT DOs (`"No split orders in window · Page 1 of 1"`).
+`splitEndIdx` is clamped so the last partial page doesn't run past the
+array.
+
+**Reset on dataset / page-size change:**
+
+```javascript
+useEffect(() => {
+  setCurrentPage(0);
+}, [pageSize, splitTotalCount]);
+```
+
+Without this, a user on page 7 of 9 who narrows the window (e.g.
+shifts the date range) could land on an empty page with both nav
+buttons disabled. Triggering on `splitTotalCount` (a number, stable
+across renders unless the cohort genuinely changed) avoids the
+`splitData.split` reference-identity churn that re-runs the effect
+on every `pageData` recomputation.
+
+**Why operationally:**
+
+- Operations can now see every SPLIT DO in the window, not the top 30.
+  Filters / search / Excel export (still backlog) become honest by
+  default rather than silently scoped.
+- Performance stays bounded: only `pageSize` rows are rendered at
+  once, so the 246-row dataset doesn't pay for off-screen DOM.
+- Page-size flexibility matches use cases:
+  - 10 — focused scan of the worst few splits
+  - 30 — current default, the page-1 review
+  - 50 — wider sweep
+  - 100 — pre-export review with most data visible at once
+
+**Interaction with PR14's `allExpanded`:**
+
+`allExpanded` is page-level state, so it persists across pagination.
+Behavior:
+
+- Expand all on page 1 → 30 rows expanded.
+- Click Next → page 2 renders with all 30 of its rows also expanded
+  (because `allExpanded === true` short-circuits the row render).
+- Collapse all → every page returns to collapsed.
+
+This is the simpler model. If operations finds it surprising
+(e.g. they want each page to start collapsed), the fix is one line —
+reset `allExpanded` to `false` inside the `setCurrentPage` callbacks.
+Holding for now until we have real feedback.
+
+**Footer styling:**
+
+The select element mirrors the existing dashboard select (forecast
+horizon, line ~4440) — `bg-[#232c37]`, `border-[#2d3744]`,
+`focus:border-[#1ABC9C]`. Buttons reuse the same border/text tokens
+with `hover:bg-[#232c37]` for affordance and
+`disabled:opacity-30 disabled:cursor-not-allowed` for boundary state.
+Range info uses `font-mono` + muted secondary text so it reads as
+metadata; numeric counts inside the range use primary text color for
+quick eye-targeting.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`:
+  - `pageSize` + `currentPage` state on `SplitShipmentPage`
+  - `splitTotalCount / Pages / Idx` + `paginatedSplits` derivations
+  - `useEffect` to reset `currentPage` on data / size change
+  - `splitData.split.slice(0, 30)` → `paginatedSplits.map(...)`
+  - Pagination footer between `</div>` (overflow wrapper) and
+    `</SectionCard>`
+- `docs/exec-plans/active/002-split-shipments-live.md`: this PR15 section
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (live, ~246 SPLIT DOs in current window):
+  - Initial load: `"Showing 1-30 of 246 · Page 1 of 9"`.
+  - Page-size flip to 100: `"Showing 1-100 of 246 · Page 1 of 3"`,
+    page nav recalculates.
+  - Next → `"Showing 31-60 of 246 · Page 2 of 9"` (with default size).
+  - Last page: `"Showing 241-246 of 246 · Page 9 of 9"`, Next disabled.
+  - First page: Prev disabled.
+- Mock fallback: same UI, mock-generated SPLIT cohort drives the
+  count.
+- Zero-SPLIT edge: range reads `"No split orders in window"`,
+  nav reads `"Page 1 of 1"`, both buttons disabled.
+
+**Trust hierarchy:**
+
+- `splitData.split` (PR10 allow-list, full cohort)
+- Pagination derivations (view layer, PR15)
+- Per-row `expandedOrder` (PR7b) + page-level `allExpanded` (PR14)
+  preserved
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter,
+mock generator, KPI cards, banners (DATA INTEGRITY, Customer Hard
+Requirement), other sections (Channel, Customer ranking with the
+PR13 STATE column, Root Causes), `splitData.useMemo`, sort order on
+`splitData.split` (rendering reads it in source order).
+
+**Depends on:** PR7b (Container Tracking row pattern) + PR10
+(`splitData.split` cohort definition) + PR14 (`allExpanded` state).
+**Blocks:**
+- PR16 — filter dropdowns (root cause + region). Filtered results
+  must flow through the same `paginatedSplits` pipeline.
+- PR17 — search bar. Same pipeline.
+- PR18 — Excel export. "Export current page" vs "Export all"
+  becomes a meaningful choice with pagination in place.
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

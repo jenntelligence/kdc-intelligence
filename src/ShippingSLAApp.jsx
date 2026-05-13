@@ -1615,6 +1615,13 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
   // allExpanded is off. When allExpanded is on, every visible row is
   // expanded — per-row clicks become no-ops until the user collapses all.
   const [allExpanded, setAllExpanded] = useState(false);
+  // PR15: pagination for Container Tracking. Pre-PR15 the table was hard-
+  // capped at `.slice(0, 30)`, hiding 200+ rows in typical windows and
+  // making any future filter / search / export incomplete by default.
+  // pageSize is user-selectable; default 30 preserves the prior view size.
+  // currentPage is 0-indexed (rendered as 1-indexed in the footer).
+  const [pageSize, setPageSize] = useState(30);
+  const [currentPage, setCurrentPage] = useState(0);
 
   // PR4b2: Live data via hook; mock-fallback preserves the page when API is unreachable.
   // Trust hierarchy: server (master query) → adapter (PR4b1) → this page.
@@ -1861,6 +1868,23 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
       .map(c => ({ ...c, splitRate: c.total > 0 ? c.splits / c.total : 0 }));
   }, [ytdHookData]);
 
+  // PR15: pagination math for the Container Tracking table. Derived from
+  // splitData.split (post-PR10 settled-basis SPLIT cohort) so the table
+  // shows every operationally-decided split, not just the first 30.
+  const splitTotalCount = splitData.split.length;
+  const splitTotalPages = Math.max(1, Math.ceil(splitTotalCount / pageSize));
+  const splitStartIdx = currentPage * pageSize;
+  const splitEndIdx = Math.min(splitStartIdx + pageSize, splitTotalCount);
+  const paginatedSplits = splitData.split.slice(splitStartIdx, splitEndIdx);
+
+  // PR15: reset to first page when the underlying data shrinks below the
+  // current page or the user picks a different page size. Without this, a
+  // user on page 7/9 who narrows the window could end up rendering an
+  // empty page with disabled nav.
+  useEffect(() => {
+    setCurrentPage(0);
+  }, [pageSize, splitTotalCount]);
+
   if (hookLoading) {
     return <div className="p-8 text-center text-[12px] font-mono" style={{ color: 'var(--text-muted)' }}>Loading split-shipment data…</div>;
   }
@@ -2060,7 +2084,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
               </tr>
             </thead>
             <tbody>
-              {splitData.split.slice(0, 30).map(o => {
+              {paginatedSplits.map(o => {
                 // PR14: page-level allExpanded overrides per-row state.
                 // Individual clicks still mutate expandedOrder but their
                 // effect is masked while allExpanded is on.
@@ -2201,6 +2225,54 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
               })}
             </tbody>
           </table>
+        </div>
+        {/* PR15: pagination footer. Range info on the left, page-size select +
+            Prev/Next on the right. Styling mirrors the existing dashboard
+            select (forecast horizon, line ~4440) so the dropdown reads as
+            "same family" rather than a one-off control. Buttons disable at
+            the boundaries so the user can't navigate off the edge. */}
+        <div className="flex items-center justify-between text-[11px] font-mono mt-3 px-1" style={{ color: 'var(--text-muted)' }}>
+          <div>
+            {splitTotalCount > 0
+              ? <>Showing <span style={{ color: 'var(--text-primary)' }}>{splitStartIdx + 1}-{splitEndIdx}</span> of <span style={{ color: 'var(--text-primary)' }}>{fmtNum(splitTotalCount)}</span></>
+              : <>No split orders in window</>}
+          </div>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5">
+              <span>Page size:</span>
+              <select
+                value={pageSize}
+                onChange={e => setPageSize(Number(e.target.value))}
+                className="bg-[#232c37] border border-[#2d3744] text-[11px] font-mono px-1.5 py-0.5 rounded text-[#e8ecef] focus:border-[#1ABC9C] outline-none"
+              >
+                <option value={10}>10</option>
+                <option value={30}>30</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+              </select>
+            </label>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
+                disabled={currentPage === 0}
+                className="px-2 py-0.5 rounded border border-[#2d3744] text-[#e8ecef] disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[#232c37]"
+              >
+                ← Prev
+              </button>
+              <span className="px-2" style={{ color: 'var(--text-primary)' }}>
+                Page {currentPage + 1} of {splitTotalPages}
+              </span>
+              <button
+                type="button"
+                onClick={() => setCurrentPage(p => Math.min(splitTotalPages - 1, p + 1))}
+                disabled={currentPage >= splitTotalPages - 1}
+                className="px-2 py-0.5 rounded border border-[#2d3744] text-[#e8ecef] disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[#232c37]"
+              >
+                Next →
+              </button>
+            </div>
+          </div>
         </div>
       </SectionCard>
 
