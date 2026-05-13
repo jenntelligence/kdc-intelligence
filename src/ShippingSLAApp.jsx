@@ -1607,7 +1607,7 @@ function useSplitShipments(dateRange = '7d', customRange = {}) {
 // ============================================================
 // SPLIT SHIPMENT PAGE
 // ============================================================
-const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], onMetaChange }) => {
+const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], filterCause = 'all', filterRegion = 'all', onMetaChange }) => {
   const [expandedOrder, setExpandedOrder] = useState(null);
   // PR14: page-level expand-all toggle for Container Tracking. The clickable
   // subtitle on that SectionCard flips this; rendering combines it with the
@@ -1634,16 +1634,6 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
   // arrives after the main response so the section shows a loading state
   // while other sections render immediately.
   const { data: ytdHookData, loading: ytdLoading } = useSplitShipments('ytd');
-
-  // PR4b3: Lift hook meta (source + count + filter) up so the header summary dropdown,
-  // LIVE/MOCK badge, and channel-chips hint can all react. Single object keeps the
-  // interface small and lets the parent treat it as one snapshot.
-  useEffect(() => {
-    if (!onMetaChange) return;
-    onMetaChange({ source, count: hookData ? hookData.length : 0, filter: filter ?? null });
-  }, [source, hookData, filter, onMetaChange]);
-  // Clear the lifted state on unmount so the badge + summary disappear when leaving the page.
-  useEffect(() => () => { if (onMetaChange) onMetaChange(null); }, [onMetaChange]);
 
   const isLive = source === 'live';
 
@@ -1679,6 +1669,60 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     }));
   }, [hookData, selectedChannels, isLive]);
 
+  // PR16: dashboard-level filter dropdowns ("All causes" + "All regions") in
+  // the global filter bar at the top of the page. Pre-PR16 they were mock-UI
+  // placeholders that referenced the old CAUSE_LABELS / regions constants —
+  // they didn't affect this page. PR16 wires them to filteredPageData so
+  // every downstream metric (splitData, containerMetrics, sections) reflects
+  // the active filter without each consumer needing to know about the filter.
+  //
+  // Region filter: applied to **every** DO regardless of split_status.
+  //   Operations reads "All NY orders" as "every DO that ships to NY" — split
+  //   or not, pending or settled.
+  //
+  // Root-cause filter: applied **only** to SPLIT DOs. Root cause is a
+  //   sub-categorization of the SPLIT outcome; PENDING / NOT_SPLIT /
+  //   MISSING_TRACKING are different operational dimensions and shouldn't be
+  //   accidentally filtered out when someone narrows by, say, MANIFEST_LEVEL.
+  //   We pass non-SPLIT rows through untouched.
+  //
+  // The filter values come from the App-level global filter bar via props.
+  // Unknown values (e.g. user picked an Exec-page cause like 'UPS' and then
+  // navigated to Split) collapse to a no-op via the ROOT_CAUSE_LABELS guard.
+  const filteredPageData = useMemo(() => {
+    const regionActive = filterRegion && filterRegion !== 'all';
+    const causeActive  = filterCause && filterCause !== 'all' && ROOT_CAUSE_LABELS[filterCause];
+    if (!regionActive && !causeActive) return pageData;
+    return pageData.filter(o => {
+      if (regionActive && o.state !== filterRegion) return false;
+      if (causeActive && o.split_status === 'SPLIT' && o.splitReason !== filterCause) return false;
+      return true;
+    });
+  }, [pageData, filterRegion, filterCause]);
+
+  // PR16: dynamic region options from the unfiltered cohort, sorted. Excludes
+  // the '—' fallback that PR13's ytdCustomerList aggregation introduced for
+  // missing-state rows. Bubbled up to the App via onMetaChange so the
+  // global region dropdown shows only states present in the current window.
+  const regionOptions = useMemo(() => {
+    const states = new Set();
+    for (const o of pageData) {
+      if (o.state && o.state !== '—') states.add(o.state);
+    }
+    return ['all', ...Array.from(states).sort()];
+  }, [pageData]);
+
+  // PR4b3 + PR16: Lift hook meta (source + count + filter + PR16 regions) up
+  // so the App-level header summary dropdown, LIVE/MOCK badge, channel-chips
+  // hint, and PR16 region filter dropdown can all react. Single object keeps
+  // the interface small and lets the parent treat it as one snapshot.
+  useEffect(() => {
+    if (!onMetaChange) return;
+    onMetaChange({ source, count: hookData ? hookData.length : 0, filter: filter ?? null, regions: regionOptions });
+  }, [source, hookData, filter, regionOptions, onMetaChange]);
+  // Clear the lifted state on unmount so the badge + summary disappear when leaving the page.
+  useEffect(() => () => { if (onMetaChange) onMetaChange(null); }, [onMetaChange]);
+
   const splitData = useMemo(() => {
     // PR10 Split Rate definition (post-PR9 4-category SQL): settled basis is
     // explicit — only DOs whose split outcome is operationally **decided**.
@@ -1694,25 +1738,25 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     // folded MISSING_TRACKING into settled after PR9 dropped UNKNOWN and
     // added MISSING_TRACKING, deflating split rate by ~40%. The explicit
     // allow-list is safer if more categories ever land.
-    const settled = pageData.filter(o => o.split_status === 'SPLIT' || o.split_status === 'NOT_SPLIT');
+    const settled = filteredPageData.filter(o => o.split_status === 'SPLIT' || o.split_status === 'NOT_SPLIT');
     const split = settled.filter(o => o.isSplit);
     const splitRate = settled.length ? split.length / settled.length : 0;
 
     // PR4b2: In Transit (PENDING) — surfaced as its own KPI to keep the settled rate clean.
-    const pending = pageData.filter(o => o.split_status === 'PENDING');
-    const pendingRate = pageData.length ? pending.length / pageData.length : 0;
+    const pending = filteredPageData.filter(o => o.split_status === 'PENDING');
+    const pendingRate = filteredPageData.length ? pending.length / filteredPageData.length : 0;
 
     // PR10: MISSING_TRACKING — DOs with at least one container missing a
     // UPS `tracking_num`. These are data-integrity / handoff gaps, not
     // operational outcomes. Surfaced via the amber banner above the KPI
     // cards; excluded from `settled` (and therefore from `splitRate`) and
     // from `pending` (since they're not in transit in the UPS-scan sense).
-    const missing = pageData.filter(o => o.split_status === 'MISSING_TRACKING');
-    const missingRate = pageData.length ? missing.length / pageData.length : 0;
+    const missing = filteredPageData.filter(o => o.split_status === 'MISSING_TRACKING');
+    const missingRate = filteredPageData.length ? missing.length / filteredPageData.length : 0;
 
     // By customer
     const byCustomer = {};
-    pageData.forEach(o => {
+    filteredPageData.forEach(o => {
       if (!byCustomer[o.customer]) byCustomer[o.customer] = { customer: o.customer, tier: o.tier, total: 0, split: 0 };
       byCustomer[o.customer].total++;
       if (o.isSplit) byCustomer[o.customer].split++;
@@ -1723,7 +1767,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
 
     // By shift (mock-only field; live mode produces a single 'unknown' bucket)
     const byShift = {};
-    pageData.forEach(o => {
+    filteredPageData.forEach(o => {
       const key = o.shift || (isLive ? 'N/A (live)' : 'unknown');
       if (!byShift[key]) byShift[key] = { shift: key, total: 0, split: 0 };
       byShift[key].total++;
@@ -1779,11 +1823,11 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     const worstGap = gapItemsCount ? gapItems.reduce((m,o) => o.splitGapDays > m ? o.splitGapDays : m, 0) : 0;
 
     return {
-      split, splitRate, settledCount: settled.length, pendingCount: pending.length, pendingRate, totalCount: pageData.length,
+      split, splitRate, settledCount: settled.length, pendingCount: pending.length, pendingRate, totalCount: filteredPageData.length,
       missing, missingCount: missing.length, missingRate,
       customerList, shiftList, reasonList, channelList, splitChargebacks, avgGap, worstGap, gapItemsCount,
     };
-  }, [pageData, isLive]);
+  }, [filteredPageData, isLive]);
 
   // PR8: Container-level metrics. KDC operations sees containers as the
   // work unit alongside DOs as the business unit — both deserve KPI cards.
@@ -1813,7 +1857,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     let settledContainers = 0;
     let splitContainers = 0;
     let inTransitContainers = 0;
-    for (const o of pageData) {
+    for (const o of filteredPageData) {
       const containers = o.containers || [];
       totalContainers += containers.length;
       const isSettled = o.split_status === 'SPLIT' || o.split_status === 'NOT_SPLIT';
@@ -1833,7 +1877,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
       splitRate: settledContainers > 0 ? splitContainers / settledContainers : 0,
       inTransitRate: totalContainers > 0 ? inTransitContainers / totalContainers : 0,
     };
-  }, [pageData]);
+  }, [filteredPageData]);
 
   // PR6: YTD customer ranking — top 10 by split count across the full
   // year-to-date window. Independent of the page's main dateRange (so
@@ -6619,14 +6663,26 @@ export default function ShippingSLAApp() {
           <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono">
             <Filter size={11}/> Filters
           </div>
+          {/* PR16: on the Split page these two dropdowns drive the live
+              filteredPageData pipeline — cause uses the 5 ROOT_CAUSE_LABELS
+              keys (Manifest / UPS Trailer / Zone / Wave / Unclassified) and
+              region uses the unique `state` codes lifted from the active
+              dataset via splitMeta.regions. On every other page the
+              dropdowns keep the legacy CAUSE_LABELS + mock-region behavior
+              so the Exec / SKU / etc. views don't change. SplitShipmentPage
+              guards against cross-page filter values (e.g. cause='UPS' from
+              Exec) so navigation between pages doesn't break the Split
+              view's metrics. */}
           <select value={filterCause} onChange={e => setFilterCause(e.target.value)}
             className="bg-[#232c37] border border-[#2d3744] text-[12px] font-mono px-2 py-1 rounded text-[#e8ecef] focus:border-[#1ABC9C] outline-none">
             <option value="all">All causes</option>
-            {Object.keys(CAUSE_LABELS).map(k => <option key={k} value={k}>{CAUSE_LABELS[k]}</option>)}
+            {activePage === 'split'
+              ? ROOT_CAUSE_ORDER.map(k => <option key={k} value={k}>{ROOT_CAUSE_LABELS[k]}</option>)
+              : Object.keys(CAUSE_LABELS).map(k => <option key={k} value={k}>{CAUSE_LABELS[k]}</option>)}
           </select>
           <select value={filterRegion} onChange={e => setFilterRegion(e.target.value)}
             className="bg-[#232c37] border border-[#2d3744] text-[12px] font-mono px-2 py-1 rounded text-[#e8ecef] focus:border-[#1ABC9C] outline-none">
-            {regions.map(r => <option key={r} value={r}>{r === 'all' ? 'All regions' : r}</option>)}
+            {(activePage === 'split' ? (splitMeta?.regions || ['all']) : regions).map(r => <option key={r} value={r}>{r === 'all' ? 'All regions' : r}</option>)}
           </select>
           {/* PR4b3: Split page gets the live, clickable summary dropdown.
               Other pages keep the legacy mock-driven text (unchanged on purpose). */}
@@ -7172,7 +7228,7 @@ export default function ShippingSLAApp() {
           <>
             {activePage === 'geo' && <GeoPage filtered={filtered} />}
             {activePage === 'ai' && <AIRiskPage filtered={filtered} data={data}/>}
-            {activePage === 'split' && <SplitShipmentPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} onMetaChange={setSplitMeta}/>}
+            {activePage === 'split' && <SplitShipmentPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} filterCause={filterCause} filterRegion={filterRegion} onMetaChange={setSplitMeta}/>}
             {activePage === 'costs' && <CostsPage filtered={filtered}/>}
             {activePage === 'customers' && <CustomerImpactPage filtered={filtered}/>}
             {activePage === 'sku' && <SKUProblemPage filtered={filtered}/>}

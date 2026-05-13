@@ -3046,6 +3046,212 @@ PR13 STATE column, Root Causes), `splitData.useMemo`, sort order on
 
 ---
 
+### PR16 — Filter dropdowns 활성화: root cause + region (completed 2026-05-13)
+
+User reviewed PR15 dashboard:
+
+> "channel 위의 all causes 와 all regions drop down filter 가 있는데
+>  all causes 에 실제 root cause 들 넣고
+>  all regions 는 delivered 된 state(cust state)을 기준으로 필터가
+>  보여졌으면 좋겠어"
+
+The two dropdowns in the global filter bar at the top of every page
+existed pre-PR16 as Exec-page mock-data UI (CAUSE_LABELS like 'UPS' /
+'DC' / 'Missing' / 'Damage' and a `regions` const sourced from
+`data.map(r => r.region)`). They had **no effect** on the Split page.
+PR16 wires them through.
+
+**User decisions:**
+
+1. **Filter scope:** entire Split-page dashboard updates from these
+   dropdowns (industry-standard BI filter-bar behavior). Every KPI
+   card, every section, every metric reflows.
+2. **Region dropdown source:** customer `state` field (PR13). Options
+   are extracted dynamically from the active dataset — only states
+   that actually appear in the current window show up.
+3. **Cause dropdown source:** the 5 `ROOT_CAUSE_LABELS` keys
+   (Manifest / UPS Trailer / Zone / Wave / Unclassified). `PENDING`,
+   `NOT_SPLIT`, and `MISSING_TRACKING` are not included — those are
+   different operational dimensions, not split sub-causes.
+
+**The dropdowns are page-aware, not page-replaced:**
+
+The global filter bar lives in the App component and is visible on
+every page. To preserve the Exec page's existing CAUSE_LABELS +
+mock-regions behavior, the dropdown options now switch on
+`activePage === 'split'`:
+
+```jsx
+<select value={filterCause} ...>
+  <option value="all">All causes</option>
+  {activePage === 'split'
+    ? ROOT_CAUSE_ORDER.map(k => <option ...>{ROOT_CAUSE_LABELS[k]}</option>)
+    : Object.keys(CAUSE_LABELS).map(k => <option ...>{CAUSE_LABELS[k]}</option>)}
+</select>
+
+<select value={filterRegion} ...>
+  {(activePage === 'split'
+    ? (splitMeta?.regions || ['all'])
+    : regions
+  ).map(r => <option ...>{r === 'all' ? 'All regions' : r}</option>)}
+</select>
+```
+
+Exec / SKU / Forecast / etc. pages keep the legacy options. Split
+gets root-cause keys + dynamic state codes.
+
+**Filter logic — `filteredPageData` useMemo:**
+
+```javascript
+const filteredPageData = useMemo(() => {
+  const regionActive = filterRegion && filterRegion !== 'all';
+  const causeActive  = filterCause && filterCause !== 'all' && ROOT_CAUSE_LABELS[filterCause];
+  if (!regionActive && !causeActive) return pageData;
+  return pageData.filter(o => {
+    if (regionActive && o.state !== filterRegion) return false;
+    if (causeActive && o.split_status === 'SPLIT' && o.splitReason !== filterCause) return false;
+    return true;
+  });
+}, [pageData, filterRegion, filterCause]);
+```
+
+**Asymmetric semantics (deliberate):**
+
+- **Region filter applies to every DO.** Operations reads
+  `"All NY orders"` as "every DO that ships to NY" — split or not,
+  pending or settled. SPLIT, NOT_SPLIT, PENDING, MISSING_TRACKING
+  all funnel through the state check.
+- **Root-cause filter applies only to SPLIT DOs.** Root cause is a
+  sub-categorization of the SPLIT outcome (the diagnosis of *why*
+  the split happened). PENDING / NOT_SPLIT / MISSING_TRACKING don't
+  have a meaningful split_root_cause — gating them on it would
+  drop the entire non-SPLIT cohort. They pass through untouched so
+  "MANIFEST_LEVEL_SPLIT" narrows to manifest-caused splits while
+  keeping the IN TRANSIT / DATA INTEGRITY counts intact.
+
+**Cross-page filter-value guard:**
+
+The Exec page sets `filterCause` to values like `'UPS'` from
+`CAUSE_LABELS`. When the user navigates to the Split page with
+`filterCause = 'UPS'`, the Split-page filter has to ignore it
+(otherwise every SPLIT row gets filtered out — `splitReason` is
+never `'UPS'`). The guard:
+
+```javascript
+const causeActive = filterCause && filterCause !== 'all' && ROOT_CAUSE_LABELS[filterCause];
+```
+
+`ROOT_CAUSE_LABELS['UPS']` is `undefined`, so `causeActive` collapses
+to `false` and the cause filter becomes a no-op. Same shape for
+region — though the region check uses simple equality on
+`o.state`, so an Exec-region like `'East'` just yields zero matches
+(equivalent to filtering out everything, but at least it doesn't
+crash). Future PR could reset filters when `activePage` changes.
+
+**Lifting region options to the App via `onMetaChange`:**
+
+The region dropdown lives in App; the data lives in
+`SplitShipmentPage`. The page already lifts `splitMeta` (source,
+count, filter) for the header badge / summary; PR16 extends that
+meta with a `regions: string[]` field:
+
+```javascript
+useEffect(() => {
+  if (!onMetaChange) return;
+  onMetaChange({
+    source,
+    count: hookData ? hookData.length : 0,
+    filter: filter ?? null,
+    regions: regionOptions,    // PR16
+  });
+}, [source, hookData, filter, regionOptions, onMetaChange]);
+```
+
+App reads `splitMeta?.regions` for the dropdown. Falls back to
+`['all']` before the first hook fetch resolves — the dropdown
+shows only `"All regions"` during loading.
+
+**Downstream propagation:**
+
+`splitData.useMemo` and `containerMetrics.useMemo` now read
+`filteredPageData` instead of `pageData`. That single change cascades
+through every KPI card, the Channel section, the Container Tracking
+table (which now respects the filter in `paginatedSplits`), and the
+Root Causes breakdown — no per-consumer wiring needed.
+
+**`ytdCustomerList` left on `ytdHookData`:**
+
+YTD Customer Ranking is a year-to-date, page-filter-independent view
+by design (PR6). Narrowing it to the current filter would defeat the
+purpose of the YTD context. Stays on `ytdHookData`.
+
+**Pagination interaction (PR15):**
+
+`splitTotalCount` (rendered as `Showing X-Y of Z`) now reflects the
+filtered cohort. PR15's reset effect (`useEffect([pageSize,
+splitTotalCount], () => setCurrentPage(0))`) fires when the filter
+narrows the dataset, so the user lands on page 1 of the filtered
+result rather than an empty mid-pagination page.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`:
+  - `SplitShipmentPage` props extended with `filterCause`,
+    `filterRegion`.
+  - New `filteredPageData` useMemo + `regionOptions` useMemo.
+  - Meta `useEffect` extended with `regions: regionOptions`.
+  - `splitData.useMemo`, `containerMetrics.useMemo`, and the
+    customer/shift aggregations rewired to `filteredPageData`.
+  - App-level filter-bar dropdowns: option lists switch on
+    `activePage === 'split'`.
+  - `<SplitShipmentPage>` invocation receives the new props.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this PR16 section.
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (Split page, live, current window):
+  - Default `All causes` + `All regions`: dashboard identical to PR15.
+  - Cause = `Manifest Level Split`: KPI cards drop the non-manifest
+    SPLIT contribution; Root Causes section shows only that bar;
+    Container Tracking table paginates only manifest splits; pending /
+    missing counts unchanged.
+  - Region = `NY`: KPI cards reflect only NY DOs; Customer Ranking
+    (YTD) unchanged.
+  - Cause + Region together: AND condition applies; result is the
+    intersection.
+  - Navigate Exec → Split with `filterCause = 'UPS'`: Split dashboard
+    behaves as if filter were `'all'` (cause guard fires).
+- Mock fallback: same behavior; mock split rows carry both `state`
+  and `splitReason`.
+
+**Trust hierarchy:**
+
+- Server: `split_root_cause` (PR5a) + customer `state` (PR5a)
+- Adapter: `state` alias + `splitReason` (PR4b1, PR5b)
+- `pageData` (channel filter + normalization, existing)
+- `filteredPageData` (PR16 cause + region filter, NEW)
+- Downstream useMemos (splitData / containerMetrics) consume
+  filteredPageData
+- App-level filter bar: dropdowns page-aware (NEW)
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter,
+mock generator, master plan 001, `splitData` / `containerMetrics`
+internal logic (only input source changed), KPI card markup, banners,
+section markup, sort order, PR14 expand-all state, PR15 pagination
+math.
+
+**Depends on:** PR5a (`split_root_cause`), PR13 (`state` field
+projected on every DO), PR15 (pagination consumes filtered cohort).
+**Blocks:**
+- PR17 (search bar) — search will narrow `filteredPageData` further.
+- PR18 (Excel export) — export source is `filteredPageData`, so
+  "current view" matches what the user sees on screen.
+- A future filter-reset-on-page-change PR (small quality-of-life
+  item — currently mitigated by the cross-page guard).
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type
