@@ -2333,6 +2333,169 @@ master plan 001.
 
 ---
 
+### PR11 — Frontend: Container metrics denominator correction (completed 2026-05-13)
+
+After PR10 shipped the splitData allow-list, the user reviewed the
+post-PR10 dashboard and identified the matching issue on the
+container-level cards:
+
+> "DO 와 같이 일관성 있게 delivered date 이 있는 경우로만 보여줘야지"
+>
+> "CONTAINERS SPLIT 도 do 처럼 전체 container 갯수를 보여주는게 맞고"
+
+PR8 follow-up's `containerMetrics.useMemo` still carried the pre-PR9
+`isSettled` form:
+
+```javascript
+const isSettled = o.split_status !== 'PENDING' && o.split_status !== 'UNKNOWN';
+if (isSettled && o.isSplit) splitContainers += containers.length;
+```
+
+Two problems with this:
+
+1. **Same deny-list trap as PR10.** Post-PR9, `'UNKNOWN'` no longer
+   exists and `'MISSING_TRACKING'` passes both `!==` clauses, so
+   MISSING_TRACKING DOs were folded into the implicit "settled" cohort.
+   Currently *harmless on the SPLIT numerator* because
+   `is_split_shipment` is server-side set to `'Y'` only when
+   `split_status = 'SPLIT'`, so `o.isSplit` is `false` for every
+   MISSING_TRACKING row and the `&& o.isSplit` gate filters them out
+   regardless of how `isSettled` is computed. But the moment any
+   other consumer of this useMemo wanted to count "settled containers"
+   independently of `isSplit`, the deny-list would inflate the count.
+
+2. **CONTAINERS SPLIT denominator was `totalContainers` (all containers
+   in the window, including PENDING and MISSING_TRACKING).** User asked
+   for parity with the DO-level ORDERS SPLIT card, whose denominator is
+   `splitData.settledCount` (SPLIT + NOT_SPLIT only).
+
+**PR11 changes:**
+
+1. **Allow-list `isSettled` in `containerMetrics`** (PR10 pattern):
+
+   ```javascript
+   const isSettled = o.split_status === 'SPLIT' || o.split_status === 'NOT_SPLIT';
+   if (isSettled) {
+     settledContainers += containers.length;
+     if (o.isSplit) splitContainers += containers.length;
+   }
+   ```
+
+2. **New `settledContainers` field** — total container count across DOs
+   whose split outcome is operationally decided. Mirrors
+   `splitData.settledCount` at the container level.
+
+3. **New `splitRate` field on `containerMetrics`** — `splitContainers /
+   settledContainers`. Not currently rendered as a percent (the UI
+   shows the absolute count + the new "of X settled containers"
+   subtitle), but exposed for future use and for symmetry with
+   `inTransitRate`.
+
+4. **CONTAINERS SPLIT card subtitle:**
+   - Before: `"of X containers"` where X = `totalContainers`.
+   - After: `"of X settled containers"` where X = `settledContainers`.
+
+5. **CONTAINERS IN TRANSIT card unchanged.** User explicitly chose to
+   keep `totalContainers` as the denominator there — DO-level IN TRANSIT
+   uses an all-DOs denominator (`pendingCount / totalCount`) and the
+   container card mirrors that. MISSING_TRACKING containers belong in
+   both the numerator and the denominator: a container without a UPS
+   `tracking_num` is by definition unscanned, so it counts as in-transit
+   for this rate.
+
+**Denominator alignment table (post-PR11):**
+
+| Card                    | Numerator                | Denominator              | Basis     |
+|-------------------------|--------------------------|--------------------------|-----------|
+| SPLIT RATE              | `split.length`           | `settledCount`           | settled   |
+| ORDERS SPLIT            | `split.length`           | `settledCount`           | settled   |
+| **CONTAINERS SPLIT**    | `splitContainers`        | `settledContainers`      | settled   |
+| IN TRANSIT              | `pendingCount`           | `totalCount`             | all       |
+| **CONTAINERS IN TRANSIT** | `inTransitContainers`  | `totalContainers`        | all       |
+| AVG GAP                 | (mean over split DOs)    | n/a                      | split set |
+
+The two split cards (DO + container) now both use settled basis; the
+two in-transit cards (DO + container) both use all basis. Mental model
+is consistent.
+
+**Numbers preview (live, 5/6–5/14 window approximation):**
+
+```
+splitContainers      = sum of containers in SPLIT DOs (e.g. ~1,650)
+settledContainers    = sum of containers in SPLIT + NOT_SPLIT DOs (e.g. ~3,400)
+totalContainers      = sum across all DOs (e.g. ~6,860)
+inTransitContainers  = containers with actualDelivery == null (e.g. ~4,780)
+
+CONTAINERS SPLIT subtitle: "of 3,400 settled containers" (was "of 6,860 containers")
+CONTAINERS IN TRANSIT: 69.6% — unchanged
+```
+
+The CONTAINERS SPLIT value is unchanged (still `splitContainers`); only
+the subtitle denominator shifts to settled. The implied rate ≈ 48.5%
+matches the DO-level SPLIT RATE (~49.3%) closely, which is the
+operational sanity check users do mentally when both cards are visible.
+
+**Mock fallback regression:**
+
+Inherited from PR10. Mock rows have no `split_status` field, so the
+new allow-list collapses `settledContainers` to 0, which makes the
+CONTAINERS SPLIT subtitle read `"of 0 settled containers"`. This is
+ugly but matches the broader mock regression documented in PR10:
+mock-fallback is a degraded-mode placeholder, and a unified fix
+belongs in a mock-generator update PR.
+
+**Trust hierarchy:**
+
+- Server: 4-category `split_status` (PR9)
+- Adapter: `containers[]` per DO, deduped by `container_id` (PR7a/PR7b)
+- Page useMemo: explicit settled allow-list + `settledContainers` (PR11)
+- UI: CONTAINERS SPLIT subtitle (denominator corrected)
+
+**Pattern consistency:**
+
+| useMemo            | `isSettled` form (post-PR11)                                       |
+|--------------------|--------------------------------------------------------------------|
+| `splitData` (PR10) | `o.split_status === 'SPLIT' \|\| o.split_status === 'NOT_SPLIT'`   |
+| `containerMetrics` | `o.split_status === 'SPLIT' \|\| o.split_status === 'NOT_SPLIT'`   |
+
+Two definitions, same logic, both explicit. Future SQL categories land
+outside `settled` by default — safer than the pre-PR9 deny-list, which
+silently absorbed new values.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`:
+  - `containerMetrics.useMemo`: new `settledContainers`, allow-list
+    `isSettled`, new `splitRate` field
+  - CONTAINERS SPLIT KPI card subtitle: `"of X settled containers"`
+- `docs/exec-plans/active/002-split-shipments-live.md`: this PR11 section
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (live, 5/6–5/14):
+  - CONTAINERS SPLIT: value unchanged (`splitContainers`), subtitle
+    now reads `"of X settled containers"` with X ≈ `settledContainers`.
+  - CONTAINERS IN TRANSIT: unchanged (`totalContainers` denominator).
+  - Other KPI cards (SPLIT RATE, ORDERS SPLIT, IN TRANSIT, AVG GAP):
+    unchanged.
+  - MISSING_TRACKING banner: unchanged from PR10.
+- Mock fallback: subtitle reads `"of 0 settled containers"` (inherited
+  mock regression).
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter, mock
+generator, `splitData.useMemo` (PR10), other KPI cards, other sections
+(Channel / Container Tracking / Customer / Root Causes), banners,
+master plan 001.
+
+**Depends on:** PR9 + PR10.
+**Blocks:** Nothing further. With PR11, the operational measurement
+cycle from PR4 → PR11 closes — the operations team can read every
+KPI card on the Split Shipments page as a faithful operational fact
+on the live data path.
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

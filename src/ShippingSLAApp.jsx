@@ -1777,34 +1777,47 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
   // pageData carries already-deduplicated containers per DO (PR7b's
   // distinctContainers in live mode; mock generates one entry per carton),
   // so summing containers.length across DOs gives total unique containers
-  // in this window. Verified via browser console against PR5a's
-  // COUNT(DISTINCT container_id) — 8,153 in the 5/5-5/12 sample.
+  // in this window.
   //
-  // "Split containers" reuses splitData.split's settled+isSplit definition
-  // (split_status === 'SPLIT' in live, isSplit alone in mock since mock
-  // rows have no split_status field).
+  // PR11: denominator parity with DO-level metrics.
+  //   - CONTAINERS SPLIT divides by settled containers (containers in
+  //     SPLIT or NOT_SPLIT DOs), mirroring DO-level SPLIT RATE's
+  //     "outcome-decided" basis from PR10. MISSING_TRACKING / PENDING
+  //     containers are excluded so the rate reflects operational truth.
+  //   - CONTAINERS IN TRANSIT keeps the totalContainers denominator
+  //     (every container in window) to mirror DO-level IN TRANSIT's
+  //     proportion-of-window phrasing. UPS scan missing = in transit by
+  //     definition, so MISSING_TRACKING containers belong in both
+  //     numerator and denominator there.
   //
-  // "In transit" is more granular than the DO-level pending: even a
-  // settled DO can have individual containers still without a UPS scan,
-  // so we count by container.actualDelivery == null (both mock and the
-  // live pageData normalization populate this field uniformly).
+  // The `isSettled` gate uses the same allow-list pattern as PR10's
+  // splitData — explicit `SPLIT || NOT_SPLIT`, so a future SQL category
+  // (PR9 added MISSING_TRACKING, more could land) is automatically
+  // excluded from settled by default. Pre-PR11 used the pre-PR9
+  // deny-list which silently folded MISSING_TRACKING into settled.
   const containerMetrics = useMemo(() => {
     let totalContainers = 0;
+    let settledContainers = 0;
     let splitContainers = 0;
     let inTransitContainers = 0;
     for (const o of pageData) {
       const containers = o.containers || [];
       totalContainers += containers.length;
-      const isSettled = o.split_status !== 'PENDING' && o.split_status !== 'UNKNOWN';
-      if (isSettled && o.isSplit) splitContainers += containers.length;
+      const isSettled = o.split_status === 'SPLIT' || o.split_status === 'NOT_SPLIT';
+      if (isSettled) {
+        settledContainers += containers.length;
+        if (o.isSplit) splitContainers += containers.length;
+      }
       for (const c of containers) {
         if (c.actualDelivery == null) inTransitContainers += 1;
       }
     }
     return {
       totalContainers,
+      settledContainers,
       splitContainers,
       inTransitContainers,
+      splitRate: settledContainers > 0 ? splitContainers / settledContainers : 0,
       inTransitRate: totalContainers > 0 ? inTransitContainers / totalContainers : 0,
     };
   }, [pageData]);
@@ -1914,8 +1927,10 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
         <KPI label="Split Rate" value={fmtPct(splitData.splitRate)} delta={`${splitData.split.length} of ${splitData.settledCount} settled`} deltaType="bad" icon={Split}/>
         <KPI label="Orders Split" value={splitData.split.length} delta={`of ${splitData.settledCount} settled`} deltaType="bad" icon={Package}/>
         {/* PR8: CONTAINERS SPLIT — operations-unit complement to ORDERS SPLIT.
-            KDC's warehouse cares how many cartons are affected, not just orders. */}
-        <KPI label="Containers Split" value={fmtNum(containerMetrics.splitContainers)} delta={`of ${fmtNum(containerMetrics.totalContainers)} containers`} deltaType="bad" icon={Box}/>
+            KDC's warehouse cares how many cartons are affected, not just orders.
+            PR11: denominator is settledContainers (containers in SPLIT or
+            NOT_SPLIT DOs), parity with DO-level ORDERS SPLIT settled basis. */}
+        <KPI label="Containers Split" value={fmtNum(containerMetrics.splitContainers)} delta={`of ${fmtNum(containerMetrics.settledContainers)} settled containers`} deltaType="bad" icon={Box}/>
         <KPI label="In Transit" value={fmtPct(splitData.pendingRate)} delta={`${splitData.pendingCount} of ${splitData.totalCount} pending`} icon={Clock}/>
         {/* PR8: CONTAINERS IN TRANSIT — DO-level pending masks the fact that even
             settled DOs can have individual containers still without a UPS scan.
