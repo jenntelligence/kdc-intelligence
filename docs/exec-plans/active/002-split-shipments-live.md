@@ -3252,6 +3252,160 @@ projected on every DO), PR15 (pagination consumes filtered cohort).
 
 ---
 
+### PR17a — State dropdown: searchable combobox (completed 2026-05-13)
+
+User reviewed the PR16 dashboard and added a usability ask on the
+region filter:
+
+> "state drop down filter 에 state search 할 수 있는 기능 넣으면 좋을거 같아"
+
+The native `<select>` from PR16 carries 20-30 state codes in a typical
+window. Native first-letter jump only matches the first character of
+each option, so finding `NY` vs `NJ` vs `NV` requires scrolling.
+Operations wants substring search (type `N` → see only N-states).
+
+**User decision (set during planning):**
+
+- Build a custom combobox, no library.
+- Match the dashboard's design tokens so the new control reads as
+  part of the same UI family.
+- Make it reusable for future searchable dropdowns (customer / channel /
+  carrier / SKU).
+
+**New `SearchableDropdown` component:**
+
+```javascript
+const SearchableDropdown = ({ options, value, onChange, placeholder, getLabel })
+```
+
+Placed alongside the other shared helpers (`KPI`, `SectionCard`)
+near the top of the file. Internal state:
+
+- `open` — panel visibility
+- `search` — input text (filters case-insensitive substring)
+- `highlighted` — keyboard cursor index into the filtered list
+
+Behavior:
+
+| Action               | Result                                            |
+|----------------------|---------------------------------------------------|
+| Click trigger        | toggle panel                                      |
+| Type in search input | filter options (substring, case-insensitive)      |
+| ArrowDown / ArrowUp  | move `highlighted` within filtered list           |
+| Enter                | select `filtered[highlighted]`, close, clear search |
+| Click an option      | select that option, close, clear search           |
+| Escape               | close, clear search                               |
+| Mousedown outside    | close, clear search                               |
+| Re-type              | highlight resets to 0 so Enter selects top result |
+
+Styling token parity with the existing native `<select>` (PR15
+forecast-horizon dropdown):
+
+- Trigger: `bg-[#232c37] border-[#2d3744] focus:border-[#1ABC9C]`
+- Panel: same `bg-[#232c37] border-[#2d3744]`, `shadow-lg`, `z-50`
+- Selected text color `#1ABC9C` (dashboard accent)
+- Highlighted row background `#2d3744` (panel border tone)
+- Empty state: `"No matches"` in muted grey
+- Typography `text-[12px] font-mono` end-to-end
+
+**Why custom instead of react-select / downshift:**
+
+- Bundle size flat — `react-select` is ~50 KB minified, the dashboard
+  already imports a lot of charts (recharts is the biggest single
+  cost). Adding another dependency for one dropdown is hard to
+  justify.
+- Token parity is free — the component composes the existing
+  classes verbatim; a library would need a theme/styles config to
+  match.
+- Reusable primitive — a customer search, channel search, carrier
+  search, or SKU search can all reuse `SearchableDropdown` with
+  different `options` / `getLabel` props.
+- Scope is small — combobox + filter + keyboard nav is well-trodden
+  UI; building it without library polish (full ARIA, virtualization)
+  is appropriate for a 20-30 element list.
+
+Accessibility note: the implementation handles keyboard navigation
+but doesn't expose ARIA `combobox` / `listbox` roles or live-region
+announcements. If operations needs screen-reader support later, those
+attributes can be added without changing the component's shape.
+
+**Filter-bar wiring — Split-page only:**
+
+```jsx
+{activePage === 'split' ? (
+  <SearchableDropdown
+    options={splitMeta?.regions || ['all']}
+    value={filterRegion}
+    onChange={setFilterRegion}
+    placeholder="All regions"
+    getLabel={r => r === 'all' ? 'All regions' : r}
+  />
+) : (
+  <select value={filterRegion} onChange={e => setFilterRegion(e.target.value)} ...>
+    {regions.map(r => <option key={r} value={r}>{r === 'all' ? 'All regions' : r}</option>)}
+  </select>
+)}
+```
+
+Mirrors PR16's page-aware pattern — the combobox shows only on the
+Split page. Exec / SKU / Forecast / etc. keep the native `<select>`
+because their `regions` list is still the mock-data const and the
+search affordance isn't needed.
+
+**Cause dropdown stays native:**
+
+5 options total (Manifest / UPS Trailer / Zone / Wave / Unclassified).
+Substring search adds no value over scanning the list. Keeps the
+filter bar visually balanced (one searchable on the right, one native
+on the left) and lets future work pick whichever pattern fits the
+option count.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`:
+  - New `SearchableDropdown` component near `SectionCard`.
+  - Region dropdown in the App-level filter bar swaps to
+    `SearchableDropdown` when `activePage === 'split'`.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this PR17a
+  section.
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (Split page):
+  - Filter bar now shows a combobox in place of the native region
+    select; trigger button matches the cause select's visual.
+  - Click opens panel; first focus is the search input.
+  - Type `N` → list narrows to NY / NJ / NV / NC / NM / etc. (any
+    matching state codes present in the window).
+  - Arrow keys move the highlight; Enter selects.
+  - Escape closes without changing selection; mousedown outside the
+    panel also closes.
+  - Cause dropdown unchanged.
+- Browser smoke (Exec / SKU pages): native `<select>` still in place,
+  no visual change.
+- Mock fallback: combobox shows mock-generated state codes; same
+  behaviour as live.
+
+**Trust hierarchy:**
+
+- PR16 `filterRegion` state + `regionOptions` aggregation (unchanged)
+- New `SearchableDropdown` primitive
+- App-level filter-bar dropdown swaps source on `activePage === 'split'`
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter,
+mock generator, `filteredPageData` logic, `splitData` /
+`containerMetrics`, KPI cards, banners, sections, other-page filter
+behavior, cause dropdown, pagination state, PR14 expand-all.
+
+**Depends on:** PR16 (`filterRegion` + `regionOptions` + lifted
+`splitMeta.regions`).
+**Blocks:** Nothing.
+**Reusable for:** future searchable selects (customer / channel /
+carrier / SKU).
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type
