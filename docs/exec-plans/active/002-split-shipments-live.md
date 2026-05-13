@@ -1890,6 +1890,136 @@ Impact) need their own data-source PRs.
 
 ---
 
+### PR8 follow-up — Container metrics + KPI card cleanup (completed 2026-05-13)
+
+After PR8 shipped the AVG GAP activation, the user reviewed the dashboard
+again and identified two more changes for the same KPI card block:
+
+> "Chargeback이랑 key acct impact 카드 지우고 container 레벨 metrics 보여줘"
+>
+> "Order Split 옆에 container split, In transit 옆에 container level in
+> transit 카드 추가"
+
+User reasoning: "KDC 입장에서는 컨테이너 레벨로도 보고싶을 수 있잖아." DO is
+the business unit; container is the operations unit. Both deserve KPI
+cards. The two mock-only `CHARGEBACKS` / `KEY ACCT IMPACT` cards had no
+data source on the wire (table in the AVG-GAP follow-up above) and
+displayed `N/A` in live mode — replaced with container-level counterparts
+that the warehouse cares about.
+
+**Final 6-card layout (DO unit ↔ container unit pairing):**
+
+| Position | Card | Unit | Source |
+|----------|------|------|--------|
+| 1 | SPLIT RATE | DO % | `splitData.splitRate` |
+| 2 | ORDERS SPLIT | DO count | `splitData.split.length` |
+| 3 | **CONTAINERS SPLIT** (new) | container count | `containerMetrics.splitContainers` |
+| 4 | IN TRANSIT | DO % | `splitData.pendingRate` |
+| 5 | **CONTAINERS IN TRANSIT** (new) | container % | `containerMetrics.inTransitRate` |
+| 6 | AVG GAP | days | `splitData.avgGap` (PR8) |
+
+**Removed cards (no data source):**
+
+- CHARGEBACKS — no SLA-penalty data on the wire (see PR8 deferral table).
+- KEY ACCT IMPACT — `tier` field is mock-only; SAP customer master has
+  no `Key/Growth/Mid/Small` classification today.
+
+Both can be reinstated via the same mock-only N/A pattern if a data
+source lands (see PR8 deferral table above for the future-PR mapping).
+
+**New cards:**
+
+**CONTAINERS SPLIT** — containers in SPLIT DOs.
+
+- Value: absolute count (e.g., `2,157`)
+- Subtitle: `of X containers` where X = total unique containers in window
+- Icon: `Box` (lucide-react) to distinguish from `Package` on ORDERS SPLIT
+- Why: warehouse load is driven by containers, not orders. A single
+  4-container split DO doubles the load of a single 2-container split DO
+  even though both count as one "Orders Split". This card surfaces that.
+
+**CONTAINERS IN TRANSIT** — containers with `actualDelivery == null`.
+
+- Value: rate (e.g., `70.0%`)
+- Subtitle: `X of Y containers`
+- Icon: `Clock` (same as DO-level IN TRANSIT — same metric, different unit)
+- Why: DO-level "in transit" only counts whole DOs with no delivery
+  scans. Even DOs that are settled / partially-delivered can have some
+  containers still without a UPS scan. Container-level rate is the true
+  "what's pending UPS scan" picture.
+
+**Computation (new `useMemo`):**
+
+```javascript
+const containerMetrics = useMemo(() => {
+  let totalContainers = 0;
+  let splitContainers = 0;
+  let inTransitContainers = 0;
+  for (const o of pageData) {
+    const containers = o.containers || [];
+    totalContainers += containers.length;
+    // Mirror splitData.split's settled-basis SPLIT definition for parity.
+    // Mock rows have no split_status so the gate falls through to isSplit
+    // alone (matching mock behaviour); live rows enforce both.
+    const isSettled = o.split_status !== 'PENDING' && o.split_status !== 'UNKNOWN';
+    if (isSettled && o.isSplit) splitContainers += containers.length;
+    for (const c of containers) {
+      if (c.actualDelivery == null) inTransitContainers += 1;
+    }
+  }
+  return {
+    totalContainers,
+    splitContainers,
+    inTransitContainers,
+    inTransitRate: totalContainers > 0 ? inTransitContainers / totalContainers : 0,
+  };
+}, [pageData]);
+```
+
+**Container-count source (verified by user via Console, 5/5–5/12 window):**
+
+Sum of `containers.length` across pageData DOs ≈ total unique
+container_ids in window. PR5a's billing fan-out via `group by 1..22`
+fans rows out per billing date; PR7b's `serverRowsToShipments` deduplicates
+container rows back by `container_id` inside each DO's `containers[]`
+before they reach pageData. So summing `.length` across all DOs gives a
+clean per-window unique container count. User verified: 8,153 (= total
+distinct container_ids by direct COUNT). If a future dataset shows
+duplication at this level, deduplicate by `container_id` in the count.
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (5/5–5/12, live source):
+  - 6 KPI cards render in the order above.
+  - CHARGEBACKS / KEY ACCT IMPACT cards: gone (no live or mock branch).
+  - CONTAINERS SPLIT: e.g. `2,157` · `of 8,153 containers`.
+  - CONTAINERS IN TRANSIT: e.g. `70.0%` · `5,704 of 8,153 containers`.
+  - AVG GAP: unchanged from PR8 (e.g. `2.3d` · `Worst: 7d`).
+- Mock fallback: same 6 cards with mock-derived container counts; no
+  break since `containerMetrics` reads `o.isSplit` (present in both
+  modes) and `c.actualDelivery` (present in both modes).
+- 0-orders edge case: all four `containerMetrics` fields return `0`;
+  `inTransitRate` short-circuits via `totalContainers > 0` guard.
+
+**Trust hierarchy:**
+
+- Server: `container_id`, `delivered_date`, `split_status` (PR5a + PR4)
+- Adapter: `containers[]` per DO, deduped by `container_id` (PR7b)
+- `containerMetrics` `useMemo`: per-window aggregations (PR8 follow-up)
+- UI: KPI cards (existing pattern, no `KPI` component changes)
+
+**No changes to:** `server.js`, `useSplitShipments` hook, mock generator,
+PR7a / PR7b adapter logic, other sections (Channel, Container Tracking,
+Customer, Root Causes), or master plan 001.
+
+**Depends on:** PR7a (`containers[]` array surface) + PR7b (container
+dedup by container_id).
+**Blocks:** Nothing further. PR7c (Bottom Split Delivery Alert banner)
+remains an independent candidate.
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

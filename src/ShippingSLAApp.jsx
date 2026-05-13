@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ComposedChart, Area, Scatter, Legend } from 'recharts';
-import { Upload, AlertTriangle, TrendingDown, TrendingUp, Package, Truck, MapPin, Clock, Database, Filter, Download, Activity, ChevronRight, ChevronLeft, ChevronDown, Brain, Split, DollarSign, Users, Layers, Zap, Mail, Phone, CheckCircle2, XCircle, Lock, Settings, Shield, UserCog, Eye, LogOut, Save, RotateCcw, Anchor, Warehouse, HardHat, Waves, Cpu, Radar, PiggyBank, MessageCircle, Send, X, Menu, Sun, Moon, Search, FileDown, Calendar, FileText, Trash2, Plus, RefreshCw, UserPlus, Star } from 'lucide-react';
+import { Upload, AlertTriangle, TrendingDown, TrendingUp, Package, Truck, MapPin, Clock, Database, Filter, Download, Activity, ChevronRight, ChevronLeft, ChevronDown, Brain, Split, DollarSign, Users, Layers, Zap, Mail, Phone, CheckCircle2, XCircle, Lock, Settings, Shield, UserCog, Eye, LogOut, Save, RotateCcw, Anchor, Warehouse, HardHat, Waves, Cpu, Radar, PiggyBank, MessageCircle, Send, X, Menu, Sun, Moon, Search, FileDown, Calendar, FileText, Trash2, Plus, RefreshCw, UserPlus, Star, Box } from 'lucide-react';
 
 // ============================================================
 // MOCK DATA
@@ -1752,6 +1752,43 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     };
   }, [pageData, isLive]);
 
+  // PR8: Container-level metrics. KDC operations sees containers as the
+  // work unit alongside DOs as the business unit — both deserve KPI cards.
+  // pageData carries already-deduplicated containers per DO (PR7b's
+  // distinctContainers in live mode; mock generates one entry per carton),
+  // so summing containers.length across DOs gives total unique containers
+  // in this window. Verified via browser console against PR5a's
+  // COUNT(DISTINCT container_id) — 8,153 in the 5/5-5/12 sample.
+  //
+  // "Split containers" reuses splitData.split's settled+isSplit definition
+  // (split_status === 'SPLIT' in live, isSplit alone in mock since mock
+  // rows have no split_status field).
+  //
+  // "In transit" is more granular than the DO-level pending: even a
+  // settled DO can have individual containers still without a UPS scan,
+  // so we count by container.actualDelivery == null (both mock and the
+  // live pageData normalization populate this field uniformly).
+  const containerMetrics = useMemo(() => {
+    let totalContainers = 0;
+    let splitContainers = 0;
+    let inTransitContainers = 0;
+    for (const o of pageData) {
+      const containers = o.containers || [];
+      totalContainers += containers.length;
+      const isSettled = o.split_status !== 'PENDING' && o.split_status !== 'UNKNOWN';
+      if (isSettled && o.isSplit) splitContainers += containers.length;
+      for (const c of containers) {
+        if (c.actualDelivery == null) inTransitContainers += 1;
+      }
+    }
+    return {
+      totalContainers,
+      splitContainers,
+      inTransitContainers,
+      inTransitRate: totalContainers > 0 ? inTransitContainers / totalContainers : 0,
+    };
+  }, [pageData]);
+
   // PR6: YTD customer ranking — top 10 by split count across the full
   // year-to-date window. Independent of the page's main dateRange (so
   // short windows don't show "100% (1/1)" noise). Sort by absolute split
@@ -1822,31 +1859,30 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
         );
       })()}
 
-      {/* PR4b2 KPI cards: live data has 3 settled-basis metrics + 3 mock-only N/A in live mode. */}
+      {/* PR8: 6 KPI cards arranged so the DO unit pairs with its container counterpart.
+          Row 1: SPLIT RATE | ORDERS SPLIT (DO) | CONTAINERS SPLIT (container)
+          Row 2: IN TRANSIT (DO) | CONTAINERS IN TRANSIT (container) | AVG GAP
+          Removed CHARGEBACKS and KEY ACCT IMPACT — both were mock-only N/A in live
+          mode (no SLA penalty data source, no customer tier classification). Backlog
+          allows reinstating either via a mock-only N/A pattern if a data source lands. */}
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-4">
         <KPI label="Split Rate" value={fmtPct(splitData.splitRate)} delta={`${splitData.split.length} of ${splitData.settledCount} settled`} deltaType="bad" icon={Split}/>
         <KPI label="Orders Split" value={splitData.split.length} delta={`of ${splitData.settledCount} settled`} deltaType="bad" icon={Package}/>
+        {/* PR8: CONTAINERS SPLIT — operations-unit complement to ORDERS SPLIT.
+            KDC's warehouse cares how many cartons are affected, not just orders. */}
+        <KPI label="Containers Split" value={fmtNum(containerMetrics.splitContainers)} delta={`of ${fmtNum(containerMetrics.totalContainers)} containers`} deltaType="bad" icon={Box}/>
         <KPI label="In Transit" value={fmtPct(splitData.pendingRate)} delta={`${splitData.pendingCount} of ${splitData.totalCount} pending`} icon={Clock}/>
-        {/* PR8: Avg Gap is now live-computed too (PR7a's splitGapDays per DO
-            flows through both mock and live paths). Subtitle uses Worst (max)
-            instead of "Between partials" so outliers surface even when the
-            average looks fine. Chargebacks + Key Acct Impact remain N/A in
-            live mode — no SLA penalty data source, no customer tier classification. */}
+        {/* PR8: CONTAINERS IN TRANSIT — DO-level pending masks the fact that even
+            settled DOs can have individual containers still without a UPS scan.
+            Container-level surfaces the true UPS-scan-pending picture. */}
+        <KPI label="Containers In Transit" value={fmtPct(containerMetrics.inTransitRate)} delta={`${fmtNum(containerMetrics.inTransitContainers)} of ${fmtNum(containerMetrics.totalContainers)} containers`} icon={Clock}/>
+        {/* PR8: AVG GAP activated. PR7a's splitGapDays per DO flows through both
+            mock and live paths. Subtitle uses Worst (max) instead of "Between
+            partials" so outliers surface even when the average looks fine. */}
         {splitData.gapItemsCount > 0 ? (
           <KPI label="Avg Gap" value={`${splitData.avgGap.toFixed(1)}d`} delta={`Worst: ${splitData.worstGap}d`} deltaType="bad" icon={Clock}/>
         ) : (
           <KPI label="Avg Gap" value="—" delta="No settled splits in window" icon={Clock}/>
-        )}
-        {isLive ? (
-          <>
-            <KPI label="Chargebacks" value="N/A" delta="Not available in live data" icon={DollarSign}/>
-            <KPI label="Key Acct Impact" value="N/A" delta="Not available in live data" icon={Users}/>
-          </>
-        ) : (
-          <>
-            <KPI label="Chargebacks" value={`$${fmtNum(splitData.splitChargebacks.toFixed(0))}`} delta="Split penalty $" deltaType="bad" icon={DollarSign}/>
-            <KPI label="Key Acct Impact" value={splitData.customerList.filter(c => c.tier === 'Key').reduce((s,c) => s+c.split, 0)} delta="Split orders to Key" deltaType="bad" icon={Users}/>
-          </>
         )}
       </div>
 
