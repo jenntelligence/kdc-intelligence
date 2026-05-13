@@ -644,18 +644,39 @@ const SearchableDropdown = ({ options, value, onChange, placeholder, getLabel })
     }
   };
 
+  // PR17a-fix: tokens use the dashboard's CSS variables so the combobox
+  // tracks the active theme. Mapping:
+  //   trigger / search bg          → var(--bg-input)         (input fields)
+  //   panel bg                     → var(--bg-panel-alt)     (dropdown surface)
+  //   border / divider             → var(--border)
+  //   text                         → var(--text-primary)
+  //   placeholder / empty          → var(--text-muted)
+  //   selected option              → var(--accent-blue)      (#1ABC9C in both modes)
+  //   highlighted option bg        → var(--border)           (subtle elevation in both modes)
   return (
     <div ref={rootRef} className="relative">
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        className="bg-[#232c37] border border-[#2d3744] text-[12px] font-mono px-2 py-1 rounded text-[#e8ecef] outline-none cursor-pointer min-w-[120px] flex items-center justify-between gap-2 focus:border-[#1ABC9C]"
+        className="text-[12px] font-mono px-2 py-1 rounded outline-none cursor-pointer min-w-[120px] flex items-center justify-between gap-2 focus:border-[#1ABC9C]"
+        style={{
+          background: 'var(--bg-input)',
+          border: '1px solid var(--border)',
+          color: 'var(--text-primary)',
+        }}
       >
         <span className="truncate">{value ? label(value) : (placeholder || 'Select…')}</span>
         <ChevronDown size={12} className="opacity-60 flex-shrink-0"/>
       </button>
       {open && (
-        <div className="absolute top-full left-0 mt-1 min-w-full w-max max-w-[260px] bg-[#232c37] border border-[#2d3744] rounded shadow-lg z-50 flex flex-col" style={{ maxHeight: 300 }}>
+        <div
+          className="absolute top-full left-0 mt-1 min-w-full w-max max-w-[260px] rounded shadow-lg z-50 flex flex-col"
+          style={{
+            maxHeight: 300,
+            background: 'var(--bg-panel-alt)',
+            border: '1px solid var(--border)',
+          }}
+        >
           <input
             type="text"
             value={search}
@@ -663,11 +684,16 @@ const SearchableDropdown = ({ options, value, onChange, placeholder, getLabel })
             onKeyDown={onKey}
             placeholder="Type to search…"
             autoFocus
-            className="bg-transparent border-b border-[#2d3744] text-[12px] font-mono px-2 py-1.5 text-[#e8ecef] outline-none placeholder:text-[#5d6b7a]"
+            className="text-[12px] font-mono px-2 py-1.5 outline-none placeholder:text-[var(--text-muted)]"
+            style={{
+              background: 'var(--bg-input)',
+              borderBottom: '1px solid var(--border)',
+              color: 'var(--text-primary)',
+            }}
           />
           <div className="overflow-y-auto flex-1">
             {filtered.length === 0 ? (
-              <div className="text-[11px] font-mono text-[#5d6b7a] px-2 py-2">No matches</div>
+              <div className="text-[11px] font-mono px-2 py-2" style={{ color: 'var(--text-muted)' }}>No matches</div>
             ) : filtered.map((opt, idx) => {
               const isSelected = opt === value;
               const isHighlighted = idx === highlighted;
@@ -678,8 +704,8 @@ const SearchableDropdown = ({ options, value, onChange, placeholder, getLabel })
                   onMouseEnter={() => setHighlighted(idx)}
                   className="text-[12px] font-mono px-2 py-1 cursor-pointer"
                   style={{
-                    background: isHighlighted ? '#2d3744' : 'transparent',
-                    color: isSelected ? '#1ABC9C' : '#e8ecef',
+                    background: isHighlighted ? 'var(--border)' : 'transparent',
+                    color: isSelected ? 'var(--accent-blue)' : 'var(--text-primary)',
                   }}
                 >
                   {label(opt)}

@@ -3406,6 +3406,104 @@ carrier / SKU).
 
 ---
 
+### PR17a-fix — `SearchableDropdown` light-mode hotfix (completed 2026-05-13)
+
+User verified PR17a in the browser and flagged a regression on the
+light-theme path:
+
+> "all regions 만 light 모드에서 dark mode 색깔이 보여"
+
+PR17a hardcoded the dark-theme hex values (`#232c37`, `#2d3744`,
+`#e8ecef`, `#1ABC9C`, `#5d6b7a`) directly into the component, so the
+combobox stayed dark even when the rest of the dashboard switched to
+light. Every other control on the page uses the dashboard's CSS
+variables (`var(--bg-panel-alt)`, `var(--border)`, etc.) which are
+populated from `THEME` at the `:root` level and update automatically
+when `theme === 'light'`.
+
+**Root cause:**
+
+The component was modeled after PR15's `<select>` (forecast horizon)
+which uses the same hardcoded hex strings. That `<select>` survives
+in light mode by accident — the browser's native form-control styling
+takes over and most of the hex classes get ignored. A custom
+div-based combobox doesn't get that fallback; every hex string lands
+verbatim, so the entire control stays dark.
+
+**Token mapping (dark hex → CSS var):**
+
+| Before (PR17a)      | After (PR17a-fix)        | Surface |
+|---------------------|--------------------------|---------|
+| `bg-[#232c37]`      | `var(--bg-input)`        | trigger + search input |
+| `bg-[#232c37]`      | `var(--bg-panel-alt)`    | dropdown panel |
+| `border-[#2d3744]`  | `var(--border)`          | trigger border, panel border, search divider |
+| `text-[#e8ecef]`    | `var(--text-primary)`    | trigger label, search text, option text |
+| `text-[#5d6b7a]`    | `var(--text-muted)`      | placeholder, empty state |
+| `#1ABC9C` (selected)| `var(--accent-blue)`     | selected option text (same hex in both themes) |
+| `#2d3744` (hover)   | `var(--border)`          | highlighted option background |
+
+`--accent-blue` resolves to `#1ABC9C` in both themes (per the THEME
+constant), so the selected-row teal color is identical pre/post-fix.
+For the highlighted-row background, using `var(--border)` gives a
+subtle elevation in both modes (slightly lighter than the panel on
+dark, slightly darker than the panel on light) without inventing a
+new `--bg-hover` token.
+
+**Placeholder color:**
+
+`placeholder:text-[var(--text-muted)]` — Tailwind's arbitrary-value
+syntax with the CSS variable inside `[...]`. Inline-style can't
+target `::placeholder`, so the Tailwind path is the simplest way to
+keep the placeholder theme-aware.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`: SearchableDropdown's trigger, panel,
+  search input, options, and empty-state markup all switched to
+  CSS-variable tokens. No behavior change — same keyboard nav,
+  outside-click, search filter, selection semantics as PR17a.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this PR17a-fix
+  section.
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke:
+  - Dark mode: combobox indistinguishable from PR17a (same hex values
+    surface from the dark-theme `THEME`).
+  - Light mode: trigger reads `#FAFAF8` background with `#1e293b`
+    text, panel reads `#F5F2EC` with `#DDD9D1` borders, highlighted
+    rows show the light-theme border tone, selected text still teal.
+  - Theme toggle (Sun/Moon) flips the combobox in step with every
+    other control on the page.
+
+**PR15 backlog note:**
+
+The PR15 forecast-horizon `<select>` (and related native selects)
+still carry the same hardcoded dark hex strings. They survive light
+mode only because of native form-control styling — the hex on
+borders and text technically apply but the OS-level chrome
+overrides much of it visually. For visual consistency a follow-up
+PR could thread CSS variables through those classes too. Out of
+scope here since the user's report was specifically about the new
+combobox.
+
+**Trust hierarchy:**
+
+- Dashboard `:root` CSS variables driven by `THEME` (existing)
+- `SearchableDropdown` consumes them (PR17a-fix)
+
+**No changes to:** `server.js`, hook, adapter, mock generator,
+`filteredPageData`, `splitData`, `containerMetrics`, KPI cards,
+banners, other sections, other-page selects, cause dropdown,
+pagination state, PR14 expand-all, PR17a behavior (keyboard /
+outside-click / search filter).
+
+**Depends on:** PR17a (component shape and behavior).
+**Blocks:** Nothing.
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type
