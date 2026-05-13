@@ -2076,9 +2076,20 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
                               container_status. KDC SCALE container_status = 900
                               means "manifested out from KDC", not "UPS delivered
                               to customer" — pre-PR7b this misleadingly rendered
-                              "DELIVERED" for packages still in UPS transit. */}
+                              "DELIVERED" for packages still in UPS transit.
+                              PR12: 3-state — MISSING TRACKING surfaces containers
+                              that never reached UPS handoff. Without this, those
+                              packages rendered as IN TRANSIT (misleading: UPS
+                              never started processing). c.trackingNumber === '—'
+                              is the canonical missing signal (live normalization
+                              fills '—' when tracking_num is null; mock always
+                              has a real tracking number so it never trips). */}
                           <td className="py-2 pr-3">
-                            {c.actualDelivery ? (
+                            {c.trackingNumber === '—' ? (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono font-semibold" style={{ background: '#f5a62320', color: '#f5a623' }}>
+                                MISSING TRACKING
+                              </span>
+                            ) : c.actualDelivery ? (
                               <span className="text-[10px] px-1.5 py-0.5 rounded-full font-mono font-semibold" style={{ background: '#2ECC7120', color: '#2ECC71' }}>
                                 DELIVERED
                               </span>
@@ -2117,11 +2128,17 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
                       );
                     })}
 
-                    {/* Alert banner for expanded order */}
+                    {/* Alert banner for expanded order.
+                        PR12: also trigger + describe when one or more containers
+                        in this DO have no UPS tracking number. Missing-tracking
+                        text is amber to match the MISSING TRACKING badge above
+                        and the DATA INTEGRITY ALERT banner at page top — visual
+                        chain: page banner → row alert → cell badge. */}
                     {isExpanded && o.containers && (() => {
                       const lateContainers = o.containers.filter(c => c.isLate || c.deliveredDifferentDay);
                       const deliveryDates = [...new Set(o.containers.filter(c => c.actualDelivery).map(c => c.actualDelivery.toDateString()))];
-                      if (lateContainers.length === 0 && deliveryDates.length <= 1) return null;
+                      const missingTrackingCount = o.containers.filter(c => c.trackingNumber === '—').length;
+                      if (lateContainers.length === 0 && deliveryDates.length <= 1 && missingTrackingCount === 0) return null;
                       return (
                         <tr>
                           <td colSpan={8} className="py-2 px-4">
@@ -2131,6 +2148,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
                                 <span className="font-semibold text-[#E74C6F]">Split Delivery Alert:</span>{' '}
                                 {deliveryDates.length > 1 && `Containers delivered across ${deliveryDates.length} different days. `}
                                 {lateContainers.length > 0 && `${lateContainers.length} container(s) delivered late or on a different day than the first carton. `}
+                                {missingTrackingCount > 0 && <><span className="font-mono font-semibold text-[#f5a623]">{missingTrackingCount}</span><span className="text-[#f5a623]"> container(s) missing UPS tracking number. </span></>}
                                 Customer requirement: all cartons same day.{o.chargeback != null && <> Chargeback: <span className="font-mono font-semibold">${fmtNum(o.chargeback)}</span></>}
                               </div>
                             </div>

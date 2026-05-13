@@ -2496,6 +2496,138 @@ on the live data path.
 
 ---
 
+### PR12 — Container expand: Missing tracking 표시 (Alert + Badge) (completed 2026-05-13)
+
+User reviewed the PR11 dashboard's container expand view and
+identified a misleading badge state:
+
+> "tracking number 가 missing 이라면 in transit 말고 missing tracking
+>  이라고 확실하게 명시해줬으면 좋겠어"
+
+User separately verified that PR7b's "across N different days" alert
+text was already dynamic (not hardcoded). PR12 scope is strictly the
+missing-tracking surfacing — both as a per-container badge and as an
+extra fragment on the existing Split Delivery Alert.
+
+**Why this PR is needed:**
+
+PR7b's badge was 2-state: `c.actualDelivery` truthy → `DELIVERED`,
+otherwise → `IN TRANSIT`. After PR9 the page started showing
+MISSING_TRACKING DOs, and on expand each container with
+`tracking_num = null` rendered as `IN TRANSIT` — operationally wrong.
+"In transit" implies UPS is processing the package; "missing tracking"
+means UPS never started (data integrity / fresh SO / handoff gap).
+The two states need distinct visual treatment so warehouse staff don't
+chase the UPS for a package UPS has never seen.
+
+**Two changes:**
+
+1. **Container row badge — 3-state:**
+
+   | State            | Trigger                          | Color               |
+   |------------------|----------------------------------|---------------------|
+   | MISSING TRACKING | `c.trackingNumber === '—'`       | amber `#f5a623`     |
+   | DELIVERED        | `c.actualDelivery` truthy        | green `#2ECC71` (existing) |
+   | IN TRANSIT       | otherwise                        | orange `#F39C12` (existing) |
+
+   Order matters: MISSING TRACKING is checked **first**, so a container
+   with no tracking and no delivery scan is correctly labeled "missing"
+   rather than "in transit" by virtue of the actualDelivery check
+   happening to be null.
+
+2. **Split Delivery Alert — missing tracking fragment:**
+
+   Existing trigger (PR7b): late containers OR multi-day delivery.
+   PR12 adds a third trigger: any container with `trackingNumber === '—'`.
+
+   Existing message fragments (when triggered):
+   - `"Containers delivered across N different days."`
+   - `"M container(s) delivered late or on a different day than the first carton."`
+
+   PR12 adds (amber-colored to mirror the badge):
+   - `"K container(s) missing UPS tracking number."`
+
+   All three fragments are independent and concatenate naturally. The
+   "Customer requirement: all cartons same day." trailer is unchanged.
+
+**Why `c.trackingNumber === '—'` is the unified detector:**
+
+| Source | Field shape                                   |
+|--------|------------------------------------------------|
+| Live (pageData normalization, line 1655) | `trackingNumber: c.tracking_num \|\| '—'`  |
+| Mock (generator, line 238)               | `trackingNumber: trackingNum` (always real) |
+
+`'—'` only appears when `tracking_num` was null on the wire (live).
+Mock never produces it because the mock generator always synthesizes
+a `1Z...` string. So the check is mode-agnostic without needing a
+mode flag, and resilient to the raw `tracking_num` field's
+JSON null/undefined ambiguity.
+
+**Visual chain (amber):**
+
+The amber color is shared deliberately across three layers, so the
+operations team's eye can trace the alert vertically:
+
+- Page top — `DATA INTEGRITY ALERT` banner (PR10) — "X DOs missing tracking"
+- DO row — `Split Delivery Alert` extension (PR12) — "K container(s) missing UPS tracking number"
+- Container cell — `MISSING TRACKING` badge (PR12) — single container
+
+Critical red (`#E74C6F`) remains reserved for split-day issues (the
+customer-facing compliance violation) and chargeback figures. Amber is
+"investigate" / "internal data gap" — semantically distinct from "we
+just broke the customer contract."
+
+**Edge cases:**
+
+- 1 day delivered + 0 missing → no alert (unchanged from PR7b).
+- 2+ days delivered + 0 missing → existing message only (unchanged).
+- 1 day delivered + 1+ missing → alert shows missing fragment alone.
+- 2+ days delivered + 1+ missing → all fragments concatenated.
+- MISSING_TRACKING DO with no delivered containers at all → alert
+  triggers on missing alone; status column shows `MISSING TRACKING`
+  badges instead of `IN TRANSIT`.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`:
+  - Container status `<td>` — 3-state badge (MISSING TRACKING first)
+  - Expanded-row alert IIFE — `missingTrackingCount` + amber fragment +
+    extended trigger condition
+- `docs/exec-plans/active/002-split-shipments-live.md` — this PR12 section
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (live, recent window):
+  - MISSING_TRACKING DO expanded: containers show amber `MISSING TRACKING`
+    badge, alert reads `"K container(s) missing UPS tracking number."`.
+  - SPLIT DO with all tracking present: badges unchanged
+    (DELIVERED / IN TRANSIT), alert unchanged.
+  - SPLIT DO with both split-days AND a missing tracking: alert shows
+    both fragments back-to-back.
+- Mock fallback: mock containers always have tracking numbers, so the
+  MISSING TRACKING badge never appears in mock mode (correct — mock
+  doesn't simulate this failure mode).
+
+**Trust hierarchy:**
+
+- Server: `tracking_num` per container (PR5a)
+- Adapter: `containers[]` per DO with `tracking_num` preserved (PR7a/PR7b)
+- Page normalization: `trackingNumber: tracking_num || '—'` (existing)
+- UI: 3-state badge + alert fragment (NEW)
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter, mock
+generator, `containerMetrics.useMemo`, `splitData.useMemo`, KPI cards,
+DATA INTEGRITY banner, Customer Hard Requirement banner, other sections.
+
+**Depends on:** PR7b (container expand pattern) + PR10 (amber
+DATA INTEGRITY banner — shared color convention).
+**Blocks:** Nothing further. PR7c (Bottom Split Delivery Alert banner)
+remains an independent candidate; PR12's `missingTrackingCount`
+computation pattern is reusable there.
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type
