@@ -1609,6 +1609,12 @@ function useSplitShipments(dateRange = '7d', customRange = {}) {
 // ============================================================
 const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], onMetaChange }) => {
   const [expandedOrder, setExpandedOrder] = useState(null);
+  // PR14: page-level expand-all toggle for Container Tracking. The clickable
+  // subtitle on that SectionCard flips this; rendering combines it with the
+  // per-row `expandedOrder` so individual-row inspection still works when
+  // allExpanded is off. When allExpanded is on, every visible row is
+  // expanded — per-row clicks become no-ops until the user collapses all.
+  const [allExpanded, setAllExpanded] = useState(false);
 
   // PR4b2: Live data via hook; mock-fallback preserves the page when API is unreachable.
   // Trust hierarchy: server (master query) → adapter (PR4b1) → this page.
@@ -2016,7 +2022,29 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
         )}
       </SectionCard>
 
-      <SectionCard title="Container Tracking — Split Orders" subtitle={`${splitData.split.length} split orders · click to expand container details`} tag="CONTAINER TREE" className="mb-4">
+      <SectionCard
+        title="Container Tracking — Split Orders"
+        subtitle={
+          <>
+            {splitData.split.length} split orders ·{' '}
+            {/* PR14: clickable subtitle drives the page-level expand-all toggle.
+                Rendered inline as a button so it inherits the parent's font /
+                color but flips text + signals clickability with underline +
+                pointer cursor. Background / border / padding stripped to
+                neutralize the browser's default <button> chrome. */}
+            <button
+              type="button"
+              onClick={() => setAllExpanded(prev => !prev)}
+              className="underline hover:no-underline cursor-pointer font-mono"
+              style={{ color: 'inherit', background: 'transparent', border: 'none', padding: 0, font: 'inherit' }}
+            >
+              click to {allExpanded ? 'collapse' : 'expand'} all container details
+            </button>
+          </>
+        }
+        tag="CONTAINER TREE"
+        className="mb-4"
+      >
         <div className="overflow-x-auto" style={{ maxHeight: 500 }}>
           <table className="w-full text-[12px]">
             <thead>
@@ -2033,7 +2061,10 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
             </thead>
             <tbody>
               {splitData.split.slice(0, 30).map(o => {
-                const isExpanded = expandedOrder === o.id;
+                // PR14: page-level allExpanded overrides per-row state.
+                // Individual clicks still mutate expandedOrder but their
+                // effect is masked while allExpanded is on.
+                const isExpanded = allExpanded || expandedOrder === o.id;
                 const hasAlert = o.containers?.some(c => c.isLate || c.deliveredDifferentDay);
                 return (
                   <React.Fragment key={o.id}>

@@ -2759,6 +2759,136 @@ customer side.
 
 ---
 
+### PR14 — Container Tracking: expand-all toggle (completed 2026-05-13)
+
+User reviewed the PR13 dashboard and identified the second follow-up
+item:
+
+> "click to expand container details 가 실제로 작동을 하지않아"
+>
+> "하이라이트한 부분을 click 해서 row들이 전체 expand 되는 기능"
+
+PR7b's subtitle `"X split orders · click to expand container details"`
+was a guidance string — clicking it did nothing. The hint described
+the per-row click affordance, not the subtitle itself. The user wants
+the subtitle text itself to be the click target, expanding every
+visible SPLIT row in one action.
+
+**Why this matters operationally:**
+
+- Container Tracking renders the top 30 SPLIT DOs from
+  `splitData.split.slice(0, 30)`. Inspecting every container across
+  those 30 DOs requires 30 individual row clicks today — friction
+  every time operations wants a full sweep.
+- The expanded view is the natural pre-export visualization (PR17
+  candidate): with all rows open, every container row + alert is
+  on-screen for copy/screenshot/Excel review.
+- The per-row click pattern stays the same for fine-grained
+  inspection.
+
+**Design — Single toggle:**
+
+```
+Initial:    "click to expand all container details"  (everything collapsed)
+1 click  →  every visible row expanded, subtitle flips:
+            "click to collapse all container details"
+2 click  →  back to collapsed, subtitle flips back.
+```
+
+No separate button — the existing subtitle text itself becomes the
+button. Same visual real-estate, no new control to learn.
+
+**State management:**
+
+```javascript
+const [expandedOrder, setExpandedOrder] = useState(null);   // PR7b, single-row
+const [allExpanded, setAllExpanded] = useState(false);      // PR14, page-level
+
+// Row level:
+const isExpanded = allExpanded || expandedOrder === o.id;
+```
+
+`expandedOrder` is a **single value** (not a Set) — the pre-PR14
+UX only ever expanded one row at a time. `allExpanded` is the
+page-level override. The union keeps the per-row click affordance
+functional whenever `allExpanded` is `false`, and masks it (no
+visible effect) whenever `allExpanded` is `true`.
+
+**Behavior matrix:**
+
+| `allExpanded` | `expandedOrder` | Visible state | Click row |
+|---------------|-----------------|---------------|-----------|
+| false         | null            | all collapsed | expand that row |
+| false         | `o.id`          | only that row | collapse it |
+| true          | (anything)      | all expanded  | no visible effect (state still mutates) |
+
+When `allExpanded` is on and a user clicks an individual row, the
+`setExpandedOrder` call still runs but the visible `isExpanded` stays
+`true` because `allExpanded || ...` short-circuits. To get individual
+control back, the user clicks the subtitle to flip to collapsed. This
+matches option (a) from the spec — the simpler interaction model.
+
+**UI — subtitle becomes JSX:**
+
+`SectionCard` already passes `subtitle` through verbatim (`{subtitle}`),
+so swapping the string for a JSX fragment with a `<button>` works
+without touching the shared component. The button neutralizes the
+browser's default `<button>` chrome (background / border / padding /
+font) so it visually reads as inline text, then signals interactivity
+through `underline + hover:no-underline + cursor: pointer`. The text
+content flips between `"click to expand all container details"` and
+`"click to collapse all container details"` from the same render path.
+
+**Scope: top-30 visible cohort:**
+
+`splitData.split.slice(0, 30)` is the rendered set, so "expand all"
+means "expand the 30 visible rows," not "expand all 246 SPLIT DOs in
+the window." This matches what operations sees on screen and avoids
+any performance question on a one-click open of a much larger set.
+If the cap on rendered rows changes, the toggle automatically
+follows.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`:
+  - New `allExpanded` state alongside `expandedOrder` in
+    `SplitShipmentPage`.
+  - `isExpanded` row-level computation now `allExpanded || ...`.
+  - SectionCard `subtitle` swapped from string to JSX with inline
+    button.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this PR14 section.
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke:
+  - Page loads with `"click to expand all container details"` visible
+    in the Container Tracking subtitle.
+  - Clicking it expands every visible SPLIT row; subtitle text flips
+    to `"click to collapse all container details"`.
+  - Clicking it again collapses everything; subtitle returns to
+    "expand" wording.
+  - Per-row click still works when `allExpanded` is `false` (PR7b
+    pattern preserved).
+- Mock fallback: same toggle behavior on mock-generated SPLITs.
+
+**Trust hierarchy:**
+
+- Existing: per-row `expandedOrder` (PR7b)
+- New: page-level `allExpanded` (PR14)
+- Render: `isExpanded = allExpanded || expandedOrder === o.id`
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter,
+mock generator, KPI cards, banners (DATA INTEGRITY, Customer Hard
+Requirement), other sections (Channel, Customer ranking, Root Causes),
+per-row click handler.
+
+**Depends on:** PR7b (per-row expand pattern).
+**Blocks:** PR17 (Excel export candidate) — expand-all state is the
+natural "everything visible" mode for an export action.
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type
