@@ -1114,11 +1114,10 @@ with base as (
         d.delivered_date_cnt,
         d.has_null_tracking,
         d.has_null_delivered_date,
-        case when d.tracking_cnt <= 1 then 'SINGLE_SHIPMENT'
-             when d.tracking_cnt > 1 and d.delivered_date_cnt >= 1 and (d.delivered_date_cnt > 1 or d.has_null_delivered_date = 1 or d.has_null_tracking = 1) then 'SPLIT'
-             when d.tracking_cnt > 1 and d.has_null_delivered_date = 0 and d.delivered_date_cnt = 1 then 'NOT_SPLIT'
-             when d.tracking_cnt > 1 and d.delivered_date_cnt = 0 then 'PENDING'
-        else 'UNKNOWN'
+        case when d.has_null_tracking = 1 then 'MISSING_TRACKING'
+             when d.delivered_date_cnt = 0 then 'PENDING'
+             when d.delivered_date_cnt > 1 or d.has_null_delivered_date = 1 then 'SPLIT'
+        else 'NOT_SPLIT'
         end as split_status
     from final b
     left join do_level d on b.do_num = d.do_num

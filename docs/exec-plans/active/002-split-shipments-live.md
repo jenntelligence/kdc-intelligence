@@ -501,11 +501,10 @@ with base as (
         d.delivered_date_cnt,
         d.has_null_tracking,
         d.has_null_delivered_date,
-        case when d.tracking_cnt <= 1 then 'SINGLE_SHIPMENT'
-             when d.tracking_cnt > 1 and d.delivered_date_cnt >= 1 and (d.delivered_date_cnt > 1 or d.has_null_delivered_date = 1 or d.has_null_tracking = 1) then 'SPLIT'
-             when d.tracking_cnt > 1 and d.has_null_delivered_date = 0 and d.delivered_date_cnt = 1 then 'NOT_SPLIT'
-             when d.tracking_cnt > 1 and d.delivered_date_cnt = 0 then 'PENDING'
-        else 'UNKNOWN'
+        case when d.has_null_tracking = 1 then 'MISSING_TRACKING'
+             when d.delivered_date_cnt = 0 then 'PENDING'
+             when d.delivered_date_cnt > 1 or d.has_null_delivered_date = 1 then 'SPLIT'
+        else 'NOT_SPLIT'
         end as split_status
     from final b
     left join do_level d on b.do_num = d.do_num
@@ -2017,6 +2016,174 @@ Customer, Root Causes), or master plan 001.
 dedup by container_id).
 **Blocks:** Nothing further. PR7c (Bottom Split Delivery Alert banner)
 remains an independent candidate.
+
+---
+
+### PR9 — Master query 4-category `split_status` + MISSING_TRACKING (completed 2026-05-13)
+
+User reviewed the PR8 dashboard and verified via direct Snowflake
+Console queries that the `settled 743` figure was misleading. The
+master query's prior `SINGLE_SHIPMENT` branch only checked
+`tracking_cnt <= 1` — it did **not** validate that the tracking had
+actually been scanned by UPS — so DOs with one tracking and no
+delivery scan were being classified as settled (`SINGLE_SHIPMENT`)
+instead of in-transit (`PENDING`).
+
+> 운영적 의미: "1 tracking 있고 아직 UPS scan 안 됨" 도 settled 로 분류
+> → 진짜 운영 fact 와 mismatch
+
+User decisions:
+
+1. **Drop `SINGLE_SHIPMENT`.** The "1 tracking + delivered" case and
+   the "multi-tracking + all delivered same day" case are operationally
+   identical (an order that shipped and delivered cleanly), so collapse
+   both into `NOT_SPLIT`. The 5-category model becomes a 4-category
+   model.
+
+2. **Add `MISSING_TRACKING`.** A DO with `has_null_tracking = 1` (one
+   or more containers without a `tracking_num`) is neither a split nor
+   a clean shipment — it's a data-integrity or UPS-handoff gap that
+   operations needs to **investigate separately**. Classifying it as
+   SPLIT (current behavior) inflated the split rate with non-split
+   facts.
+
+**New `classified` CTE logic:**
+
+```sql
+case when d.has_null_tracking = 1 then 'MISSING_TRACKING'
+     when d.delivered_date_cnt = 0 then 'PENDING'
+     when d.delivered_date_cnt > 1 or d.has_null_delivered_date = 1 then 'SPLIT'
+else 'NOT_SPLIT'
+end as split_status
+```
+
+Order matters: `MISSING_TRACKING` is checked **first** because a DO
+with `has_null_tracking = 1` is operationally a separate concern even
+if it also happens to have `delivered_date_cnt = 0` (it would
+otherwise read as `PENDING`).
+
+**Case table (operational meaning):**
+
+| `tracking_cnt` | `delivered_date_cnt` | `has_null_tracking` | `has_null_delivered_date` | `split_status` |
+|----------------|----------------------|---------------------|----------------------------|----------------|
+| Any            | Any                  | 1                   | Any                        | `MISSING_TRACKING` |
+| Any            | 0                    | 0                   | —                          | `PENDING` |
+| 2+             | 2+ days              | 0                   | Any                        | `SPLIT` |
+| 2+             | 1 day                | 0                   | 1 (some still pending)     | `SPLIT` |
+| 2+             | 1 day                | 0                   | 0 (all same day)           | `NOT_SPLIT` |
+| 1              | 1 day                | 0                   | 0                          | `NOT_SPLIT` |
+
+**Verified distribution (Snowflake Console, 5/6–5/14 window):**
+
+| Status            | Count | %       |
+|-------------------|-------|---------|
+| PENDING           | 906   | 57.9%   |
+| MISSING_TRACKING  | 318   | 20.3%   |
+| SPLIT             | 185   | 11.8%   |
+| NOT_SPLIT         | 155   | 9.9%    |
+| **Total**         | **1,564** | 100% |
+
+**Dashboard impact (massive — addressed by PR10):**
+
+| Metric                       | Before (PR8)      | After (PR9)            |
+|------------------------------|-------------------|-------------------------|
+| Settled DO count             | 743               | 340 (SPLIT + NOT_SPLIT) |
+| SPLIT RATE (settled basis)   | 21.7% (161/743)   | ~54.4% (185/340)       |
+| IN TRANSIT rate              | 51% (775/1,518)   | ~57.9% (906/1,564)     |
+| (NEW) MISSING_TRACKING       | —                 | 318 (20.3%)             |
+
+The split rate roughly **doubles** under the corrected definition because
+the old "settled" denominator was inflated by `SINGLE_SHIPMENT` rows
+that hadn't actually delivered. PR10 will refresh the KPI cards' settled
+basis to `SPLIT + NOT_SPLIT` and add a MISSING_TRACKING banner so the
+new category surfaces in the UI.
+
+**`MISSING_TRACKING` operational interpretation (samples):**
+
+| DO          | `tracking_cnt` | `container_cnt` | `has_null_tracking` | Reading |
+|-------------|----------------|-----------------|---------------------|---------|
+| 0801956909  | 0              | 8               | 1                   | 8 containers, 0 trackings — new SO or UPS handoff never started |
+| 0801955530  | 3              | 7               | 1                   | 7 containers, only 3 got trackings — partial UPS processing |
+| 0801955170  | 1              | 6               | 1                   | 6 containers, only 1 got a tracking — severe partial case |
+
+20% is too large a slice to silently bucket as SPLIT — some entries are
+just fresh SOs that haven't been handed off yet (will resolve with time),
+others are genuine data-integrity issues that operations needs to chase.
+Surfacing the category as its own banner (PR10) lets the right people
+look at the right cases.
+
+**Master-query parts unchanged:**
+
+- `base` CTE — date scope, channel filter (PR4a)
+- `ia_work_instruction` CTE — container_id + tracking_num projection
+- `ups_data` CTE — tracking → delivered_date (PR4b1)
+- `billing` CTE — invoice fan-out (PR5a)
+- `final` CTE — joins
+- `do_level` CTE — count aggregations
+- `split_root_cause` CTE — automatically picks up the new SPLIT
+  definition since it filters `where split_status = 'SPLIT'`. The
+  `MISSING_TRACKING` DOs are excluded from root-cause analysis, which
+  matches their operational meaning (investigate separately, not a
+  split-cause case).
+
+`toFactShape` and the endpoint surface are unchanged: `split_status`
+flows through as a string, the frontend receives the new value
+verbatim. Frontend handling (re-classifying KPI cards by the new
+`split_status` set, adding the MISSING_TRACKING banner) is **deferred
+to PR10**.
+
+**Files modified:**
+
+- `server.js` — `SPLIT_SHIPMENTS_SQL` `classified` CTE replaced
+  (byte-exact with the user's SQL)
+- `docs/exec-plans/active/002-split-shipments-live.md` — same
+  replacement in the plan's master query block, plus this PR9 section
+
+**Smoke test (PR9 self-verification):**
+
+```bash
+# After server restart
+curl -s "http://localhost:3001/api/scale/split-shipments?from=2026-05-06&to=2026-05-14" \
+  -o /tmp/pr9_smoke.json
+
+node -e "
+const j = require('/tmp/pr9_smoke.json');
+const rows = j.data || j.shipments || j;
+const doStatus = new Map();
+for (const r of rows) if (!doStatus.has(r.do_num)) doStatus.set(r.do_num, r.split_status);
+const counts = {};
+for (const s of doStatus.values()) counts[s] = (counts[s] || 0) + 1;
+console.log('Distribution:', counts);
+console.log('Total DOs:', doStatus.size);
+"
+```
+
+Expected (data freshness may shift values ±5):
+
+```
+Distribution: {
+  PENDING: ~906,
+  MISSING_TRACKING: ~318,
+  SPLIT: ~185,
+  NOT_SPLIT: ~155
+}
+Total DOs: ~1,564
+```
+
+If the output contains `SINGLE_SHIPMENT` or `UNKNOWN`, the server has
+not been restarted with the new SQL.
+
+**Trust hierarchy preserved:**
+
+- User master query (operational fact, written directly by user)
+- Plan SQL block (byte-exact paste, LF-normalized)
+- `server.js` `SPLIT_SHIPMENTS_SQL` (byte-exact paste of same block)
+- `?` parameter binding maintained (PR5a pattern)
+
+**Depends on:** PR5a (master query 7-CTE structure).
+**Blocks:**
+- PR10 — KPI cards settled basis + MISSING_TRACKING banner (frontend)
+- PR11 — Container metrics denominator correction (frontend)
 
 ---
 
