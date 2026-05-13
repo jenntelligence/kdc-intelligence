@@ -1772,6 +1772,12 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
   // currentPage is 0-indexed (rendered as 1-indexed in the footer).
   const [pageSize, setPageSize] = useState(30);
   const [currentPage, setCurrentPage] = useState(0);
+  // PR17b: free-text search over the SPLIT cohort rendered in the Container
+  // Tracking table. Scoped to the view (table + pagination), not the
+  // dashboard cohort — KPI cards / Channel / Customer / Root Causes are
+  // driven by PR16's filteredPageData and should reflect the broader filter
+  // selection, not a row-level lookup.
+  const [containerSearch, setContainerSearch] = useState('');
 
   // PR4b2: Live data via hook; mock-fallback preserves the page when API is unreachable.
   // Trust hierarchy: server (master query) → adapter (PR4b1) → this page.
@@ -2062,22 +2068,50 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
       .map(c => ({ ...c, splitRate: c.total > 0 ? c.splits / c.total : 0 }));
   }, [ytdHookData]);
 
+  // PR17b: search narrows splitData.split by case-insensitive substring
+  // across DO number, customer name, and every container's ID and tracking
+  // number. Empty / whitespace query short-circuits to the full cohort so
+  // the search bar has zero performance cost when idle.
+  const searchedSplits = useMemo(() => {
+    const q = containerSearch.trim().toLowerCase();
+    if (!q) return splitData.split;
+    return splitData.split.filter(o => {
+      const doStr = String(o.id || o.do_num || '').toLowerCase();
+      if (doStr.includes(q)) return true;
+      const custStr = String(o.customer || '').toLowerCase();
+      if (custStr.includes(q)) return true;
+      const containers = o.containers || [];
+      for (const c of containers) {
+        const cidStr = String(c.containerId || c.container_id || '').toLowerCase();
+        if (cidStr.includes(q)) return true;
+        const trackStr = String(c.trackingNumber || c.tracking_num || '').toLowerCase();
+        if (trackStr.includes(q)) return true;
+      }
+      return false;
+    });
+  }, [splitData.split, containerSearch]);
+
   // PR15: pagination math for the Container Tracking table. Derived from
   // splitData.split (post-PR10 settled-basis SPLIT cohort) so the table
   // shows every operationally-decided split, not just the first 30.
-  const splitTotalCount = splitData.split.length;
+  // PR17b: pagination source switched to searchedSplits so the table
+  // and "Showing X-Y of Z" footer both reflect the active search.
+  const splitTotalCount = searchedSplits.length;
   const splitTotalPages = Math.max(1, Math.ceil(splitTotalCount / pageSize));
   const splitStartIdx = currentPage * pageSize;
   const splitEndIdx = Math.min(splitStartIdx + pageSize, splitTotalCount);
-  const paginatedSplits = splitData.split.slice(splitStartIdx, splitEndIdx);
+  const paginatedSplits = searchedSplits.slice(splitStartIdx, splitEndIdx);
 
   // PR15: reset to first page when the underlying data shrinks below the
   // current page or the user picks a different page size. Without this, a
   // user on page 7/9 who narrows the window could end up rendering an
   // empty page with disabled nav.
+  // PR17b: `containerSearch` listed explicitly even though splitTotalCount
+  // already changes with the search — defensive against future refactors
+  // (e.g. if the search ever stops shrinking the cohort).
   useEffect(() => {
     setCurrentPage(0);
-  }, [pageSize, splitTotalCount]);
+  }, [pageSize, splitTotalCount, containerSearch]);
 
   if (hookLoading) {
     return <div className="p-8 text-center text-[12px] font-mono" style={{ color: 'var(--text-muted)' }}>Loading split-shipment data…</div>;
@@ -2263,6 +2297,43 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
         tag="CONTAINER TREE"
         className="mb-4"
       >
+        {/* PR17b: row-level search above the table. Multi-field substring
+            match (DO, customer, container ID, tracking number). View-scoped:
+            doesn't disturb KPI cards / sections — those still reflect the
+            broader PR16 filter selection. Theme-aware tokens (PR17a-fix
+            lesson) so it tracks light/dark. */}
+        <div className="mb-3">
+          <div className="relative" style={{ maxWidth: 400 }}>
+            <Search
+              size={12}
+              className="absolute left-2 top-1/2 -translate-y-1/2 opacity-60 pointer-events-none"
+              style={{ color: 'var(--text-muted)' }}
+            />
+            <input
+              type="text"
+              value={containerSearch}
+              onChange={e => setContainerSearch(e.target.value)}
+              placeholder="Search by DO, container, customer, tracking…"
+              className="w-full text-[12px] font-mono rounded outline-none pl-7 pr-7 py-1 placeholder:text-[var(--text-muted)] focus:border-[#1ABC9C]"
+              style={{
+                background: 'var(--bg-input)',
+                border: '1px solid var(--border)',
+                color: 'var(--text-primary)',
+              }}
+            />
+            {containerSearch && (
+              <button
+                type="button"
+                onClick={() => setContainerSearch('')}
+                title="Clear search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 opacity-60 hover:opacity-100 cursor-pointer text-[11px] font-mono leading-none"
+                style={{ color: 'var(--text-muted)', background: 'transparent', border: 'none', padding: 0 }}
+              >
+                <X size={12}/>
+              </button>
+            )}
+          </div>
+        </div>
         <div className="overflow-x-auto" style={{ maxHeight: 500 }}>
           <table className="w-full text-[12px]">
             <thead>

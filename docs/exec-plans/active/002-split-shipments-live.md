@@ -3504,6 +3504,210 @@ outside-click / search filter).
 
 ---
 
+### PR17b — Container Tracking: search bar (completed 2026-05-13)
+
+User reviewed PR17a-fix and moved on to the next item from the
+original PR16 follow-up list:
+
+> "do, container, customer tracking number 등의 정보를 search 할 수 있는
+>  search bar 필요할 것 같아"
+
+PR16 dropdowns segment by cause + region; PR17a made the region
+dropdown searchable. Operations still needs a free-text lookup for
+the typical "find this DO / customer / tracking number" question
+that a dropdown can't answer. PR17b adds a row-level search bar to
+the Container Tracking section.
+
+**User decisions (set during planning):**
+
+- Single input, multi-field substring match.
+- Case-insensitive.
+- Sits above the table on its own row (subtitle already carries
+  count + expand-all toggle and shouldn't get more freight).
+- Pagination follows the searched cohort automatically.
+
+**Search target fields:**
+
+| Field            | Source                                          |
+|------------------|-------------------------------------------------|
+| DO number        | `o.id` (with `o.do_num` fallback)               |
+| Customer name    | `o.customer`                                    |
+| Container ID     | `containers[].containerId` (raw `container_id` fallback) |
+| Tracking number  | `containers[].trackingNumber` (raw `tracking_num` fallback) |
+
+Union semantics — a row passes if **any** field substring-matches.
+Fallback field names cover both the normalized pageData shape and
+the raw adapter row in case future refactoring removes the
+normalization at this site.
+
+**Data flow:**
+
+```
+filteredPageData (PR16 region + cause filter)
+  ↓
+splitData.split (PR10 SPLIT cohort)
+  ↓
+searchedSplits   (PR17b row-level search)  ← NEW
+  ↓
+paginatedSplits  (PR15 view slicing)
+  ↓
+Container Tracking table
+```
+
+Layer responsibilities:
+
+- **PR16** narrows the dashboard cohort (KPI / Channel / Customer /
+  Root Causes all reflect this).
+- **PR10** carves out the SPLIT subset for the Container Tracking
+  table.
+- **PR17b** is the row-level lookup — view-scoped, doesn't disturb
+  KPI cards or other sections.
+- **PR15** slices for rendering and powers the "Showing X-Y of Z"
+  footer.
+
+Operations mental model: *"I'm looking at NY's manifest splits
+(filter), and inside that view I'm searching for BEAUTY (search)."*
+
+**Why search is view-scoped, not dashboard-scoped:**
+
+A free-text search like "BEAUTY" or a tracking number isn't a
+cohort definition — it's a lookup. Narrowing the KPI cards
+("Split Rate dropped to 14% because I typed BEAUTY") would be
+confusing and would also tank the denominator's statistical
+meaning. The dashboard cohort stays defined by the dropdowns;
+the search bar only narrows what the table renders.
+
+**Page-reset on search change:**
+
+PR15's reset effect already fires on `splitTotalCount` change, and
+`searchedSplits.length` becomes the new `splitTotalCount`, so a
+typing change would already land the user on page 1. PR17b adds
+`containerSearch` to the effect's dependency list explicitly —
+defense against future refactors that might decouple the count from
+the search.
+
+```javascript
+useEffect(() => {
+  setCurrentPage(0);
+}, [pageSize, splitTotalCount, containerSearch]);
+```
+
+**Empty-query short-circuit:**
+
+```javascript
+if (!q) return splitData.split;
+```
+
+When the search input is empty / whitespace, the useMemo returns the
+exact `splitData.split` reference. No filter work, no new array
+allocation, no downstream re-renders beyond what PR15 already did.
+Zero-cost when idle.
+
+**Subtitle wording — unchanged:**
+
+```jsx
+{splitData.split.length} split orders · click to {expand|collapse} all…
+```
+
+The subtitle reports the **dashboard cohort** count (full SPLIT
+total under the current PR16 filter). The footer
+`"Showing X-Y of Z"` carries the **search-result** count. The split
+keeps the two numbers semantically distinct: cohort size up top,
+visible-rows count at the bottom. (Alternative was overloading the
+subtitle with `"35 of 246 split orders match"`; held back as too
+information-dense for now.)
+
+**Search-bar UI:**
+
+- Single `<input>` inside an absolute-positioned wrapper for the
+  icons.
+- Left: `lucide-react` `Search` icon, muted, decorative
+  (`pointer-events-none`).
+- Right: `X` icon button — shows only when the input has content;
+  click clears the search.
+- Placeholder: `"Search by DO, container, customer, tracking…"`.
+- Tokens: `var(--bg-input)`, `var(--border)`, `var(--text-primary)`,
+  `placeholder:text-[var(--text-muted)]` — directly inherits the
+  PR17a-fix lesson.
+- `focus:border-[#1ABC9C]` matches the rest of the filter-bar
+  controls.
+- `maxWidth: 400px` so the input doesn't span the full panel width
+  on wide screens.
+
+**Interaction with PR16 filter (AND):**
+
+| Filter | Search | Result |
+|--------|--------|--------|
+| All / All | empty | full SPLIT cohort |
+| NY / Manifest | empty | NY manifest SPLITs |
+| All / All | "BEAUTY" | every SPLIT with a BEAUTY match |
+| NY / Manifest | "BEAUTY" | NY manifest SPLITs with a BEAUTY match (intersection) |
+
+**Interaction with PR14 expand-all:**
+
+`allExpanded` is page-level state, untouched by search. Behavior is
+consistent: expand all → narrow with search → results render
+expanded; collapse all → narrow → results render collapsed. Search
+doesn't reach into the row-render state.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`:
+  - New `containerSearch` state next to `pageSize` / `currentPage`.
+  - New `searchedSplits` useMemo before the pagination math.
+  - `splitTotalCount` / `paginatedSplits` switched from
+    `splitData.split` to `searchedSplits`.
+  - Page-reset `useEffect` deps extended with `containerSearch`.
+  - Search input + clear button JSX inserted between SectionCard
+    subtitle and the table.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this PR17b
+  section.
+
+**Validation:**
+
+- `npm run build` passes.
+- Browser smoke (Split page, live):
+  - Search input visible above the Container Tracking table.
+  - Typing a DO number (e.g. `0801935038`) narrows the table to
+    that row; footer reads `"Showing 1-1 of 1"`.
+  - Typing a customer fragment (e.g. `BEAUTY`) narrows to every
+    SPLIT involving a matching customer.
+  - Typing a partial container ID or tracking number reaches into
+    the nested `containers[]` array and surfaces the parent DO.
+  - Empty input returns the full SPLIT cohort instantly.
+  - Clear (✕) button resets to empty.
+  - PR16 filter + search applied simultaneously yields the
+    intersection.
+  - Page resets to 1 on any search change.
+  - Light + Dark mode: both surface the input correctly (PR17a-fix
+    pattern).
+- Mock fallback: same behavior on mock-generated SPLITs.
+
+**Trust hierarchy:**
+
+- `splitData.split` (PR10, unchanged)
+- `searchedSplits` (PR17b, new)
+- `paginatedSplits` (PR15 logic, source switched)
+- Pagination footer / range text (PR15, unchanged)
+- Subtitle (PR14, unchanged — reports cohort, not search result)
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter,
+mock generator, `filteredPageData` (PR16), `splitData` /
+`containerMetrics` / `ytdCustomerList` useMemos, KPI cards, banners
+(`DATA INTEGRITY`, `Customer Hard Requirement`), other sections
+(Channel, Customer ranking, Root Causes), filter dropdowns (PR16),
+`SearchableDropdown` (PR17a / PR17a-fix), per-row expand handler
+(PR7b), page-level expand-all toggle (PR14).
+
+**Depends on:** PR10 (SPLIT cohort), PR15 (pagination), PR17a-fix
+(theme-aware token pattern for the input chrome).
+**Blocks:** PR18 (Excel export) — `searchedSplits` becomes the
+natural "current view" source. The export dialog can offer two
+scopes: "current page" (`paginatedSplits`) vs "all matches"
+(`searchedSplits`) vs "full cohort" (`splitData.split`).
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type
