@@ -3708,6 +3708,263 @@ scopes: "current page" (`paginatedSplits`) vs "all matches"
 
 ---
 
+### PR18 — Container Tracking: Excel export (completed 2026-05-15)
+
+The user's 5-item follow-up list closes here. PR3 → PR17b spans 28
+commits across two months; PR18 is the last operational wrapper —
+once the page can hand a spreadsheet to the people who actually chase
+split shipments, the cycle is genuinely complete.
+
+> "Container Tracking — Split Orders section 데이터를 excel 로 export
+>  할 수 있는 기능을 넣고싶어"
+
+PR17b's search bar already establishes "current view" as a first-class
+concept in this section. Exporting that exact cohort is the natural
+extension: filter (PR16) → search (PR17b) → export (PR18). One button,
+zero ambiguity about scope.
+
+**User decisions (set during planning):**
+
+1. Export scope: `searchedSplits` (the current view).
+   - PR16 filter + PR17b search applied.
+   - Single button — no scope picker, no UI complexity. If the
+     operator wants a wider cohort, they clear the search/filter
+     first. The mental model matches what they're already looking at.
+
+2. Export fields: visible columns + container details.
+   - 8 DO-level columns from the table (Order, Customer, State,
+     Channel, Containers, Split Gap, Root Cause, Value, Alert).
+   - 5 container-level columns (Container ID, Tracking Number,
+     Container Status, Delivered Date, Delivered State).
+   - Operations does follow-up analysis in Excel (sort by date,
+     filter by state, pivot by customer) — wide format makes that
+     trivial.
+
+**Implementation:**
+
+```javascript
+import * as XLSX from 'xlsx';
+
+const flattenForExport = (splits) => {
+  const rows = [];
+  for (const o of splits) {
+    const hasAlertRow = (o.containers || []).some(
+      c => c.isLate || c.deliveredDifferentDay || c.deliveryStatus === 'SPLIT_DAY'
+    );
+    const baseRow = { /* 9 DO-level columns */ };
+    if (o.containers?.length) {
+      for (const c of o.containers) {
+        rows.push({ ...baseRow, /* 5 container columns */ });
+      }
+    } else {
+      rows.push({ ...baseRow, /* 5 empty container columns */ });
+    }
+  }
+  return rows;
+};
+
+const handleExportExcel = () => {
+  const rows = flattenForExport(searchedSplits);
+  if (rows.length === 0) {
+    alert('No split orders to export. Try clearing your search or filters.');
+    return;
+  }
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  worksheet['!cols'] = [ /* 14 wch column widths */ ];
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, 'Split Orders');
+  const ts = new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-');
+  XLSX.writeFile(workbook, `split-orders-${ts}.xlsx`);
+};
+```
+
+**Denormalized (1 row per container):**
+
+Operations' Excel use cases — sort by delivered date, filter by
+state, pivot by customer — all want wide format. A DO with 4
+containers becomes 4 rows sharing the same DO-level fields. This
+keeps every Excel-native operation cheap (no unhide-grouping, no
+formula juggling). DOs with no containers (rare: fresh SOs before
+UPS handoff, or genuine missing-tracking anomalies — see PR10's
+MISSING_TRACKING banner) get a single base row so they don't
+silently disappear from the export.
+
+**Field fallbacks:**
+
+`flattenForExport` reads both shapes:
+
+| Concept | Live (snake) | Mock (camel) |
+|---------|--------------|--------------|
+| Container ID | `container_id` | `containerId` |
+| Tracking | `tracking_num` | `trackingNumber` |
+| Status | `container_status` (numeric) | `status` (UPS string) |
+| Delivered date | `delivered_date` (`'YYYY-MM-DD'` string) | `actualDelivery` (Date) |
+| Delivered state | `delivered_state` | `deliveredState` |
+
+Date normalization: live carries `'YYYY-MM-DD'` strings, mock carries
+`Date` objects. Both reduce to `'YYYY-MM-DD'` in the cell so Excel
+sorts correctly across mode boundaries.
+
+Alert flag: mock uses `isLate` / `deliveredDifferentDay`; live uses
+`deliveryStatus === 'SPLIT_DAY'`. The export `Alert` column ORs all
+three so the meaning ("at least one container deviates from the
+expected day") is consistent regardless of data source.
+
+**Column widths:**
+
+`worksheet['!cols']` with `wch` (character units) tuned per column —
+Customer 28, Container ID / Tracking 22, State / Alert narrow.
+Operations opens the file once and reads it without manually
+resizing.
+
+**Filename — ISO timestamp:**
+
+```
+split-orders-2026-05-15T17-30-45.xlsx
+```
+
+`':'` / `'.'` rewritten to `'-'` because Windows file systems reject
+the former. Successive exports during a single triage session don't
+overwrite each other.
+
+**Empty-result handling:**
+
+```javascript
+if (rows.length === 0) {
+  alert('No split orders to export. Try clearing your search or filters.');
+  return;
+}
+```
+
+The dashboard codebase doesn't have a shared toast/banner pattern
+for transient feedback yet — `alert()` is the minimum that prevents
+a silent no-op click. Listed as backlog: replace with a contextual
+banner near the search bar once a shared toast component lands.
+
+**Export button UI:**
+
+```
+[🔍 Search bar (PR17b) ───]              [⬇ Export to Excel]
+```
+
+- Lucide `Download` icon (already imported in the file).
+- Theme-aware tokens (`var(--bg-input)`, `var(--border)`,
+  `var(--text-primary)`) — same lesson as PR17a-fix: hardcoded
+  colors break light-mode invisibly. Verified visible in both
+  themes before commit.
+- `hover:opacity-90` matches the affordance pattern used elsewhere
+  on the page.
+- Sits in the same `flex items-center justify-between gap-2` row
+  as the search input. Search bar anchors the left edge
+  (`max-width: 400px`, `flex: 1 1 400px` so it grows up to its cap
+  on wide screens and shrinks on narrow ones); the export button
+  anchors the right edge, vertically aligning with the
+  CONTAINER TREE section tag. Operational rhythm: search is
+  frequent (left, foreground), export is occasional (right,
+  destination).
+
+**Scope rationale:**
+
+Operations' mental model:
+
+1. Filter by region / root cause (PR16) — narrows to the cohort
+   under investigation.
+2. Search for a specific customer / DO / tracking (PR17b) —
+   narrows further.
+3. Read the table — decide what needs follow-up.
+4. Export — hand the result to whoever does the follow-up
+   (account rep, CS lead, etc.).
+
+So "export = whatever is currently on screen." Other scopes the
+operator might want, and how they're served by the same button:
+
+- "Just the matches I'm looking at, no pagination clipping" =
+  `searchedSplits` directly (pagination is view-layer; the export
+  bypasses it). Already covered.
+- "Whole SPLIT cohort regardless of search" → clear the search,
+  click export.
+- "Whole SPLIT cohort regardless of filter and search" → clear
+  both filters and search, click export.
+
+Single button covers every operational case without needing a
+scope picker.
+
+**Why SheetJS:**
+
+- De-facto standard JS library for Excel I/O — multi-year
+  maintenance, no surprises.
+- Bundle cost ~500KB (`xlsx@0.18.5`). Significant for a dashboard
+  but worth it: ops actually exports things, and a CSV fallback
+  loses the column widths / sheet naming that make the file usable.
+- React-friendly synchronous API; no async lifecycle to manage in
+  the click handler.
+- Extensible (CSV, JSON, multi-sheet) if later PRs need it.
+
+**Files modified:**
+
+- `package.json`: new dep `xlsx@^0.18.5`.
+- `src/ShippingSLAApp.jsx`:
+  - `import * as XLSX from 'xlsx';` near the top.
+  - `flattenForExport` and `handleExportExcel` inside
+    `SplitShipmentPage`, immediately after the `searchedSplits`
+    useMemo (close to the data they consume).
+  - Search-bar row converted to `flex items-center gap-2`; the
+    input wrapped in `flex-1`; export button added as the second
+    child.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this section.
+
+**Validation:**
+
+- `npm run build` passes.
+- Live mode (server reachable):
+  - Search bar shows `[🔍 …] [⬇ Export to Excel]` in the same row,
+    aligned, no overflow at narrow viewports.
+  - Click → browser downloads `split-orders-{timestamp}.xlsx`.
+  - Open the file: headers (Order #, Customer, State, Channel,
+    Containers, Split Gap (days), Root Cause, Invoice Value,
+    Alert, Container ID, Tracking Number, Container Status,
+    Delivered Date, Delivered State).
+  - Each DO produces N rows (one per container); DOs without
+    containers produce 1 base row with empty container columns.
+  - Column widths are usable without manual resize.
+- Filter (PR16, e.g. "NY" + "Manifest") + search (PR17b, e.g.
+  "BEAUTY") active → export contains only NY-state Manifest-cause
+  DOs whose DO/customer/container/tracking contains "BEAUTY".
+- Empty result (e.g. search "ZZZZZZ") → alert fires, no file
+  written.
+- Mock fallback (kill server, refresh): same behavior; camelCase
+  field reads succeed.
+- Light + dark mode: button visible in both, no contrast bugs.
+
+**Trust hierarchy:**
+
+- `searchedSplits` (PR17b) — current-view source.
+- SheetJS API — industry standard, treated as a black box.
+- `flattenForExport` (NEW) — denormalizes DOs into export rows.
+- `handleExportExcel` (NEW) — file generation + filename + empty
+  handling.
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter,
+mock generator, `filteredPageData` (PR16), `splitData` /
+`containerMetrics` / `ytdCustomerList` useMemos, KPI cards, banners,
+other sections (Channel, Customer ranking, Root Causes), filter
+dropdowns (PR16/17a), search-bar logic (PR17b — visual rearrangement
+only), pagination (PR15), expand-all (PR14).
+
+**Depends on:** PR15 (pagination — view layer), PR16 (filter),
+PR17b (search → `searchedSplits` source).
+**Blocks:** Nothing. This closes the 5-item follow-up list.
+
+**Backlog notes:**
+- Replace `alert()` with a contextual banner near the search bar
+  once a shared toast/banner component is in the codebase.
+- Field-selection dropdown for users who only want a subset of
+  columns.
+- Multi-sheet export (e.g. "Split Orders" + "Summary stats").
+- CSV / JSON export formats (cheap follow-on with SheetJS).
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

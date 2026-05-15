@@ -1,6 +1,13 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, ComposedChart, Area, Scatter, Legend } from 'recharts';
 import { Upload, AlertTriangle, TrendingDown, TrendingUp, Package, Truck, MapPin, Clock, Database, Filter, Download, Activity, ChevronRight, ChevronLeft, ChevronDown, Brain, Split, DollarSign, Users, Layers, Zap, Mail, Phone, CheckCircle2, XCircle, Lock, Settings, Shield, UserCog, Eye, LogOut, Save, RotateCcw, Anchor, Warehouse, HardHat, Waves, Cpu, Radar, PiggyBank, MessageCircle, Send, X, Menu, Sun, Moon, Search, FileDown, Calendar, FileText, Trash2, Plus, RefreshCw, UserPlus, Star, Box } from 'lucide-react';
+// PR18: Excel export via SheetJS. Used by Container Tracking section
+// to export the current search-filtered cohort (searchedSplits) so
+// operations can sort/filter/pivot in Excel for downstream analysis.
+// Namespace import is the standard SheetJS pattern; tree-shaking is
+// limited because the library exposes utils + writeFile as a unified
+// API surface.
+import * as XLSX from 'xlsx';
 
 // ============================================================
 // MOCK DATA
@@ -2091,6 +2098,113 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     });
   }, [splitData.split, containerSearch]);
 
+  // PR18: flatten the current search-filtered cohort into wide-format rows
+  // for Excel export. 1 DO with N containers → N rows (each carrying the
+  // same DO-level fields). DOs without containers (rare: fresh SOs with no
+  // tracking yet) get a single base row so missing-tracking cases stay
+  // visible in the export.
+  //
+  // Field fallbacks: live mode uses snake_case (container_id, tracking_num,
+  // container_status, delivered_date, delivered_state); mock mode uses
+  // camelCase (containerId, trackingNumber, status). Alert flag combines
+  // mock-only (isLate / deliveredDifferentDay) with live's deliveryStatus
+  // === 'SPLIT_DAY'.
+  const flattenForExport = (splits) => {
+    const rows = [];
+    for (const o of splits) {
+      const hasAlertRow = (o.containers || []).some(
+        c => c.isLate || c.deliveredDifferentDay || c.deliveryStatus === 'SPLIT_DAY'
+      );
+      const baseRow = {
+        'Order #': o.id || o.do_num || '',
+        'Customer': o.customer || '',
+        'State': o.state || o.customer_state || '',
+        'Channel': o.channel || o.channel_code || '',
+        'Containers': o.container_cnt != null ? o.container_cnt : (o.containers?.length || 0),
+        'Split Gap (days)': o.splitGapDays != null ? o.splitGapDays : '',
+        'Root Cause': o.splitReason || '',
+        'Invoice Value': o.orderValue != null ? Number(o.orderValue).toFixed(2) : '',
+        'Alert': hasAlertRow ? 'Y' : 'N',
+      };
+      const containers = o.containers || [];
+      if (containers.length > 0) {
+        for (const c of containers) {
+          // Normalize delivered_date — live carries 'YYYY-MM-DD' strings,
+          // mock carries Date objects. Keep them readable in Excel without
+          // forcing a single format (Excel parses both fine for sorting).
+          let deliveredOut = '';
+          const rawDelivered = c.delivered_date || c.actualDelivery || null;
+          if (rawDelivered) {
+            if (rawDelivered instanceof Date) {
+              deliveredOut = Number.isNaN(rawDelivered.getTime())
+                ? ''
+                : rawDelivered.toISOString().slice(0, 10);
+            } else {
+              deliveredOut = String(rawDelivered).slice(0, 10);
+            }
+          }
+          rows.push({
+            ...baseRow,
+            'Container ID': c.containerId || c.container_id || '',
+            'Tracking Number': c.trackingNumber || c.tracking_num || '',
+            'Container Status': c.status || c.container_status || '',
+            'Delivered Date': deliveredOut,
+            'Delivered State': c.deliveredState || c.delivered_state || '',
+          });
+        }
+      } else {
+        rows.push({
+          ...baseRow,
+          'Container ID': '',
+          'Tracking Number': '',
+          'Container Status': '',
+          'Delivered Date': '',
+          'Delivered State': '',
+        });
+      }
+    }
+    return rows;
+  };
+
+  // PR18: export handler. searchedSplits (PR17b's current view source) →
+  // flat rows → SheetJS workbook → download. Filename carries an ISO
+  // timestamp (':' and '.' rewritten to '-' for Windows/Unix safety) so
+  // ops can archive successive exports without overwriting each other.
+  const handleExportExcel = () => {
+    const rows = flattenForExport(searchedSplits);
+    if (rows.length === 0) {
+      // Codebase has no shared toast/banner pattern yet — alert() keeps
+      // the user from clicking into a silent no-op. Future: replace with
+      // a contextual banner near the search bar.
+      alert('No split orders to export. Try clearing your search or filters.');
+      return;
+    }
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    // wch = column width in character units. Tuned for the longest plausible
+    // value in each column so Excel opens with sensible defaults (no manual
+    // resize on the operator's first action).
+    worksheet['!cols'] = [
+      { wch: 14 },  // Order #
+      { wch: 28 },  // Customer
+      { wch: 6 },   // State
+      { wch: 10 },  // Channel
+      { wch: 11 },  // Containers
+      { wch: 14 },  // Split Gap (days)
+      { wch: 22 },  // Root Cause
+      { wch: 14 },  // Invoice Value
+      { wch: 8 },   // Alert
+      { wch: 22 },  // Container ID
+      { wch: 22 },  // Tracking Number
+      { wch: 16 },  // Container Status
+      { wch: 14 },  // Delivered Date
+      { wch: 14 },  // Delivered State
+    ];
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Split Orders');
+    const ts = new Date().toISOString().slice(0, 19).replace(/[:.]/g, '-');
+    XLSX.writeFile(workbook, `split-orders-${ts}.xlsx`);
+  };
+
   // PR15: pagination math for the Container Tracking table. Derived from
   // splitData.split (post-PR10 settled-basis SPLIT cohort) so the table
   // shows every operationally-decided split, not just the first 30.
@@ -2301,9 +2415,14 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
             match (DO, customer, container ID, tracking number). View-scoped:
             doesn't disturb KPI cards / sections — those still reflect the
             broader PR16 filter selection. Theme-aware tokens (PR17a-fix
-            lesson) so it tracks light/dark. */}
-        <div className="mb-3">
-          <div className="relative" style={{ maxWidth: 400 }}>
+            lesson) so it tracks light/dark.
+            PR18: Export-to-Excel button sits in the same flex row,
+            justify-between so the search bar anchors the left edge and
+            the export button anchors the right edge (vertically aligning
+            with the CONTAINER TREE tag). Operational visual flow: search
+            (frequent, left) ↔ export (occasional, right). */}
+        <div className="mb-3 flex items-center justify-between gap-2">
+          <div className="relative" style={{ maxWidth: 400, flex: '1 1 400px' }}>
             <Search
               size={12}
               className="absolute left-2 top-1/2 -translate-y-1/2 opacity-60 pointer-events-none"
@@ -2333,6 +2452,23 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
               </button>
             )}
           </div>
+          {/* PR18: Export to Excel. Exports searchedSplits (the current
+              filter + search cohort) as a denormalized xlsx — 1 row per
+              container so ops can sort/filter/pivot downstream. */}
+          <button
+            type="button"
+            onClick={handleExportExcel}
+            title="Export current view to Excel"
+            className="text-[12px] font-mono rounded outline-none cursor-pointer flex items-center gap-1.5 px-3 py-1 hover:opacity-90"
+            style={{
+              background: 'var(--bg-input)',
+              border: '1px solid var(--border)',
+              color: 'var(--text-primary)',
+            }}
+          >
+            <Download size={12} className="opacity-80"/>
+            Export to Excel
+          </button>
         </div>
         <div className="overflow-x-auto" style={{ maxHeight: 500 }}>
           <table className="w-full text-[12px]">
