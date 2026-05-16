@@ -1568,6 +1568,16 @@ function serverRowsToShipments(rows) {
       has_null_tracking: doRow.has_null_tracking,
       has_null_delivered_date: doRow.has_null_delivered_date,
 
+      // PR Geo-1: DO-level (shipment_header) trailing status. SCALE schema:
+      // 700 = Ship Confirm Pending, 800 = Load Confirm Pending, 900 = Closed.
+      // trailing_status_date carries the ET-converted timestamp when the
+      // shipment row reached its current TRAILING_STS. GeoPage uses this to
+      // classify delayed shipments (trailing_status_date <= so_created_date
+      // + kdcTarget → on time; else delayed). LEADING_STS is per-container
+      // and lives on each entry of `containers`, not on the DO row.
+      trailing_status: doRow.trailing_sts,
+      trailing_status_date: doRow.trailing_sts_date,
+
       // DO-level aggregations
       tracking_cnt: doRow.tracking_cnt,
       container_cnt: doRow.container_cnt,

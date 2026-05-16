@@ -3965,6 +3965,199 @@ PR17b (search → `searchedSplits` source).
 
 ---
 
+### PR Geo-1 — Master query: TRAILING_STS + TRAILING_STS_DATE (completed 2026-05-15)
+
+User reviewed PR18 (5-item follow-up close-out) and pivoted to the
+Geographic page live wiring. This PR is the backend prerequisite —
+the master query needs to expose `TRAILING_STS` (shipment-header
+level, DO-grain) and the timestamp at which the shipment row
+reached that status. Without these two columns, the Geo page can't
+classify delayed shipments downstream (PR Geo-3).
+
+**User direction (verbatim):**
+
+> "trailing status 기준으로 가야하고 이건 shipment header 이기때문에
+>  do level 로 들어가있는 데이터야 container level 이 아닌"
+>
+> "TRAILING_STS, TRAILING_STS_DATE 위 두개 컬럼 추가해야돼"
+
+**Operational definitions (set during planning):**
+
+- `trailing_sts` = the *least*-advanced container status in a
+  shipment, aggregated by SCALE onto `shipment_header`. Mirror of
+  `leading_sts` (most-advanced). 700-bucket = "Ship Confirm
+  Pending" (per `server.js` line 651 `status_map`) — packing, QC,
+  and loading are done; carrier ship-confirm hasn't happened yet.
+- `trailing_sts_date` = ET-converted timestamp on the SH row that
+  records when the shipment's trailing status reached its current
+  value. The verification report's section 6.3 listed multiple
+  candidate timestamps; the user's pick (the shipment_header
+  column directly) is the cleanest because it's DO-grain, single
+  value, no joins needed.
+- Delayed logic (consumed in PR Geo-3):
+  `trailing_sts_date <= so_created_date + kdcTarget (1 day)` →
+  on time; else delayed.
+- Geo cohort: SPLIT + NOT_SPLIT (settled basis — `delivered_date`
+  present, so trailing_sts has reached 900). Filtered on the
+  frontend (PR Geo-3); the endpoint itself stays unchanged scope.
+
+**Why this PR is endpoint-extension, not new endpoint:**
+
+The user picked option (a) from the verification report §6.1:
+reuse `/api/scale/split-shipments`. Justification:
+
+- Scope already matches Geo's stated requirement (UPS, the three
+  BS channels, dateRange). The Geo page narrows further on the
+  frontend.
+- Single source of truth for shipment data — Split, Geo, and any
+  future page using the same cohort all consume the same endpoint.
+  When the master query evolves (e.g. Truck added later), every
+  consumer benefits in one shot.
+- Adapter / hook plumbing already exists. No new wiring overhead.
+
+**Why DO-level, not container-level:**
+
+SCALE keeps `TRAILING_STS` on `shipment_header` because it's
+already the per-shipment aggregate (`MIN(container.status)` of
+the shipment's containers). The master query joins
+shipment_container × shipment_header, so every container row in a
+shipment carries the same `TRAILING_STS` / `TRAILING_STS_DATE`.
+Including them in the `base` CTE's `GROUP BY` doesn't fan out
+rows — it's already constant within a `internal_shipment_num`.
+The frontend's `groupRowsByDo` then projects them onto the
+DO-level row without any aggregation logic.
+
+This mirrors how the existing `leading_sts` is handled (already
+on the SH row, already in the base CTE — PR Geo-1 just doubles
+the pattern for the trailing side).
+
+**Changes — master query (`SPLIT_SHIPMENTS_SQL`):**
+
+`base` CTE — two columns added next to `sh.LEADING_STS`:
+
+```sql
+sh.LEADING_STS,
+sh.TRAILING_STS,
+convert_timezone('UTC', 'America/New_York', sh.TRAILING_STS_DATE) as trailing_sts_date,
+sc.status as container_status,
+```
+
+ET conversion follows the same pattern as `container_status_time`
+and `manifest_close_time` (both UTC → America/New_York). Operations
+reads timestamps in ET; the rest of the dashboard already assumes
+this convention.
+
+`GROUP BY` extended 22 → 24 to cover the two new non-aggregate
+columns. They're constant within a shipment so the row count is
+unaffected.
+
+`final` CTE — two columns explicitly projected next to
+`b.leading_sts`:
+
+```sql
+b.leading_sts,
+b.trailing_sts,
+b.trailing_sts_date,
+b.container_id,
+```
+
+Downstream CTEs need no changes: `classified` uses `b.*` from
+`final b` (line 1110), and the outer SELECT uses `c.*` from
+`classified c` (line 1155). The fields propagate through both
+hops automatically.
+
+**Changes — server adapter (`toFactShape`):**
+
+Two snake_case fields added to the row mapping, grouped by a block
+comment that documents the SCALE bucket meanings and the delayed
+formula they feed:
+
+```javascript
+trailing_sts: row.TRAILING_STS,
+trailing_sts_date: row.TRAILING_STS_DATE,
+```
+
+`row.TRAILING_STS_DATE` is the Snowflake-uppercased alias from the
+`convert_timezone(...) as trailing_sts_date` projection — Snowflake
+unquoted identifiers always come back UPPER on the result row.
+
+**Changes — frontend adapter (`serverRowsToShipments` →
+`groupRowsByDo` doRow):**
+
+Two fields added to the DO-level row return shape:
+
+```javascript
+trailing_status: doRow.trailing_sts,
+trailing_status_date: doRow.trailing_sts_date,
+```
+
+Frontend uses the full-form `trailing_status` / `trailing_status_date`
+(slightly more readable than the SCALE abbreviation `trailing_sts`).
+LEADING_STS lives on each container (per-container in the existing
+flow); TRAILING is per-shipment, so it goes on the DO row alongside
+`split_status` / `is_split_shipment`.
+
+**Mock generator: unchanged in this PR.**
+
+The mock pipeline doesn't produce numeric SCALE status codes. PR
+Geo-2 will add `trailing_status` / `trailing_status_date` to the
+mock so the page works under mock-fallback. Until then, live mode
+is the only place these fields exist; the GeoPage doesn't read them
+yet (PR Geo-3 introduces consumption).
+
+**Trust hierarchy:**
+
+- `sh.TRAILING_STS` / `sh.TRAILING_STS_DATE` — SCALE schema source
+  of truth.
+- ET conversion — `convert_timezone('UTC', 'America/New_York', ...)`
+  pattern, identical to existing timestamps.
+- Server adapter `row.TRAILING_STS` / `row.TRAILING_STS_DATE` —
+  Snowflake uppercase convention.
+- Frontend adapter `doRow.trailing_sts` / `doRow.trailing_sts_date`
+  — snake_case from server.
+- DO-level field names `trailing_status` / `trailing_status_date`
+  — frontend-facing.
+
+**Files modified:**
+
+- `server.js`:
+  - `base` CTE: added `sh.TRAILING_STS` + ET-converted
+    `sh.TRAILING_STS_DATE`; `GROUP BY` 22 → 24.
+  - `final` CTE: explicit projection of both fields.
+  - `toFactShape`: row mapping for both fields with block comment.
+- `src/ShippingSLAApp.jsx`:
+  - `serverRowsToShipments` → `groupRowsByDo`: DO row carries
+    `trailing_status` / `trailing_status_date` with block comment.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this section.
+
+**Validation:**
+
+- `npm run build` passes (frontend type/syntax check).
+- Server restart picks up the new SQL.
+- Endpoint smoke (`/api/scale/split-shipments?from=...&to=...`):
+  - Response row carries `trailing_sts` (numeric, expect ≥ 100) and
+    `trailing_sts_date` (ISO timestamp string).
+  - SPLIT and NOT_SPLIT rows (delivered cohort) should have
+    `trailing_sts ≥ 800` (load-confirm or closed).
+- Frontend smoke (Split page, live):
+  - All existing KPIs / sections render unchanged.
+  - Browser devtools: `splitData.split[0].trailing_status` and
+    `.trailing_status_date` are populated.
+- Mock fallback: unaffected (mock generator unchanged; new fields
+  are simply `undefined` on mock DOs — PR Geo-2 fills them in).
+
+**No changes to:** endpoint cohort / WHERE filter, `useSplitShipments`
+hook, `filteredPageData` (PR16), `splitData` (PR10), `containerMetrics`
+(PR11), `ytdCustomerList` (PR6/PR13), KPI cards, banners, other
+sections, filter dropdowns (PR16/17a), search bar (PR17b), pagination
+(PR15), expand-all (PR14), Excel export (PR18). Geographic page itself
+unchanged — consumes the new fields in PR Geo-3.
+
+**Depends on:** PR3–PR9 (existing master query, adapter chain).
+**Blocks:** PR Geo-2 (mock generator), PR Geo-3 (GeoPage swap).
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

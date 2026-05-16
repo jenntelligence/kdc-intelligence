@@ -305,6 +305,17 @@ function toFactShape(row) {
     container_type: row.CONTAINER_TYPE,
     tracking_num: row.TRACKING_NUM,
 
+    // PR Geo-1: shipment-header (DO-level) trailing status — least-advanced
+    // container status in this shipment. SCALE schema (server.js line 651):
+    //   700 = 'Ship Confirm Pending', 800 = 'Load Confirm Pending',
+    //   900 = 'Closed'.
+    // trailing_sts_date carries the timestamp when the shipment row reached
+    // its current TRAILING_STS (ET-converted in SQL). Used by GeoPage for
+    // delayed-shipment detection: trailing_sts_date <= so_created_date +
+    // kdcTarget (1 day) → on time.
+    trailing_sts: row.TRAILING_STS,
+    trailing_sts_date: row.TRAILING_STS_DATE,
+
     // UPS tracking (ups_data CTE)
     origin_date: row.ORIGIN_DATE,
     processing_date: row.PROCESSING_DATE,
@@ -1009,6 +1020,8 @@ with base as (
         sc.container_type,
         sc.container_class,
         sh.LEADING_STS,
+        sh.TRAILING_STS,
+        convert_timezone('UTC', 'America/New_York', sh.TRAILING_STS_DATE) as trailing_sts_date,
         sc.status as container_status,
         sc.tracking_number,
         sc.manifest_id,
@@ -1027,7 +1040,7 @@ with base as (
     and sh.carrier = 'UPS'
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') >= ?
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') <= ?
-    group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22
+    group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
 )
 , ia_work_instruction as (
     select
@@ -1067,6 +1080,8 @@ with base as (
         ia.picking_completion_time,
         ia.manifest_date_time,
         b.leading_sts,
+        b.trailing_sts,
+        b.trailing_sts_date,
         b.container_id,
         b.container_status,
         b.container_type,
