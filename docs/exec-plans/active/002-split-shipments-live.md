@@ -4271,6 +4271,224 @@ introduce consumption).
 
 ---
 
+### PR Geo-3 — GeoPage: cause-based → real delayed classifier (completed 2026-05-15)
+
+Closes the Geographic live-wiring cycle. PR Geo-1 plumbed the SH-level
+trailing fields end to end; PR Geo-2 gave the mock matching fields.
+PR Geo-3 swaps the GeoPage's cause-based filter for the real
+day-grain SLA classifier and disables the issue-category selectors
+that aren't wired yet.
+
+**User direction (verbatim):**
+
+> "delay 가 kdc 책임인지 아닌지 애초에 보고싶은거잖아"
+>
+> Cohort = `trailing_status >= 700` (ship-confirm reached, delivery
+> state irrelevant — the question is whether KDC finished on
+> schedule, not whether UPS delivered).
+>
+> Delayed rule: `trailing_status_date - so_created_date > 1 day`
+> (day-grain, matching the sample timestamp `"20:00:00.000"` which is
+> ET midnight = day-grain DATE column on Snowflake).
+>
+> Visuals unchanged; non-`All` selector buttons disabled (PR Geo-4
+> will categorize when operations defines the rules).
+
+**New derived state at the top of `GeoPage`:**
+
+```javascript
+const cohort = useMemo(() =>
+  (filtered || []).filter(r =>
+    r.trailing_status != null && Number(r.trailing_status) >= 700
+  ),
+[filtered]);
+
+const isDelayed = useCallback((r) => {
+  if (!r.trailing_status_date || !r.so_created_date) return false;
+  const order = new Date(r.so_created_date);
+  const trailing = new Date(r.trailing_status_date);
+  if (Number.isNaN(order.getTime()) || Number.isNaN(trailing.getTime())) return false;
+  const orderDay    = new Date(order.getFullYear(),    order.getMonth(),    order.getDate());
+  const trailingDay = new Date(trailing.getFullYear(), trailing.getMonth(), trailing.getDate());
+  const daysDelta = (trailingDay.getTime() - orderDay.getTime()) / 86400000;
+  return daysDelta > 1; // KDC kdcTarget = 1 day
+}, []);
+
+const delayedShipments = useMemo(() => cohort.filter(isDelayed), [cohort, isDelayed]);
+```
+
+**Shape compatibility — why JSX needed zero markup changes for the
+heat map / Top 5 / hover detail:**
+
+`stateMetrics` keeps its existing object-keyed-by-state-code shape
+and per-state schema (`{ state, total, issueCount, allDelayed,
+causes, channels, topCause, topChannel, topChannelCount,
+issueRateInState, shareOfIssue }`). Only the *source* and the
+*meaning* of `issueCount` change:
+
+| What | Before (cause-based) | After (PR Geo-3) |
+|------|---------------------|------------------|
+| Source iterable | `filtered` (all shipments) | `cohort` (trailing ≥ 700) |
+| `total` | All shipments in state | Cohort shipments in state |
+| `allDelayed` | Shipments with `r.cause` truthy | `isDelayed(r) === true` |
+| `issueCount` | `selectedIssue === 'all' ? r.cause : r.cause === selectedIssue` | `selectedIssue === 'all' ? isDelayed(r) : (isDelayed(r) && r.cause === selectedIssue)` |
+| `causes` | All shipments with cause | Delayed shipments only |
+| `channels` | All shipments | Cohort shipments |
+
+Because the downstream consumers (`rankedStates`, `maxShare`, the
+heat-map SVG, the hover panel, the Top-5 list, the Insight strip)
+read shared fields like `shareOfIssue`, `issueCount`,
+`issueRateInState`, `topCause`, `topChannel` — they get re-pointed
+at the new semantics with no markup work.
+
+**Day-grain rationale:**
+
+- Sample live row: `trailing_sts_date = "2026-05-10 20:00:00.000"` ET
+  → that's ET midnight (UTC `2026-05-11 00:00`), so the source
+  column lands at day granularity.
+- Snowflake's `SH.TRAILING_STS_DATE` is a `DATE` column in practice
+  (the ET convert just rebases to ET midnight).
+- KDC's "1 day" target is itself day-grain. Subhour precision would
+  introduce false positives at the boundary (a shipment ordered at
+  09:00 and trailing-stamped 23 hours later would read "0.96 days"
+  and be on-time at hour-grain but flagged at day-grain — the
+  business call is day-grain).
+
+The classifier floors both timestamps to local-date-midnight and
+subtracts in 86_400_000 ms units. `daysDelta > 1` is the breach.
+
+**Issue selector — disabled placeholders:**
+
+Each option now carries an `enabled` flag:
+
+```javascript
+const issueOptions = [
+  { key: 'all', label: 'All Delayed', color: '#E74C6F', enabled: true },
+  { key: 'UPS', ..., enabled: false },
+  { key: 'DC',  ..., enabled: false },
+  // …
+];
+```
+
+Button JSX guards clicks (`if (!disabled) setSelectedIssue(...)`),
+adds the HTML `disabled` attribute, a "Coming soon" `title`
+tooltip, and `opacity-40 cursor-not-allowed` plus overrides for the
+hover classes so disabled buttons stay visually muted on hover.
+
+Active-button count rendering switched from
+`filtered.filter(r => r.cause).length` to `issueTotal` — same
+result for 'all' under the new semantics, and forward-compatible
+once PR Geo-4 wires the other categories.
+
+**Network Total card — cohort subtitle:**
+
+Added under the big count:
+
+```
+NETWORK TOTAL
+All Delayed Shipments
+152                                       ← issueTotal
+Cohort: 320 ship-confirmed (trailing ≥ 700)
+Hover a state for details
+```
+
+Operations sees `152 / 320 ≈ 47%` at a glance without needing to
+remember which denominator the page uses. Subtle muted styling
+(text-[#5d6b7a]) so it doesn't compete with the main count.
+
+**Live vs mock — same component, two data sources:**
+
+- **Live**: Snowflake rows carry `trailing_status` (numeric ≥ 100)
+  and `trailing_status_date` (ISO string ET). `new Date(...)`
+  parses the ISO string; the classifier returns real SLA
+  performance.
+- **Mock** (PR Geo-2): same field names; `trailing_status_date` is
+  a `Date` object for ~80% of rows, `null` for the remaining 20%.
+  The classifier short-circuits to `false` on the null branch so
+  those rows aren't counted as delayed.
+
+In both cases `cohort.length` includes only rows where
+`trailing_status >= 700`. Below-cohort rows (mock's 20% bucket)
+are excluded — matching the operational intent to measure KDC's
+finished work, not work in progress.
+
+**No JSX changes to:** heat map SVG, Top-5 ranking, Insight strip,
+hover-detail panel, Lead Time Standards table, legend, layout.
+The "no-data" path (`rankedStates.length === 0`) still renders the
+"No data for selected issue" message.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx` → `GeoPage`:
+  - `cohort` + `isDelayed` + `delayedShipments` (NEW).
+  - `issueTotal`: now over `delayedShipments`.
+  - `stateMetrics`: source switched to `cohort`, `isDelayed` used
+    in place of `r.cause`.
+  - `issueOptions`: `enabled` flag per option; `'All Delays'` →
+    `'All Delayed'`.
+  - Issue selector button JSX: disabled state with tooltip,
+    `issueTotal` for the active-button count.
+  - Network Total card: cohort subtitle line.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this
+  section.
+
+**Trust hierarchy:**
+
+- `filtered` (App-level `data.filter(...)`).
+- `cohort` (PR Geo-3 filter: `trailing_status >= 700`).
+- `isDelayed` (PR Geo-3 day-grain classifier with the kdcTarget=1
+  rule).
+- `stateMetrics` derived from `cohort` + `isDelayed`.
+- Visual layer reads the same field names as before.
+
+**Validation:**
+
+- `npm run build` passes.
+- Live mode (server running, dashboard refreshed):
+  - Geographic page renders without errors.
+  - Network Total shows a real delayed count and a cohort
+    denominator that matches the number of `trailing_sts >= 700`
+    rows from the split-shipments endpoint.
+  - Issue selector: `All Delayed` is the only clickable button;
+    the others render muted with a `Coming soon` tooltip on hover.
+  - Heat-map tile colors track real delayed share per state.
+  - Hover detail / Top 5 / Insight strip all consume the new
+    metrics with no markup diff.
+- Mock fallback (kill `node server.js`, refresh):
+  - Same page renders against the PR Geo-2 distribution.
+  - Cohort denominator lands near 256/320 ≈ 80% of mock rows.
+  - Delayed count lands near 64/320 ≈ 20% of full population.
+- Split page: untouched — KPIs / banners / Container Tracking
+  / pagination / search / Excel export all render as before.
+- Light + dark mode: existing tokens; no theme regressions.
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter
+chain (PR Geo-1 stays as-is), mock generator (PR Geo-2 stays
+as-is), `filteredPageData` (PR16), `splitData` (PR10),
+`containerMetrics` (PR11), `ytdCustomerList` (PR6/PR13), KPI cards,
+banners, other Split sections, filter dropdowns (PR16/17a), search
+bar (PR17b), pagination (PR15), expand-all (PR14), Excel export
+(PR18), `UPS_ZONE_LEAD_TIMES`, `TRUCK_ROUTE_LEAD_TIMES`,
+`getLeadTimeForState`, heat-map SVG markup, Top-5 markup, Insight
+markup.
+
+**Depends on:** PR Geo-1 (live trailing fields), PR Geo-2 (mock
+trailing fields).
+**Blocks:** PR Geo-4 (Issue-category selector — needs operations
+to define the classification mapping before the disabled buttons
+can light up).
+
+**Backlog:**
+- PR Geo-4: wire the disabled buttons against a real cause
+  classification (likely a new column from the master query, or
+  a frontend heuristic derived from existing stage timestamps).
+- Per-zone breakdown (UPS Zone 4 vs Zone 6 etc.) once the page
+  needs to surface lane-level patterns.
+- Truck-carrier support once the master query drops the
+  `sh.carrier = 'UPS'` filter.
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

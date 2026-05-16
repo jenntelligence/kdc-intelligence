@@ -798,34 +798,88 @@ const STATE_NAMES = {
 // GEO PAGE — Heat map with issue-type selector
 // ============================================================
 const GeoPage = ({ filtered }) => {
-  const [selectedIssue, setSelectedIssue] = useState('all'); // 'all' = any delay, or specific cause
+  const [selectedIssue, setSelectedIssue] = useState('all'); // PR Geo-3: only 'all' is live; other buttons are disabled placeholders for PR Geo-4
   const [hoveredState, setHoveredState] = useState(null);
   const [carrierView, setCarrierView] = useState('UPS'); // 'UPS' or 'Truck'
 
-  // Total count of the selected issue across whole network (denominator for % of issue)
-  const issueTotal = useMemo(() => {
-    if (selectedIssue === 'all') return filtered.filter(r => r.cause).length;
-    return filtered.filter(r => r.cause === selectedIssue).length;
-  }, [filtered, selectedIssue]);
+  // PR Geo-3: cohort = shipments that reached ship-confirm-or-beyond
+  // (trailing_status >= 700). This is the population GeoPage operates on
+  // — orders KDC has handed off (or is about to hand off) to the carrier.
+  // Shipments still in pick/pack/stage are excluded because their
+  // trailing_status_date is null (no SLA decision possible). The user's
+  // operational intent for this page: "delay 가 KDC 책임인지 아닌지" —
+  // so the cohort is intentionally KDC-side-finished work, regardless
+  // of UPS delivery state.
+  const cohort = useMemo(() => {
+    return (filtered || []).filter(r =>
+      r.trailing_status != null && Number(r.trailing_status) >= 700
+    );
+  }, [filtered]);
 
-  // Per-state metrics for the selected issue
+  // PR Geo-3: day-grain delayed classifier — true if KDC took longer than
+  // the kdcTarget (1 day) to reach the trailing status. Comparison is
+  // date-only because `sh.TRAILING_STS_DATE` lands at ET midnight in the
+  // sample data (live row: "2026-05-10 20:00:00.000" = ET midnight UTC) —
+  // hour-grain comparison would be over-precision.
+  //
+  //   isDelayed(r) ⇔ floor(trailing_date) - floor(order_date) > 1
+  //
+  // Accepts both shapes: live `so_created_date` / `trailing_status_date`
+  // are ISO strings; mock (PR Geo-2) passes Date objects. `new Date()`
+  // handles both. Returns false when either timestamp is missing so the
+  // shipment falls into the "unknown" bucket rather than being flagged.
+  const isDelayed = useCallback((r) => {
+    if (!r.trailing_status_date || !r.so_created_date) return false;
+    const order = new Date(r.so_created_date);
+    const trailing = new Date(r.trailing_status_date);
+    if (Number.isNaN(order.getTime()) || Number.isNaN(trailing.getTime())) return false;
+    const orderDay = new Date(order.getFullYear(), order.getMonth(), order.getDate());
+    const trailingDay = new Date(trailing.getFullYear(), trailing.getMonth(), trailing.getDate());
+    const daysDelta = (trailingDay.getTime() - orderDay.getTime()) / 86400000;
+    return daysDelta > 1; // KDC kdcTarget = 1 day
+  }, []);
+
+  // PR Geo-3: convenience — delayed slice of the cohort. Network Total
+  // and the Top-5 ranking derive from this. Splitting it out keeps the
+  // dependency graph cheap to re-run if other useMemos need just the
+  // delayed slice later (e.g. PR Geo-4 will likely subdivide by cause).
+  const delayedShipments = useMemo(() => cohort.filter(isDelayed), [cohort, isDelayed]);
+
+  // PR Geo-3: network-wide delayed count = issueTotal denominator for
+  // every state's shareOfIssue. With the Issue selector locked to 'all'
+  // (PR Geo-4 will wire the others), this is simply delayedShipments.length.
+  // Kept selectedIssue in the deps so when PR Geo-4 introduces cause-level
+  // filtering, this useMemo extends naturally without rewiring downstream.
+  const issueTotal = useMemo(() => {
+    if (selectedIssue === 'all') return delayedShipments.length;
+    // PR Geo-4 will replace this branch with a real cause filter.
+    return delayedShipments.length;
+  }, [delayedShipments, selectedIssue]);
+
+  // PR Geo-3: per-state metrics — same object shape the existing JSX
+  // (heat map, hover detail, Top 5) consumes, but the source is now the
+  // ship-confirm cohort and the "issue" bucket is the day-grain delayed
+  // flag rather than mock's random `cause`. Channels still aggregate
+  // across the whole cohort (state-level activity heatmap). Causes
+  // aggregate only across delayed rows so the hover-detail "top cause"
+  // still has meaning once PR Geo-4 maps cause to a real classification.
   const stateMetrics = useMemo(() => {
     const m = {};
     Object.keys(STATE_GRID).forEach(st => {
       m[st] = { state: st, total: 0, issueCount: 0, allDelayed: 0, causes: {}, channels: {} };
     });
-    filtered.forEach(r => {
+    cohort.forEach(r => {
       if (!m[r.state]) return;
       m[r.state].total++;
       m[r.state].channels[r.channel] = (m[r.state].channels[r.channel] || 0) + 1;
-      if (r.cause) {
+      if (isDelayed(r)) {
         m[r.state].allDelayed++;
-        m[r.state].causes[r.cause] = (m[r.state].causes[r.cause] || 0) + 1;
+        const causeKey = r.cause || 'Other';
+        m[r.state].causes[causeKey] = (m[r.state].causes[causeKey] || 0) + 1;
       }
-      const hit = selectedIssue === 'all' ? !!r.cause : r.cause === selectedIssue;
+      const hit = selectedIssue === 'all' ? isDelayed(r) : (isDelayed(r) && r.cause === selectedIssue);
       if (hit) m[r.state].issueCount++;
     });
-    // Compute rates
     Object.values(m).forEach(s => {
       s.issueRateInState = s.total ? s.issueCount / s.total : 0;
       s.shareOfIssue = issueTotal ? s.issueCount / issueTotal : 0;
@@ -836,7 +890,7 @@ const GeoPage = ({ filtered }) => {
       s.topChannelCount = topCh ? topCh[1] : 0;
     });
     return m;
-  }, [filtered, selectedIssue, issueTotal]);
+  }, [cohort, isDelayed, selectedIssue, issueTotal]);
 
   // Max share for color scaling
   const maxShare = useMemo(() => {
@@ -859,13 +913,18 @@ const GeoPage = ({ filtered }) => {
     return `${baseColor}${Math.round(alpha * 255).toString(16).padStart(2, '0')}`;
   };
 
+  // PR Geo-3: only 'all' is live ('All Delayed' = day-grain SLA breach
+  // in the ship-confirm cohort). The other five buttons are kept as
+  // disabled placeholders — visual continuity with the old cause-based
+  // page, and a reminder that PR Geo-4 will wire issue categorization
+  // once operations defines the classification rules.
   const issueOptions = [
-    { key: 'all', label: 'All Delays', color: '#E74C6F' },
-    { key: 'UPS', label: 'UPS Carrier', color: CAUSE_COLORS.UPS },
-    { key: 'DC', label: 'DC Processing', color: CAUSE_COLORS.DC },
-    { key: 'Missing', label: 'Missing Product', color: CAUSE_COLORS.Missing },
-    { key: 'Damage', label: 'Damage/Problem', color: CAUSE_COLORS.Damage },
-    { key: 'Other', label: 'Other', color: CAUSE_COLORS.Other },
+    { key: 'all', label: 'All Delayed', color: '#E74C6F', enabled: true },
+    { key: 'UPS', label: 'UPS Carrier', color: CAUSE_COLORS.UPS, enabled: false },
+    { key: 'DC', label: 'DC Processing', color: CAUSE_COLORS.DC, enabled: false },
+    { key: 'Missing', label: 'Missing Product', color: CAUSE_COLORS.Missing, enabled: false },
+    { key: 'Damage', label: 'Damage/Problem', color: CAUSE_COLORS.Damage, enabled: false },
+    { key: 'Other', label: 'Other', color: CAUSE_COLORS.Other, enabled: false },
   ];
 
   // Grid size
@@ -875,24 +934,35 @@ const GeoPage = ({ filtered }) => {
 
   return (
     <>
-      {/* Issue selector */}
+      {/* Issue selector — PR Geo-3: only 'All Delayed' is wired.
+          The other categories are disabled placeholders (operations
+          hasn't defined the classification yet — PR Geo-4). */}
       <SectionCard title="Select Issue Type" subtitle="Heat map recolors by % of this issue's volume per state" tag="SELECTOR">
         <div className="flex flex-wrap gap-2">
-          {issueOptions.map(opt => (
-            <button key={opt.key} onClick={() => setSelectedIssue(opt.key)}
-              className={`px-3 py-2 rounded text-[12px] font-mono uppercase tracking-wider border transition-all ${
-                selectedIssue === opt.key
-                  ? 'border-transparent text-white font-semibold'
-                  : 'border-[#2d3744] text-[#8a95a3] hover:border-[#1ABC9C] hover:text-[#e8ecef]'
-              }`}
-              style={selectedIssue === opt.key ? { background: opt.color, boxShadow: `0 0 0 1px ${opt.color}` } : {}}>
-              <span className="inline-block w-2 h-2 rounded-sm mr-2" style={{ background: opt.color }}/>
-              {opt.label}
-              {selectedIssue === opt.key && (
-                <span className="ml-2 font-semibold">· {selectedIssue === 'all' ? filtered.filter(r=>r.cause).length : filtered.filter(r=>r.cause===selectedIssue).length} total</span>
-              )}
-            </button>
-          ))}
+          {issueOptions.map(opt => {
+            const active = selectedIssue === opt.key;
+            const disabled = !opt.enabled;
+            return (
+              <button
+                key={opt.key}
+                onClick={() => { if (!disabled) setSelectedIssue(opt.key); }}
+                disabled={disabled}
+                title={disabled ? 'Coming soon — issue categorization (PR Geo-4)' : undefined}
+                className={`px-3 py-2 rounded text-[12px] font-mono uppercase tracking-wider border transition-all ${
+                  active
+                    ? 'border-transparent text-white font-semibold'
+                    : 'border-[#2d3744] text-[#8a95a3] hover:border-[#1ABC9C] hover:text-[#e8ecef]'
+                } ${disabled ? 'opacity-40 cursor-not-allowed hover:border-[#2d3744] hover:text-[#8a95a3]' : ''}`}
+                style={active ? { background: opt.color, boxShadow: `0 0 0 1px ${opt.color}` } : {}}
+              >
+                <span className="inline-block w-2 h-2 rounded-sm mr-2" style={{ background: opt.color }}/>
+                {opt.label}
+                {active && (
+                  <span className="ml-2 font-semibold">· {issueTotal} total</span>
+                )}
+              </button>
+            );
+          })}
         </div>
       </SectionCard>
 
@@ -1062,6 +1132,12 @@ const GeoPage = ({ filtered }) => {
                 <div className="text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono mb-1">Network Total</div>
                 <div className="text-lg font-semibold">{selectedIssue === 'all' ? 'All Delayed Shipments' : CAUSE_LABELS[selectedIssue]}</div>
                 <div className="font-mono text-3xl mt-2" style={{ color: baseColor }}>{issueTotal}</div>
+                {/* PR Geo-3: cohort denominator so ops can read the ratio
+                    at a glance — "X delayed out of Y ship-confirmed" frames
+                    the rate against KDC's completed work, not all shipments. */}
+                <div className="text-[11px] font-mono text-[#5d6b7a] mt-1">
+                  Cohort: <span style={{ color: '#8a95a3' }}>{cohort.length}</span> ship-confirmed (trailing ≥ 700)
+                </div>
                 <div className="text-[12px] text-[#8a95a3] mt-1">Hover a state for details</div>
               </>
             )}
