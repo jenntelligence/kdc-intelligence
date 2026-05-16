@@ -4158,6 +4158,119 @@ unchanged — consumes the new fields in PR Geo-3.
 
 ---
 
+### PR Geo-2 — Mock generator: trailing_status + trailing_status_date (completed 2026-05-15)
+
+PR Geo-1 wired the live endpoint and adapters. PR Geo-2 closes the loop
+on the mock side so PR Geo-3's delayed-view logic can run under
+`source: 'mock-fallback'` too — same dashboard code, both data sources.
+
+**User direction:**
+
+- Mock fallback strategy: option B from §6.9 of the verification
+  report — simulate the real logic so the same dashboard logic
+  exercises both live and mock.
+- Cohort definition (consumed by PR Geo-3): `trailing_status >= 700`
+  (delivery state irrelevant — the cohort is "did this shipment
+  reach ship-confirm-or-beyond", not "is this delivered").
+- Visuals stay unchanged (no UI work in this PR — that's PR Geo-3).
+
+**Mock logic (per spec):**
+
+```
+80% reach trailing >= 700 (the cohort PR Geo-3 will operate on)
+  Within cohort, SCALE bucket follows mock delivery state:
+    delivered (!isOpen) → 900 (Closed)
+    open       (isOpen) → 700 or 800 (Ship/Load Confirm Pending)
+  Within cohort, delayed/on-time split:
+    25% delayed   → trailing_status_date = orderCreate + 1.5–3 days
+    75% on time   → trailing_status_date = orderCreate + 0.3–1 day
+
+20% still < 700 (not yet ship-confirmed)
+  trailing_status = random pick from {100, 200, 201, 300, 301, 400,
+                                       401, 600, 650}
+  trailing_status_date = null
+```
+
+`isDelivered` for mock is set at the top of the loop
+(`Math.random() > 0.20` → 80% delivered, 20% open).
+
+**Cohort vs delivery — semantic note:**
+
+The cohort draw (`reachedShipConfirm`) is *independent* of
+`isDelivered`. That can produce semantically odd combos in the
+mock (e.g. a shipment with `isDelivered = true` but
+`trailing_status < 700`). This is intentional — the goal is to
+exercise PR Geo-3's branches (in-cohort + below-cohort) under
+controlled distribution, not to be operationally consistent.
+The live data path doesn't have this tension because
+`TRAILING_STS` is set by SCALE from the real shipment state.
+
+Trade-off: physical consistency was the alternative (tie cohort
+membership to `isDelivered`). That would have given ~96% in
+cohort and ~4% below (since 80% delivered automatically qualify,
+and only some open shipments would dip below 700). Independent
+draw is the cleaner way to land near the requested 80/20.
+
+**Implementation location:**
+
+`src/ShippingSLAApp.jsx` → `generateMockShipments` → loop body,
+inserted just before the `rows.push({...})` call so the values
+are computed once per shipment and dropped into the object
+literal. Two fields added to the object: `trailing_status`,
+`trailing_status_date` (matching the live frontend adapter's
+naming from PR Geo-1).
+
+**Expected aggregate distribution** (320 shipments, default mock
+size — actual values vary by RNG seed):
+
+- ~80% in cohort (`trailing_status >= 700`)
+- ~20% below cohort (`trailing_status < 700`,
+  `trailing_status_date = null`)
+- Inside cohort: ~25% delayed (`trailing_status_date - orderCreate
+  > 1 day`), ~75% on time
+- Net mock delayed rate: ~20% of full population, ~25% of cohort
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`: mock generator distribution block +
+  two new fields on the row object.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this
+  section.
+
+**Trust hierarchy:**
+
+- PR Geo-1's live field names (`trailing_status`,
+  `trailing_status_date`) — mock uses identical names.
+- Frontend adapter unchanged — already PR-Geo-1-aware.
+- `orderCreate` (mock's Date object) used as the order-date
+  anchor — same role `so_created_date` plays on the live side.
+
+**Validation:**
+
+- `npm run build` passes.
+- Mock fallback (kill `node server.js`, refresh dashboard):
+  - All existing pages render unchanged (Split, KPIs, banners,
+    Geographic page still in cause-based mode).
+  - Browser devtools: `data[i].trailing_status` populated for
+    every row; `data[i].trailing_status_date` is a `Date` object
+    for in-cohort rows, `null` for below-cohort rows.
+  - Sample distribution check (devtools):
+    `data.filter(r => r.trailing_status >= 700).length / data.length`
+    should land near 0.80.
+
+**No changes to:** `server.js`, live endpoint, hook, adapter,
+`filteredPageData` (PR16), `splitData` (PR10), `containerMetrics`
+(PR11), `ytdCustomerList` (PR6/PR13), KPI cards, banners, other
+sections, filter dropdowns (PR16/17a), search bar (PR17b),
+pagination (PR15), expand-all (PR14), Excel export (PR18),
+Split page functionality, Geographic page (PR Geo-3 will
+introduce consumption).
+
+**Depends on:** PR Geo-1 (live field names this mirrors).
+**Blocks:** PR Geo-3 (GeoPage delayed-view swap).
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

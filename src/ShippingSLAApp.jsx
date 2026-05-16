@@ -267,6 +267,40 @@ const generateMockShipments = () => {
     const waveHour = t4.getHours();
     const shift = waveHour >= 6 && waveHour < 14 ? shifts[0] : waveHour >= 14 && waveHour < 22 ? shifts[1] : shifts[2];
 
+    // PR Geo-2: trailing_status / trailing_status_date — mock equivalents of
+    // the SH-level columns plumbed by PR Geo-1 (sh.TRAILING_STS /
+    // sh.TRAILING_STS_DATE). Goal is parity for PR Geo-3's delayed-view
+    // classifier, not operational realism — the mock draws cohort
+    // membership independently so both branches (in-cohort + below-cohort)
+    // exercise the dashboard logic.
+    //
+    // Distribution:
+    //   80% reach trailing >= 700 ("ship-confirm cohort" GeoPage will
+    //     operate on in PR Geo-3). Within that cohort:
+    //       25% delayed → trailing_status_date = order + 1.5–3 days
+    //       75% on time → trailing_status_date = order + 0.3–1 day
+    //     SCALE bucket inside the cohort follows mock delivery state:
+    //       delivered (!isOpen) → 900 (Closed)
+    //       open (isOpen)       → 700 or 800 (Ship/Load Confirm Pending)
+    //   20% still < 700 (random pick/pack/stage status, date = null).
+    const reachedShipConfirm = Math.random() < 0.80;
+    let trailing_status;
+    let trailing_status_date;
+    if (reachedShipConfirm) {
+      trailing_status = !isDelivered
+        ? (Math.random() < 0.5 ? 700 : 800)
+        : 900;
+      const isDelayedTrailing = Math.random() < 0.25;
+      const daysOffset = isDelayedTrailing
+        ? 1.5 + Math.random() * 1.5
+        : 0.3 + Math.random() * 0.7;
+      trailing_status_date = new Date(orderCreate.getTime() + daysOffset * 86400000);
+    } else {
+      const subStatusOptions = [100, 200, 201, 300, 301, 400, 401, 600, 650];
+      trailing_status = subStatusOptions[Math.floor(Math.random() * subStatusOptions.length)];
+      trailing_status_date = null;
+    }
+
     rows.push({
       id: `SH-${10000+i}`,
       orderId: `SO-${50000+i}`,
@@ -287,6 +321,9 @@ const generateMockShipments = () => {
       cause, onTimeShip: t7 <= promiseShip,
       onTimeDelivery: delivered ? delivered <= promiseDeliver : null,
       isOpen: !isDelivered,
+      // PR Geo-2: SH-level trailing status (mock parity with PR Geo-1 live).
+      trailing_status,
+      trailing_status_date,
       isSplit,
       splitCartons,
       splitGapDays,
