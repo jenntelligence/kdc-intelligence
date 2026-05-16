@@ -797,10 +797,31 @@ const STATE_NAMES = {
 // ============================================================
 // GEO PAGE — Heat map with issue-type selector
 // ============================================================
-const GeoPage = ({ filtered }) => {
+const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [] }) => {
   const [selectedIssue, setSelectedIssue] = useState('all'); // PR Geo-3: only 'all' is live; other buttons are disabled placeholders for PR Geo-4
   const [hoveredState, setHoveredState] = useState(null);
   const [carrierView, setCarrierView] = useState('UPS'); // 'UPS' or 'Truck'
+
+  // PR Geo-3-fix: data source switched from the App-level `filtered` prop
+  // (which is built from the App's mock-only pageData) to the same hook
+  // SplitShipmentPage uses (`useSplitShipments`). The App-level pageData
+  // never wires to Snowflake — only the per-page hook does — so PR Geo-3's
+  // initial wiring ran the cohort filter against pure mock and surfaced
+  // 0 delayed in the browser. Reusing the hook gives Geo the same
+  // live/mock-fallback contract as Split: live rows when the server is
+  // up, mock generator rows when it isn't.
+  //
+  // The legacy `filtered` prop stays in the signature for backward
+  // compatibility; nothing in this page reads it anymore.
+  const { data: hookData, loading: hookLoading } = useSplitShipments(dateRange, customRange);
+
+  // Apply the App-level channel-chip selection (mirrors SplitShipmentPage's
+  // pageData useMemo). Empty selection = no filtering.
+  const pageData = useMemo(() => {
+    if (!hookData) return [];
+    if (!selectedChannels || selectedChannels.length === 0) return hookData;
+    return hookData.filter(r => selectedChannels.includes(r.channel));
+  }, [hookData, selectedChannels]);
 
   // PR Geo-3: cohort = shipments that reached ship-confirm-or-beyond
   // (trailing_status >= 700). This is the population GeoPage operates on
@@ -811,10 +832,10 @@ const GeoPage = ({ filtered }) => {
   // so the cohort is intentionally KDC-side-finished work, regardless
   // of UPS delivery state.
   const cohort = useMemo(() => {
-    return (filtered || []).filter(r =>
+    return pageData.filter(r =>
       r.trailing_status != null && Number(r.trailing_status) >= 700
     );
-  }, [filtered]);
+  }, [pageData]);
 
   // PR Geo-3: day-grain delayed classifier — true if KDC took longer than
   // the kdcTarget (1 day) to reach the trailing status. Comparison is
@@ -824,13 +845,17 @@ const GeoPage = ({ filtered }) => {
   //
   //   isDelayed(r) ⇔ floor(trailing_date) - floor(order_date) > 1
   //
-  // Accepts both shapes: live `so_created_date` / `trailing_status_date`
-  // are ISO strings; mock (PR Geo-2) passes Date objects. `new Date()`
-  // handles both. Returns false when either timestamp is missing so the
-  // shipment falls into the "unknown" bucket rather than being flagged.
+  // PR Geo-3-fix: the order-date field name differs between live and
+  // mock paths. Live (adapter PR4b1 + Geo-1) carries `so_created_date`
+  // (ISO string). The hook's mock-fallback path returns raw rows from
+  // `generateMockShipments()` which carry `orderCreate` (Date object)
+  // — the adapter is NOT applied to mock. We accept either field so the
+  // classifier works under both branches without rewiring the mock.
+  // `new Date()` handles both ISO strings and Date objects.
   const isDelayed = useCallback((r) => {
-    if (!r.trailing_status_date || !r.so_created_date) return false;
-    const order = new Date(r.so_created_date);
+    const orderRaw = r.so_created_date || r.orderCreate;
+    if (!r.trailing_status_date || !orderRaw) return false;
+    const order = new Date(orderRaw);
     const trailing = new Date(r.trailing_status_date);
     if (Number.isNaN(order.getTime()) || Number.isNaN(trailing.getTime())) return false;
     const orderDay = new Date(order.getFullYear(), order.getMonth(), order.getDate());
@@ -931,6 +956,12 @@ const GeoPage = ({ filtered }) => {
   const maxRow = 6, maxCol = 12;
   const cellSize = 52;
   const gap = 4;
+
+  // PR Geo-3-fix: same loading affordance as SplitShipmentPage so the
+  // page doesn't flash an empty heat map while the hook resolves.
+  if (hookLoading) {
+    return <div className="p-8 text-center text-[12px] font-mono" style={{ color: 'var(--text-muted)' }}>Loading delayed-shipment data…</div>;
+  }
 
   return (
     <>
@@ -7720,7 +7751,7 @@ export default function ShippingSLAApp() {
           <AccessDenied currentUser={currentUser} page={activePage}/>
         ) : (
           <>
-            {activePage === 'geo' && <GeoPage filtered={filtered} />}
+            {activePage === 'geo' && <GeoPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} />}
             {activePage === 'ai' && <AIRiskPage filtered={filtered} data={data}/>}
             {activePage === 'split' && <SplitShipmentPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} filterCause={filterCause} filterRegion={filterRegion} onMetaChange={setSplitMeta}/>}
             {activePage === 'costs' && <CostsPage filtered={filtered}/>}

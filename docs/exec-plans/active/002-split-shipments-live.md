@@ -4489,6 +4489,178 @@ can light up).
 
 ---
 
+### PR Geo-3-fix — GeoPage live data wiring via useSplitShipments hook (completed 2026-05-15)
+
+PR Geo-3 looked correct in isolation — build green, live endpoint
+returning the new fields, distribution numbers checked out — but the
+browser told a different story. After the commit, the user opened
+the Geographic page and screenshotted this:
+
+```
+All Delayed Shipments: 0
+Cohort: 254 ship-confirmed (trailing ≥ 700)
+Heat map: every state 0 intensity
+Top 5: "No data for selected issue"
+```
+
+A console fetch confirmed the endpoint itself was fine — 6,936 rows,
+~5,875 in cohort by `trailing_sts` raw. So the page was bypassing
+the live endpoint entirely.
+
+**Root cause:**
+
+The GeoPage signature was `({ filtered })` and the App-level
+invocation passed `filtered` from the App's `useMemo` (line 6481),
+which derives from `data = uploadedData || rawData`. `rawData` is
+`generateMockShipments()` and is *never* re-populated from
+Snowflake. The App-level pageData has always been mock-only on every
+page except the ones that own their own hook.
+
+SplitShipmentPage works because it ignores its own `filtered` prop
+and calls `useSplitShipments(...)` directly (line 1914). PR Geo-3
+inherited the assumption that `filtered` carried live data — but
+that's only true on the Split page, and only because the Split page
+overrides the prop with its own hook output. The Geographic page
+had no such override, so PR Geo-3's cohort filter ran against the
+~320 mock rows. ~80% × 320 = 256 cohort, with `so_created_date`
+undefined on every row → `isDelayed` short-circuited to `false`
+everywhere → "0 delayed."
+
+The fix is structural: GeoPage joins the hook-owning club instead
+of consuming the App-level mock.
+
+**Fix — three surgical changes to GeoPage:**
+
+1. Signature gains the same three props SplitShipmentPage takes:
+
+   ```jsx
+   const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [] }) => {
+   ```
+
+   `filtered` stays in the signature for backward compatibility but
+   is no longer read inside the component.
+
+2. `useSplitShipments(dateRange, customRange)` is called at the top
+   of the component. A `pageData` useMemo applies the channel-chip
+   filter on top:
+
+   ```jsx
+   const { data: hookData, loading: hookLoading } = useSplitShipments(dateRange, customRange);
+   const pageData = useMemo(() => {
+     if (!hookData) return [];
+     if (!selectedChannels || selectedChannels.length === 0) return hookData;
+     return hookData.filter(r => selectedChannels.includes(r.channel));
+   }, [hookData, selectedChannels]);
+   ```
+
+   `cohort`'s source switches from `(filtered || [])` to `pageData`.
+
+3. A loading affordance mirrors SplitShipmentPage (line 2274):
+
+   ```jsx
+   if (hookLoading) {
+     return <div ...>Loading delayed-shipment data…</div>;
+   }
+   ```
+
+**One more thing — `isDelayed`'s mock blind spot:**
+
+The hook returns raw mock rows (line 1822, 1871) in both
+`source === 'mock'` and `source === 'mock-fallback'`. Those rows
+carry `orderCreate` (a `Date` object) but **not** `so_created_date`
+— the adapter (`serverRowsToShipments`, line 1553) is only applied
+on the live path, where Snowflake hands us snake_case.
+
+So even after switching to the hook, mock-fallback would still
+flag 0 delayed because `r.so_created_date` is undefined on every
+mock row. Fixed by accepting either field:
+
+```javascript
+const orderRaw = r.so_created_date || r.orderCreate;
+if (!r.trailing_status_date || !orderRaw) return false;
+```
+
+This is the same field-fallback pattern PR18's `flattenForExport`
+uses for live (`container_id`) vs mock (`containerId`). It keeps
+the mock generator untouched and the adapter untouched — both
+remain authoritative on their own path.
+
+**App-level invocation:**
+
+```jsx
+{activePage === 'geo' && (
+  <GeoPage
+    filtered={filtered}
+    dateRange={dateRange}
+    customRange={customRange}
+    selectedChannels={selectedChannels}
+  />
+)}
+```
+
+Mirrors the SplitShipmentPage invocation at line 7725.
+
+**Why this slipped past PR Geo-3 verification:**
+
+The PR Geo-3 commit was validated against the live *endpoint*
+(via `curl`) and against the *build*, both of which were healthy.
+The visual-render check was skipped — the assumption was that
+once the live endpoint returned the right shape, the page would
+consume it. The structural detail of which prop carried what data
+was an unstated assumption that broke. Lesson: for any page where
+"is this consuming the right data source?" is a live question,
+add a browser-load smoke step explicitly to the PR's validation
+list, not just an endpoint smoke.
+
+**Files modified:**
+
+- `src/ShippingSLAApp.jsx`:
+  - `GeoPage`: signature extended, `useSplitShipments` hook
+    added, `pageData` useMemo (channel filter), `cohort` source
+    switched to `pageData`, `isDelayed` accepts
+    `orderCreate` as a fallback, loading guard before return.
+  - App-level `<GeoPage>` invocation: gains `dateRange`,
+    `customRange`, `selectedChannels` props.
+- `docs/exec-plans/active/002-split-shipments-live.md`: this
+  section.
+
+**Trust hierarchy (final, post-fix):**
+
+- `useSplitShipments(dateRange, customRange)` (PR4b2) — same hook
+  Split owns.
+- `pageData` — channel-filtered hook output.
+- `cohort` — `trailing_status >= 700` slice of `pageData`.
+- `isDelayed` — day-grain classifier, accepts both live
+  (`so_created_date`) and mock (`orderCreate`) order dates.
+- Visual layer unchanged.
+
+**Validation:**
+
+- `npm run build` passes.
+- Live mode (server running):
+  - Network Total shows a 3-digit delayed count matching the
+    endpoint's day-grain delayed slice (~900 in the 7-day window
+    used for the smoke).
+  - Cohort subtitle shows the ~1,400 ship-confirmed denominator.
+  - Heat map tile colors reflect real state share.
+- Mock fallback (kill server, refresh):
+  - Cohort lands near 256/320 (~80% of mock).
+  - Delayed lands near 64/320 (~25% of cohort × 80% of full),
+    not 0.
+
+**No changes to:** `server.js`, `useSplitShipments` hook, adapter
+chain, mock generator (PR Geo-2 stays as-is), `filteredPageData`
+(PR16), `splitData` (PR10), `containerMetrics` (PR11),
+`ytdCustomerList`, KPI cards, banners, SplitShipmentPage,
+filter dropdowns, search bar, pagination, expand-all, Excel
+export, heat-map SVG markup, Top-5 markup, Insight markup, Lead
+Time Standards table.
+
+**Depends on:** PR Geo-1, PR Geo-2, PR Geo-3.
+**Blocks:** PR Geo-4 (still operations-defined).
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type
