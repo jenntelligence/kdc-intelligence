@@ -31,6 +31,12 @@ explore-*.json
 
 # PR3+ smoke test artifacts (large API response dumps)
 smoke_result*.json
+smoke_hotfix.json
+
+# Session / harness artifacts (Claude Code, bkit, PDCA tracking)
+.claude/
+docs/.bkit-memory.json
+docs/.pdca-status.json
 
 # OS / IDE
 Thumbs.db
