@@ -4661,6 +4661,148 @@ Time Standards table.
 
 ---
 
+### PR Container-Type-Fix — Master query 의 container_type whitelist 제거 (completed 2026-05-15)
+
+PR Geo-3-fix 후 사용자분이 Snowflake 의 raw fact 와 dashboard 의 fact 의
+검증 진행. 235 DOs 의 차이 의 root cause 발견: container_type
+whitelist 가 active 의 container types exclude 했음.
+
+**사용자분 검증 cycle:**
+
+```
+사용자분 SQL (2026-05-11~2026-05-18, no container_type filter):
+  Distinct DOs: 1,720
+
+Dashboard endpoint (같은 window):
+  Distinct DOs: 1,485
+
+차이: 235 DOs
+
+검증 SQL 의 추가 fact:
+  - 모든 DO 가 single state + single trailing_sts (DO level 확인)
+  - Master query 의 모든 추가 CTEs 가 LEFT JOIN (row 제외 X)
+  - 사용자분 base CTE 와 server.js base CTE 의 차이 = container_type filter
+
+제외된 container types (235 DOs 의 root cause):
+  VV BOX 28      | 382 containers, 162 DOs  (Vivace shipping boxes)
+  VV BOX 40      | 200 containers, 121 DOs
+  VV BOX 30      | 183 containers, 144 DOs
+  VV BOX 22.5    |  10 containers,  10 DOs
+  MANNEQUIN19    |  34 containers,  33 DOs
+  MANNEQUIN24    |   4 containers,   4 DOs
+  BOX IK2        |   6 containers,   6 DOs
+```
+
+**Operational impact:**
+
+Whitelist 가 incomplete:
+- 'ivy inner', 'ivy outer' = BS-IVY channel 의 container types
+- 'as inner', 'as outer' = BS-RED channel 의 container types (추측)
+- VIVACE channel 의 container types 누락 (VV BOX 의 모든 size)
+
+즉 Dashboard 의 VIVACE channel 의 fact 가 incomplete:
+- Image fact: VIVACE 10.5%, 2/19 (작은 fraction)
+- 진짜 fact: 437+ containers across 162+ DOs (큰 volume)
+
+**User decision:**
+
+> "lower(sc.container_type) in (...) 이거 comment out 하고
+>  AND sc.container_id is not null 이걸로 넣자 일단"
+
+즉 whitelist 완전 제거. Container_id IS NOT NULL 만 유지
+(data integrity).
+
+**Why this is the right call:**
+
+- 모든 active shipping containers 가 운영적으로 의미 있음
+- VIVACE channel 의 진짜 fact 표시
+- 운영팀 의 진짜 KDC fact (incomplete view 회피)
+- 미래 confidence (whitelist 의 추가 누락 회피)
+
+**Trade-off — non-shipping containers 의 risk:**
+
+container_id IS NOT NULL 만으로 충분?
+- 만약 운영적으로 의미 없는 types (예: sample, return, test) 가
+  있으면 포함됨
+- 사용자분 결정: "일단" 진행 (검증 cycle 후 정정 가능)
+- 미래 PR 가능성: 운영팀 검증 후 정확한 whitelist (또는 blacklist)
+
+**Changes to master query (SPLIT_SHIPMENTS_SQL):**
+
+base CTE 의 WHERE clause:
+```sql
+WHERE sc.company in ('Ivy', 'Red', 'Vivace')
+    -- PR Container-Type-Fix: whitelist commented out
+    -- and lower(sc.container_type) in ('as inner', 'as outer', 'car',
+    --     'ip', 'ivy inner', 'ivy outer')
+    AND sc.container_id is not null
+    AND sh.carrier = 'UPS'
+    -- ... 기타 filters 그대로
+```
+
+**Expected impact on dashboard metrics:**
+
+DOs count:
+- Before: 1,485 DOs (May 11-18 window)
+- After: 1,720 DOs (235 DOs 증가)
+
+KPI 들:
+- Split Rate: denominator 변경
+- Orders Split: numerator + denominator 변경
+- In Transit: 변경
+- Missing Tracking: 변경
+- Channel breakdown: VIVACE 의 fact 정확화 (큰 변경 expected)
+- AVG GAP: 변경
+
+Geographic page:
+- Cohort: 변경
+- Delayed count: 변경
+- Heat map: 변경
+- Top 5: 변경
+
+**Files modified:**
+
+- `server.js` / SPLIT_SHIPMENTS_SQL:
+  - base CTE 의 container_type filter line comment out
+  - sc.container_id IS NOT NULL 추가 (data integrity)
+  - Block comment 로 PR Container-Type-Fix 의 의미 설명
+- `docs/exec-plans/active/002-split-shipments-live.md`: this section
+
+**Trust hierarchy:**
+
+- Snowflake 의 raw shipping_container fact (no whitelist)
+- Master query 의 base CTE (container_id IS NOT NULL 만)
+- 모든 downstream CTEs (ups_data, ia_work_instruction, classified, etc.)
+  그대로
+- Frontend logic 그대로 (PR Geo-1/2/3/fix 의 logic 영향 X)
+
+**Validation:**
+
+- npm run build passes
+- Server restart 후 endpoint smoke:
+  - Distinct DOs: 1,720 (사용자분 SQL 와 일치)
+  - VIVACE channel 의 DOs: 큰 증가
+  - Other channels: 변경 또는 작음
+- Browser smoke:
+  - Split page 의 KPI 들 의 변경 확인
+  - VIVACE channel breakdown 의 정확화
+  - Geographic page 의 cohort 의 증가
+  - Heat map / Top 5 의 변경
+
+**No changes to:** Frontend logic (PR Geo-1/2/3/fix 그대로),
+useSplitShipments hook, adapter chain, mock generator, KPI cards 의
+markup, banners, sections, filter dropdowns, search bar, pagination,
+Excel export.
+
+**Depends on:** PR Geo-1, PR Geo-2, PR Geo-3, PR Geo-3-fix.
+
+**Backlog:**
+- 운영팀 검증 (PR5): 새 1,720 DOs 의 운영 의미 확인
+- 만약 추가 정정 필요 시 새 PR
+- 35 DOs 의 추가 root cause (1,485 vs 1,450 의 차이) 검증
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

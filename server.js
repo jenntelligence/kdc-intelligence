@@ -1036,7 +1036,25 @@ with base as (
     join kdb.pbi_sf.zsdrordr so on sh.user_def4 = so.salesdocnumber
     left join kdb.pbi_sf.zsd_c01_billing b on ltrim(sh.user_def4, '0') = b."Sales_document"
     where sc.company in ('Ivy', 'Red', 'Vivace')
-    and lower(sc.container_type) in ('as inner', 'as outer', 'car', 'ip', 'ivy inner', 'ivy outer')
+    -- PR Container-Type-Fix (2026-05-15): whitelist commented out.
+    -- Whitelist was excluding active container types representing real
+    -- shipping work — notably the VIVACE channel's VV BOX series:
+    --   VV BOX 28   | 382 containers, 162 DOs
+    --   VV BOX 40   | 200 containers, 121 DOs
+    --   VV BOX 30   | 183 containers, 144 DOs
+    --   VV BOX 22.5 |  10 containers,  10 DOs
+    --   MANNEQUIN19 |  34 containers,  33 DOs
+    --   MANNEQUIN24 |   4 containers,   4 DOs
+    --   BOX IK2     |   6 containers,   6 DOs
+    -- Verified by user via direct Snowflake query (2026-05-11 to 2026-05-18):
+    --   Dashboard endpoint: 1,485 distinct DOs
+    --   Raw SQL (no whitelist): 1,720 distinct DOs (diff = 235 DOs)
+    -- User decision: drop whitelist, keep container_id IS NOT NULL for
+    -- data integrity. Trade-off accepted — non-shipping container types
+    -- (sample/return/test if any) may be included; operations validation
+    -- (PR5) will refine if needed.
+    -- and lower(sc.container_type) in ('as inner', 'as outer', 'car', 'ip', 'ivy inner', 'ivy outer')
+    and sc.container_id is not null
     and sh.carrier = 'UPS'
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') >= ?
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') <= ?
