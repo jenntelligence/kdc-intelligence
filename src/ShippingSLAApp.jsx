@@ -1722,6 +1722,20 @@ function serverRowsToShipments(rows) {
       trailing_status: doRow.trailing_sts,
       trailing_status_date: doRow.trailing_sts_date,
 
+      // PR Truck-1: carrier identity. 'UPS' or 'TRUCK' (raw SCALE
+      // shipment_header.carrier). Used by splitData / containerMetrics /
+      // ytdCustomerList to exclude TRUCK rows from Split metrics (Truck has
+      // no split concept; user-stated invariant). Mock data uses values like
+      // 'UPS Ground', 'FedEx Ground', so `carrier !== 'TRUCK'` keeps mock
+      // behavior intact.
+      //
+      // PR Truck-1-fix: pro_num + sales_doc_type 의 mapping 제거.
+      // Master query 의 final CTE 가 두 fields 의 직접 SELECT 안 함
+      // (사용자분 의도). pro_num 의 fact 는 tracking_num 의 coalesce 의
+      // inside (UPS 의 tracking_number 또는 Truck 의 pro_num) — frontend
+      // 의 r.tracking_num access 만 으로 양쪽 carrier 의 fact 충분.
+      carrier: doRow.carrier,
+
       // DO-level aggregations
       tracking_cnt: doRow.tracking_cnt,
       container_cnt: doRow.container_cnt,
@@ -2021,9 +2035,17 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
   // the '—' fallback that PR13's ytdCustomerList aggregation introduced for
   // missing-state rows. Bubbled up to the App via onMetaChange so the
   // global region dropdown shows only states present in the current window.
+  //
+  // PR Truck-1-Region-Fix: regionOptions is UPS-only. Every Split-page KPI
+  // already filters Truck out (PR Truck-1's splitData / containerMetrics /
+  // ytdCustomerList + PR Truck-1-Header-Fix's upsHookDataCount). If the
+  // region dropdown included Truck-only states, picking one would zero out
+  // every KPI on the page — confusing UX. Same `!== 'TRUCK'` pattern keeps
+  // mock-mode rows (carrier='UPS Ground' / 'FedEx Ground') intact.
   const regionOptions = useMemo(() => {
     const states = new Set();
     for (const o of pageData) {
+      if (o.carrier === 'TRUCK') continue;
       if (o.state && o.state !== '—') states.add(o.state);
     }
     return ['all', ...Array.from(states).sort()];
@@ -2033,10 +2055,24 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
   // so the App-level header summary dropdown, LIVE/MOCK badge, channel-chips
   // hint, and PR16 region filter dropdown can all react. Single object keeps
   // the interface small and lets the parent treat it as one snapshot.
+  //
+  // PR Truck-1-Header-Fix: header count is UPS only on the Split page.
+  // User-stated invariant — Split page renders Split metrics, where Truck
+  // has no split concept (Truck = LTL, single trailer / single pro_num).
+  // hookData carries UPS + Truck combined; filter Truck out so the header
+  // matches the in-page KPIs (which already use `upsOnly` via PR Truck-1).
+  // `!== 'TRUCK'` (not `=== 'UPS'`) preserves mock-mode rows whose carrier
+  // reads 'UPS Ground' / 'FedEx Ground' etc. The Geographic page renders
+  // its own header (line 7316-7318) and is intentionally untouched —
+  // operations there spans both carriers (cohort = 1,852 = UPS + Truck).
+  const upsHookDataCount = useMemo(() => {
+    if (!hookData) return 0;
+    return hookData.filter(o => o.carrier !== 'TRUCK').length;
+  }, [hookData]);
   useEffect(() => {
     if (!onMetaChange) return;
-    onMetaChange({ source, count: hookData ? hookData.length : 0, filter: filter ?? null, regions: regionOptions });
-  }, [source, hookData, filter, regionOptions, onMetaChange]);
+    onMetaChange({ source, count: upsHookDataCount, filter: filter ?? null, regions: regionOptions });
+  }, [source, upsHookDataCount, filter, regionOptions, onMetaChange]);
   // Clear the lifted state on unmount so the badge + summary disappear when leaving the page.
   useEffect(() => () => { if (onMetaChange) onMetaChange(null); }, [onMetaChange]);
 
@@ -2055,25 +2091,35 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     // folded MISSING_TRACKING into settled after PR9 dropped UNKNOWN and
     // added MISSING_TRACKING, deflating split rate by ~40%. The explicit
     // allow-list is safer if more categories ever land.
-    const settled = filteredPageData.filter(o => o.split_status === 'SPLIT' || o.split_status === 'NOT_SPLIT');
+    //
+    // PR Truck-1: Truck DOs excluded from all Split metrics. User-stated
+    // invariant — "split shipment 에는 TRUCK 이 포함이 되면 안된다". Truck
+    // is LTL (single trailer / single pro_num) with no split concept. The
+    // SQL classified CTE already auto-assigns NOT_SPLIT to TRUCK rows, but
+    // we also exclude them here so settled/pending/missing denominators
+    // reflect UPS-only operations. `!== 'TRUCK'` (not `=== 'UPS'`) preserves
+    // mock-mode rows whose carrier reads 'UPS Ground' / 'FedEx Ground' etc.
+    const upsOnly = filteredPageData.filter(o => o.carrier !== 'TRUCK');
+
+    const settled = upsOnly.filter(o => o.split_status === 'SPLIT' || o.split_status === 'NOT_SPLIT');
     const split = settled.filter(o => o.isSplit);
     const splitRate = settled.length ? split.length / settled.length : 0;
 
     // PR4b2: In Transit (PENDING) — surfaced as its own KPI to keep the settled rate clean.
-    const pending = filteredPageData.filter(o => o.split_status === 'PENDING');
-    const pendingRate = filteredPageData.length ? pending.length / filteredPageData.length : 0;
+    const pending = upsOnly.filter(o => o.split_status === 'PENDING');
+    const pendingRate = upsOnly.length ? pending.length / upsOnly.length : 0;
 
     // PR10: MISSING_TRACKING — DOs with at least one container missing a
     // UPS `tracking_num`. These are data-integrity / handoff gaps, not
     // operational outcomes. Surfaced via the amber banner above the KPI
     // cards; excluded from `settled` (and therefore from `splitRate`) and
     // from `pending` (since they're not in transit in the UPS-scan sense).
-    const missing = filteredPageData.filter(o => o.split_status === 'MISSING_TRACKING');
-    const missingRate = filteredPageData.length ? missing.length / filteredPageData.length : 0;
+    const missing = upsOnly.filter(o => o.split_status === 'MISSING_TRACKING');
+    const missingRate = upsOnly.length ? missing.length / upsOnly.length : 0;
 
     // By customer
     const byCustomer = {};
-    filteredPageData.forEach(o => {
+    upsOnly.forEach(o => {
       if (!byCustomer[o.customer]) byCustomer[o.customer] = { customer: o.customer, tier: o.tier, total: 0, split: 0 };
       byCustomer[o.customer].total++;
       if (o.isSplit) byCustomer[o.customer].split++;
@@ -2084,7 +2130,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
 
     // By shift (mock-only field; live mode produces a single 'unknown' bucket)
     const byShift = {};
-    filteredPageData.forEach(o => {
+    upsOnly.forEach(o => {
       const key = o.shift || (isLive ? 'N/A (live)' : 'unknown');
       if (!byShift[key]) byShift[key] = { shift: key, total: 0, split: 0 };
       byShift[key].total++;
@@ -2140,7 +2186,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     const worstGap = gapItemsCount ? gapItems.reduce((m,o) => o.splitGapDays > m ? o.splitGapDays : m, 0) : 0;
 
     return {
-      split, splitRate, settledCount: settled.length, pendingCount: pending.length, pendingRate, totalCount: filteredPageData.length,
+      split, splitRate, settledCount: settled.length, pendingCount: pending.length, pendingRate, totalCount: upsOnly.length,
       missing, missingCount: missing.length, missingRate,
       customerList, shiftList, reasonList, channelList, splitChargebacks, avgGap, worstGap, gapItemsCount,
     };
@@ -2175,6 +2221,9 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     let splitContainers = 0;
     let inTransitContainers = 0;
     for (const o of filteredPageData) {
+      // PR Truck-1: exclude TRUCK DOs from container-level Split metrics
+      // (paired invariant with splitData above — Truck has no split concept).
+      if (o.carrier === 'TRUCK') continue;
       const containers = o.containers || [];
       totalContainers += containers.length;
       const isSettled = o.split_status === 'SPLIT' || o.split_status === 'NOT_SPLIT';
@@ -2214,6 +2263,9 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     if (!ytdHookData) return [];
     const byCustomer = new Map();
     for (const o of ytdHookData) {
+      // PR Truck-1: exclude TRUCK DOs from YTD customer split ranking
+      // (paired invariant with splitData / containerMetrics above).
+      if (o.carrier === 'TRUCK') continue;
       const cust = o.customer || 'Unknown';
       if (!byCustomer.has(cust)) {
         byCustomer.set(cust, { customer: cust, tier: o.tier || null, state: o.state || '—', total: 0, splits: 0 });

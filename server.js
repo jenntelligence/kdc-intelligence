@@ -301,7 +301,6 @@ function toFactShape(row) {
     manifest_date_time: row.MANIFEST_DATE_TIME,
 
     // Container metadata (extends PR1 container fields)
-    leading_sts: row.LEADING_STS,
     container_type: row.CONTAINER_TYPE,
     tracking_num: row.TRACKING_NUM,
 
@@ -313,14 +312,27 @@ function toFactShape(row) {
     // its current TRAILING_STS (ET-converted in SQL). Used by GeoPage for
     // delayed-shipment detection: trailing_sts_date <= so_created_date +
     // kdcTarget (1 day) → on time.
+    // PR Truck-1: leading_sts removed (not in new master query).
     trailing_sts: row.TRAILING_STS,
     trailing_sts_date: row.TRAILING_STS_DATE,
 
-    // UPS tracking (ups_data CTE)
+    // PR Truck-1: carrier identity. 'UPS' or 'TRUCK' (raw SCALE
+    // shipment_header.carrier). Used by frontend to filter Split metrics
+    // to UPS only (Truck has no split concept).
+    //
+    // PR Truck-1-fix: pro_num + sales_doc_type 의 mapping 제거.
+    // Master query 의 final CTE 가 두 fields 의 직접 SELECT 안 함
+    // (사용자분 의도). pro_num 은 coalesce 의 inside 만 사용 — tracking_num
+    // 의 substitute 로 UPS 의 tracking_number 또는 Truck 의 pro_num.
+    // 즉 frontend 가 r.tracking_num 의 access 만 으로 양쪽 carrier 의 fact.
+    // sales_doc_type 은 미래 필요 시 다시 추가.
+    carrier: row.CARRIER,
+
+    // UPS / Truck tracking (ups_data + truck_data CTEs; coalesced in final)
+    // PR Truck-1: delivered_state removed (not in new ups_data CTE).
     origin_date: row.ORIGIN_DATE,
     processing_date: row.PROCESSING_DATE,
     delivered_date: row.DELIVERED_DATE,
-    delivered_state: row.DELIVERED_STATE,
 
     // DO-level aggregations (do_level CTE)
     tracking_cnt: row.TRACKING_CNT,
@@ -1009,6 +1021,7 @@ with base as (
         sh.user_def4 as so_num,
         sh.launch_num as wave_num,
         sh.shipment_id as do_num,
+        li."Means of Transport ID" as pro_num,
         sh.internal_shipment_num,
         sh.launch_num,
         cm.shiptoparty_key,
@@ -1019,9 +1032,8 @@ with base as (
         sc.container_id,
         sc.container_type,
         sc.container_class,
-        sh.LEADING_STS,
-        sh.TRAILING_STS,
-        convert_timezone('UTC', 'America/New_York', sh.TRAILING_STS_DATE) as trailing_sts_date,
+        sh.trailing_sts,
+        convert_timezone('UTC', 'America/New_York', sh.trailing_sts_date) as trailing_sts_date,
         sc.status as container_status,
         sc.tracking_number,
         sc.manifest_id,
@@ -1029,12 +1041,15 @@ with base as (
         convert_timezone('UTC', 'America/New_York', sc.date_time_stamp) as container_status_time,
         convert_timezone('UTC', 'America/New_York', sc.manifest_close_date_time) as manifest_close_time,
         b."Calendar_day" as billing_date,
-        sum(b."NET($)") as invoice_amount
+        b."Sales_doc._type" as sales_doc_type,
+        sh.carrier,
+        sum(b."GROSS($)") as invoice_amount
     from sci.l0.shipping_container sc
     join sci.l0.shipment_header sh on sc.internal_shipment_num = sh.internal_shipment_num
     join kdb.pbi_sf.sap_customer_master cm on sh.ship_to = cm.shiptoparty_key and sh.route = cm.salesorg_key
     join kdb.pbi_sf.zsdrordr so on sh.user_def4 = so.salesdocnumber
     left join kdb.pbi_sf.zsd_c01_billing b on ltrim(sh.user_def4, '0') = b."Sales_document"
+    left join sap_bw.l1.likp li on sh.shipment_id = li."Delivery"
     where sc.company in ('Ivy', 'Red', 'Vivace')
     -- PR Container-Type-Fix (2026-05-15): whitelist commented out.
     -- Whitelist was excluding active container types representing real
@@ -1055,10 +1070,17 @@ with base as (
     -- (PR5) will refine if needed.
     -- and lower(sc.container_type) in ('as inner', 'as outer', 'car', 'ip', 'ivy inner', 'ivy outer')
     and sc.container_id is not null
-    and sh.carrier = 'UPS'
+    -- PR Truck-1 (2026-05-15): Truck carrier 추가. UPS 와 Truck 양쪽 의 fact.
+    -- 사용자분 명시: "이 작업이 끝나면 carrier UPS 뿐만 아니고 TRUCK 도 추가해야돼"
+    -- Truck 의 routing: pro_num (likp Means of Transport ID), truck_data CTE
+    -- via sap_bw.l0.stage_ztshstus, status mapping (AF/CD/XB → origin,
+    -- P1/X4/etc → processing, D1 → delivered). Truck 의 split logic:
+    -- 사용자분 명시 "split shipment 에는 TRUCK 이 포함이 되면 안된다" —
+    -- classified CTE 에서 carrier='TRUCK' → NOT_SPLIT 자동 분류.
+    and (sh.carrier = 'UPS' or sh.carrier = 'TRUCK')
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') >= ?
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') <= ?
-    group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+    group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
 )
 , ia_work_instruction as (
     select
@@ -1080,10 +1102,19 @@ with base as (
         tracking_num,
         max(case when status_type = 'Origin' then datetime end) as origin_date,
         max(case when status_type = 'Generic' then datetime end) as processing_date,
-        max(case when status_type = 'Delivery' then datetime end) as delivered_date,
-        max(case when status_type = 'Delivery' then delivery_political_div1 end) as delivered_state
+        max(case when status_type = 'Delivery' then try_to_timestamp(datetime) end) as delivered_date
     from sci.l0.ups_tracking
     group by 1
+)
+, truck_data as (
+    select
+        pronum,
+        blnum as do_num,
+        max(case when stat1 in ('AF', 'CD', 'XB') then convert_timezone('UTC','America/New_York', to_timestamp(concat(stusdat, '_', lpad(coalesce(nullif(trim(stustim), ''), '000000'), 6 , '0')), 'YYYY-MM-DD_HH24MISS')) end) as origin_date,
+        max(case when stat1 in ('P1', 'X4', 'X6', 'L1', 'S1', 'J1', 'AG', 'AMAI', 'AV', 'SD', 'X1', 'X3', 'A7') then convert_timezone('UTC','America/New_York', to_timestamp(concat(stusdat, '_', lpad(coalesce(nullif(trim(stustim), ''), '000000'), 6 , '0')), 'YYYY-MM-DD_HH24MISS')) end) as processing_date,
+        max(case when stat1 = 'D1' then convert_timezone('UTC','America/New_York', to_timestamp(concat(stusdat, '_', lpad(coalesce(nullif(trim(stustim), ''), '000000'), 6 , '0')), 'YYYY-MM-DD_HH24MISS')) end) as delivered_date
+    from sap_bw.l0.stage_ztshstus
+    group by 1, 2
 )
 , final as (
     select
@@ -1097,22 +1128,21 @@ with base as (
         ia.zone,
         ia.picking_completion_time,
         ia.manifest_date_time,
-        b.leading_sts,
         b.trailing_sts,
         b.trailing_sts_date,
         b.container_id,
         b.container_status,
         b.container_type,
         b.container_status_time,
-        b.tracking_number as tracking_num,
+        coalesce(b.tracking_number, b.pro_num) as tracking_num,
         b.manifest_id,
         b.manifest_close_time,
-        ud.origin_date,
-        ud.processing_date,
-        ud.delivered_date,
-        ud.delivered_state,
+        coalesce(ud.origin_date, td.origin_date) as origin_date,
+        coalesce(ud.processing_date, td.processing_date) as processing_date,
+        coalesce(ud.delivered_date, td.delivered_date) as delivered_date,
         b.billing_date,
         b.invoice_amount,
+        b.carrier,
         b.cust_state,
         b.shiptoparty_key,
         b.cust_name,
@@ -1123,7 +1153,14 @@ with base as (
         b.internal_shipment_num
     from base b
     left join ia_work_instruction ia on b.do_num = ia.do and b.container_id = ia.container_id
-    left join ups_data ud on b.tracking_number = ud.tracking_num
+    left join ups_data ud on b.tracking_number = ud.tracking_num and b.carrier = 'UPS'
+    -- PR Truck-1-Region-Fix: trim → ltrim. Snowflake TRIM(str, '0') strips
+    -- zeros from BOTH ends, so a Truck DO ending in '0' (e.g., '0801950600')
+    -- becomes '801950 6' and silently misses the join to truck_data.blnum
+    -- → origin_date / processing_date / delivered_date land null. The
+    -- sibling clause on line 1051 deliberately uses LTRIM ('Sales_document'
+    -- join) — same intent here. Verified via code-analyzer review.
+    left join truck_data td on ltrim(b.do_num, '0') = td.do_num and b.pro_num = td.pronum and b.carrier = 'TRUCK'
     left join sci.l0.launch_statistics ls on b.launch_num = ls.internal_launch_num
 )
 , do_level as (
@@ -1132,7 +1169,7 @@ with base as (
         count(distinct tracking_num) as tracking_cnt,
         count(distinct container_id) as container_cnt,
         count(distinct manifest_id) as manifest_cnt,
-        count(distinct date_trunc('day', try_to_timestamp(delivered_date))) as delivered_date_cnt,
+        count(distinct date_trunc('day', delivered_date)) as delivered_date_cnt,
         max(case when tracking_num is null then 1 else 0 end) as has_null_tracking,
         max(case when tracking_num is not null and delivered_date is null then 1 else 0 end) as has_null_delivered_date
     from final
@@ -1147,7 +1184,11 @@ with base as (
         d.delivered_date_cnt,
         d.has_null_tracking,
         d.has_null_delivered_date,
-        case when d.has_null_tracking = 1 then 'MISSING_TRACKING'
+        -- PR Truck-1: Truck 자동 NOT_SPLIT (사용자분 명시 "split shipment 에는
+        -- TRUCK 이 포함이 되면 안된다"). Truck = LTL single trailer / single
+        -- pro_num — split 개념 없음. UPS 만 의 split 분석.
+        case when b.carrier = 'TRUCK' then 'NOT_SPLIT'
+             when d.has_null_tracking = 1 then 'MISSING_TRACKING'
              when d.delivered_date_cnt = 0 then 'PENDING'
              when d.delivered_date_cnt > 1 or d.has_null_delivered_date = 1 then 'SPLIT'
         else 'NOT_SPLIT'

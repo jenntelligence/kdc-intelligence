@@ -4803,6 +4803,537 @@ Excel export.
 
 ---
 
+### PR Truck-1 — Master query 에 Truck carrier 추가 + adapter (completed 2026-05-15)
+
+PR Container-Type-Fix 후 사용자분 명시 sequence:
+  "이 작업이 끝나면 carrier UPS 뿐만 아니고 TRUCK 도 추가해야돼"
+
+**Master query 의 변경 — 사용자분 의 새 SQL 적용:**
+
+Carrier filter:
+- Before: `sh.carrier = 'UPS'`
+- After:  `(sh.carrier = 'UPS' or sh.carrier = 'TRUCK')`
+
+base CTE 의 새 fields:
+- `pro_num` (likp."Means of Transport ID" — Truck pro number)
+- `sales_doc_type` (zsd_c01_billing."Sales_doc._type" — SAP order type)
+- `carrier` (sh.carrier — 'UPS' 또는 'TRUCK')
+
+base CTE 의 변경:
+- Removed: `sh.LEADING_STS` (사용자분 의 새 SQL 에서 drop)
+- Changed: `sum(b."NET($)")` → `sum(b."GROSS($)")` (invoice_amount)
+- Added: `left join sap_bw.l1.likp li on sh.shipment_id = li."Delivery"`
+- GROUP BY 1..24 → 1..26 (새 fields)
+
+ups_data CTE 의 변경:
+- Removed: `delivered_state` (사용자분 의 새 SQL 에서 drop)
+- Changed: `delivered_date` wraps `try_to_timestamp(datetime)` (CTE 안에서 cast)
+
+새 CTE: `truck_data` (sap_bw.l0.stage_ztshstus):
+- Truck status mapping:
+  - origin_date: stat1 in ('AF', 'CD', 'XB')
+  - processing_date: stat1 in ('P1', 'X4', 'X6', 'L1', 'S1', 'J1', 'AG',
+    'AMAI', 'AV', 'SD', 'X1', 'X3', 'A7')
+  - delivered_date: stat1 = 'D1'
+- Timestamp 의 build: `to_timestamp(concat(stusdat, '_',
+  lpad(coalesce(nullif(trim(stustim), ''), '000000'), 6, '0')),
+  'YYYY-MM-DD_HH24MISS')` then UTC → EST conversion
+
+final CTE 의 변경:
+- Removed: `b.leading_sts`, `ud.delivered_state`
+- Added: `b.carrier`
+- `tracking_num = coalesce(b.tracking_number, b.pro_num)` (UPS or Truck)
+- `origin_date = coalesce(ud.origin_date, td.origin_date)`
+- `processing_date = coalesce(ud.processing_date, td.processing_date)`
+- `delivered_date = coalesce(ud.delivered_date, td.delivered_date)`
+- 새 JOIN: `left join truck_data td on trim(b.do_num, '0') = td.do_num
+  and b.pro_num = td.pronum and b.carrier = 'TRUCK'`
+- ups_data JOIN 의 guard: `and b.carrier = 'UPS'`
+
+do_level CTE 의 변경:
+- Removed: `try_to_timestamp(delivered_date)` wrap (ups_data 안에서 이미
+  cast 됨)
+
+**classified CTE 의 Split status logic 의 정정:**
+
+사용자분 명시: "split shipment 에는 TRUCK 이 포함이 되면 안된다"
+
+```sql
+case when b.carrier = 'TRUCK' then 'NOT_SPLIT'  -- PR Truck-1: 추가
+     when d.has_null_tracking = 1 then 'MISSING_TRACKING'
+     when d.delivered_date_cnt = 0 then 'PENDING'
+     when d.delivered_date_cnt > 1 or d.has_null_delivered_date = 1 then 'SPLIT'
+else 'NOT_SPLIT'
+end as split_status
+```
+
+운영 의미:
+- Truck = LTL 의 shipment, "split" 개념 없음 (single trailer, single
+  pro_num)
+- Truck 의 모든 DOs 가 자동 NOT_SPLIT
+- Split rate 의 분석 = UPS only 의 fact
+
+**Server adapter (toFactShape) 의 정정:**
+
+Added fields:
+- `carrier: row.CARRIER`
+- `pro_num: row.PRO_NUM`
+- `sales_doc_type: row.SALES_DOC_TYPE`
+
+Removed fields:
+- `leading_sts: row.LEADING_STS` (master query 에서 drop)
+- `delivered_state: row.DELIVERED_STATE` (master query 에서 drop)
+
+**Frontend adapter (serverRowsToShipments) 의 정정:**
+
+DO row 에 새 fields 추가:
+- `carrier: doRow.carrier`
+- `pro_num: doRow.pro_num`
+- `sales_doc_type: doRow.sales_doc_type`
+
+기존 fields 그대로 (PR Geo-1 의 trailing_status, splitGapDays, orderValue
+등 변경 X).
+
+**Frontend Split metrics 의 Truck 제외 (SplitShipmentPage):**
+
+사용자분 명시 의도: "지금 보고 있는 split shipment 숫자는 변함이 없는거지"
+
+3 useMemos 에 carrier filter 추가:
+
+1. `splitData` (line 2043): top of useMemo 에서 `upsOnly =
+   filteredPageData.filter(o => o.carrier !== 'TRUCK')`. 모든 downstream
+   (settled, split, pending, missing, customerList, shiftList, reasonList,
+   channelList, gap analysis) 가 upsOnly 사용.
+
+2. `containerMetrics` (line 2172): for loop 의 entry 에서 `if (o.carrier
+   === 'TRUCK') continue;` — Truck DOs 의 containers 가 totalContainers /
+   settledContainers / inTransitContainers 의 sum 에서 제외.
+
+3. `ytdCustomerList` (line 2213): YTD customer 의 ranking 에서 동일한
+   guard. Truck customer 가 top-10 의 dilution 회피.
+
+⚠️ `!== 'TRUCK'` 의 의미 (not `=== 'UPS'`):
+- Mock 의 data: `carrier` 가 'UPS Ground', 'FedEx Ground', 'R&L LTL' 등
+  (mock generator 의 carriers list). `=== 'UPS'` 시 mock 의 모든 row 가
+  제외 → mock 의 zero-row regression. `!== 'TRUCK'` 사용 시 mock 의 모든
+  row 가 보존 (mock 에 'TRUCK' 값 없음).
+- Live 의 data: `carrier` 가 'UPS' 또는 'TRUCK' (SCALE raw value).
+  `!== 'TRUCK'` 으로 Truck 만 제외.
+
+결과:
+- Split Rate / Settled / In Transit / Missing Tracking 의 visual 변함 없음
+- 1,814 UPS DOs 의 fact 보존
+- Truck DOs 가 endpoint 에 들어가지만 Split metrics 무관
+
+**Expected smoke (May 11-18 window):**
+
+Endpoint distinct DOs:
+- Before (PR Container-Type-Fix 후): 1,814 (UPS only)
+- After (PR Truck-1): 1,814 (UPS) + N (Truck) = total
+- UPS only distinct DOs (carrier='UPS'): 1,814 변함 없음
+
+Split metrics (UPS only filter 후):
+- Total UPS DOs: 1,814 변함 없음
+- Split Rate: 변함 없음
+- All KPI: 변함 없음
+
+**Files modified:**
+
+- `server.js`:
+  - SPLIT_SHIPMENTS_SQL: 사용자분 의 새 SQL 적용 (byte-exact paste 의
+    intent — formatting / comment 만 추가)
+  - toFactShape: carrier/pro_num/sales_doc_type 추가, leading_sts /
+    delivered_state 제거
+- `src/ShippingSLAApp.jsx`:
+  - serverRowsToShipments: doRow 의 carrier/pro_num/sales_doc_type 추가
+  - splitData useMemo: upsOnly = filteredPageData.filter(o => o.carrier
+    !== 'TRUCK') 의 source 변경
+  - containerMetrics useMemo: TRUCK skip
+  - ytdCustomerList useMemo: TRUCK skip
+- `docs/exec-plans/active/002-split-shipments-live.md`: this section
+
+**Trust hierarchy:**
+
+- 사용자분 의 master query (검증 cycle 의 standard)
+- Server adapter (Snowflake UPPER case)
+- Frontend adapter (snake_case)
+- Frontend metrics (UPS only filter, Truck 별도)
+
+**Validation:**
+
+- npm run build passes
+- Server restart 후 endpoint smoke:
+  - Distinct DOs (UPS + Truck)
+  - UPS only: 1,814 (변함 없음)
+  - Truck count: 새 fact
+- Browser smoke (Split page):
+  - Total DOs: 1,814 (변함 없음)
+  - All KPI: 변함 없음 (사용자분 의도)
+  - VIVACE channel: 변함 없음
+- Geographic page: PR Truck-2 에서 carrierView 의 wire
+
+**No changes to:** GeoPage (PR Geo-1/2/3/fix 의 logic 그대로 — GeoPage
+의 carrierView wire 는 PR Truck-2 에서), useSplitShipments hook 의
+fetch logic, mock generator (PR Truck-3 에서), KPI markup, banners,
+filter dropdowns, search bar, pagination, Excel export.
+
+**Depends on:** PR Geo-1/2/3/fix, PR Container-Type-Fix.
+
+**Blocks:**
+- PR Truck-2: Geographic page 의 carrierView state 의 wire
+- PR Truck-3: Mock generator 의 Truck simulation
+
+**Backlog:**
+- PR Truck-2: Geographic page 의 carrierView state 의 wire (이미 `const
+  [carrierView, setCarrierView] = useState('UPS')` 가 GeoPage 에 있음 —
+  단지 'Truck' view 의 data path 연결 필요)
+- PR Truck-3: Mock generator 의 Truck simulation
+- PR ZLF-Filter (사용자분 확신 후): sh.order_type = 'ZLF' filter 추가
+
+---
+
+### PR Truck-1-fix — Master query final CTE 의 trailing_sts_date 복원 + adapter dead code 제거 (completed 2026-05-15)
+
+PR Truck-1 의 commit 후 사용자분 의 browser console 검증에서 발견된
+critical bug.
+
+**검증 fact:**
+
+Browser console fetch 의 결과:
+- Endpoint 의 43 fields:
+  - ✅ trailing_sts (있음)
+  - ❌ trailing_sts_date (누락 — Geographic page 의 critical field)
+  - ❌ pro_num (누락 — server adapter 매핑 있지만 endpoint response 에 없음)
+  - ❌ sales_doc_type (같은 issue)
+
+**Root cause:**
+
+사용자분 의 새 master query 의 final CTE 의 SELECT list 의 incomplete:
+- `b.trailing_sts_date` 누락 (PR Geo-1 의 fact 의 typo / 누락)
+- `b.pro_num` 의 직접 SELECT 안 함 (coalesce 의 inside 만 사용)
+- `b.sales_doc_type` SELECT 안 함
+
+PR Truck-1 의 commit 시 사용자분 의 SQL 그대로 byte-exact paste.
+그런데 server adapter 가 row.PRO_NUM / row.SALES_DOC_TYPE 의 access
+시도 → broken (undefined). trailing_sts_date 의 누락 = Geographic
+page 의 silent breakage (delayed-shipment classifier 가 undefined 의
+fact 로 작동).
+
+**사용자분 의 의도 명확화:**
+
+> "po_num 은 이런식으로 넣었는데"
+> `coalesce(b.tracking_number, b.pro_num) as tracking_num`
+
+즉:
+- pro_num 의 직접 access 의 필요 없음 (tracking_num 의 substitute)
+- sales_doc_type 도 미래 필요 시 추가 (지금은 의도 안 됨)
+- trailing_sts_date 만 복원 필요 (PR Geo-1 의 fact 의 invariant)
+
+**Fix:**
+
+1. Master query 의 final CTE (server.js / SPLIT_SHIPMENTS_SQL):
+   - `b.trailing_sts` 후 `b.trailing_sts_date` 한 줄 추가 (복원)
+   - 나머지 사용자분 의 SQL 그대로 (byte-exact)
+
+2. Server adapter (toFactShape) 의 dead code 제거:
+   - `pro_num: row.PRO_NUM` 제거
+   - `sales_doc_type: row.SALES_DOC_TYPE` 제거
+   - `carrier: row.CARRIER` 그대로 (UPS only filter 의 dependency)
+
+3. Frontend adapter (serverRowsToShipments) 의 dead code 제거:
+   - `pro_num: doRow.pro_num` 제거
+   - `sales_doc_type: doRow.sales_doc_type` 제거
+   - `carrier: doRow.carrier` 그대로
+
+**Truck row 의 fact (사용자분 의 console 검증 후 의 fact):**
+
+검증 결과 의 Truck row:
+- carrier: 'TRUCK' ✓
+- tracking_num: 'I650327796' (coalesce 의 fact — Truck 의 pro_num)
+- origin_date / processing_date: truck_data CTE 의 fact ✓
+- split_status: 'NOT_SPLIT' (PR Truck-1 의 logic 정상)
+
+즉 Truck 의 critical fact = tracking_num + carrier 의 column 만 으로
+충분. pro_num 의 direct access 의 별도 필요 없음.
+
+**Trust hierarchy:**
+
+- 사용자분 의 master query 의 정정한 fact 그대로
+- PR Geo-1 의 fact 의 보존 (trailing_sts_date 의 invariant)
+- Server adapter 의 정리 (dead code 제거)
+- Frontend adapter 의 정리 (dead code 제거)
+
+**Validation:**
+
+- npm run build passes
+- Server restart 후 endpoint smoke:
+  - Total fields list: trailing_sts_date 의 존재 확인
+  - trailing_sts_date 의 fact 의 populated (ET timezone)
+  - pro_num / sales_doc_type 의 부재 확인
+- Browser smoke:
+  - Split page 의 visual 변함 없음 (PR Truck-1 의 UPS only filter 그대로)
+  - Geographic page 의 fact 복원 (cohort + delayed 의 visual)
+
+**No changes to:** Split metrics UPS only filter (PR Truck-1 의 logic
+그대로), useSplitShipments hook, mock generator, KPI markup, banners,
+other sections, filter dropdowns, search bar, pagination, Excel export.
+
+**Depends on:** PR Truck-1.
+
+**Lesson:**
+
+사용자분 의 SQL 의 byte-exact paste 의 trade-off:
+- 정확한 fact 의 보존 (사용자분 의 의도 따라가기)
+- 그런데 사용자분 의 typo / 누락 의 자동 paste 가능성
+- 검증 cycle 의 standard: Browser visual smoke 필수
+- 미래 PRs: Endpoint 의 필수 fields 의 자동 check (smoke test 의
+  schema validation) 추가 가능
+
+---
+
+### PR Truck-1-Header-Fix — Split page header 의 DOs count 의 UPS only 정정 (completed 2026-05-15)
+
+PR Truck-1 + PR Truck-1-fix 의 commit 전 사용자분 의 browser visual
+검증에서 발견.
+
+**검증 fact:**
+
+사용자분 image (Split shipment page):
+```
+"Last 7 days · 1,852 DOs · May 11 - May 18"
+```
+- 1,852 = UPS 1,815 + TRUCK 37 (combined)
+- 사용자분 의도와 mismatch (Split page = UPS only)
+
+**사용자분 명시 의 design 의도:**
+
+- Split shipment page: header total = **UPS only** (1,815)
+  - 이유: Truck = LTL, "split" 개념 없음 (single trailer / single pro_num)
+  - In-page KPIs 가 이미 UPS only (PR Truck-1 의 splitData / containerMetrics
+    / ytdCustomerList 의 upsOnly filter)
+  - Header 만 mismatch → 사용자 혼란
+- Delayed page (Geographic): header total = **UPS + TRUCK 둘 다** (1,852)
+  - 이유: 운영팀 의 delayed 의 의미 가 carrier 무관 (모든 carriers 의 fact)
+
+**Root cause:**
+
+Header 의 source chain (line 7244-7254, 7786, 2050-2054):
+1. Render (line 7254): `{fmtNum(splitMeta?.count ?? 0)} DOs` — only when
+   `activePage === 'split'` (line 7244 conditional)
+2. State setter (line 7786): `setSplitMeta` passed to SplitShipmentPage
+   as `onMetaChange` prop
+3. Source of count (line 2052, pre-fix):
+   ```javascript
+   onMetaChange({ count: hookData ? hookData.length : 0, ... })
+   ```
+   → `hookData.length` = all DOs in window (UPS + TRUCK)
+
+PR Truck-1 의 UPS only filter 의 scope:
+- splitData useMemo: ✅ upsOnly = filteredPageData.filter(carrier !== 'TRUCK')
+- containerMetrics useMemo: ✅ TRUCK skip
+- ytdCustomerList useMemo: ✅ TRUCK skip
+- onMetaChange useEffect (header count): ❌ 누락 — hookData.length 그대로
+
+즉 In-page metrics 의 fact 와 Header 의 fact 가 mismatch.
+
+**Geographic page 의 header — 의도적으로 untouched:**
+
+Line 7244 의 conditional `activePage === 'split'` 의 else branch (line
+7316-7318):
+```jsx
+<div className="ml-auto text-[11px] font-mono text-[#5d6b7a] hidden sm:block">
+  {fmtNum(filtered.length)} / {fmtNum(data.length)} shipments · Apr 1–17, 2026
+</div>
+```
+- 다른 source (filtered + data, App level)
+- Mock-driven, hardcoded date
+- 사용자분 의도 따라 UPS + TRUCK 둘 다 (변경 X)
+
+**Fix:**
+
+`src/ShippingSLAApp.jsx` 의 SplitShipmentPage (line 2050 근처):
+
+새 useMemo:
+```javascript
+const upsHookDataCount = useMemo(() => {
+  if (!hookData) return 0;
+  return hookData.filter(o => o.carrier !== 'TRUCK').length;
+}, [hookData]);
+```
+
+onMetaChange useEffect:
+```javascript
+// Before: count: hookData ? hookData.length : 0
+// After:  count: upsHookDataCount
+onMetaChange({ source, count: upsHookDataCount, filter, regions: regionOptions });
+```
+
+Dependency list 정정: `hookData` → `upsHookDataCount`.
+
+**Design choice — splitData.totalCount 대신 새 useMemo 의 fact:**
+
+`splitData.totalCount` 도 UPS only 의 fact (PR Truck-1 의 upsOnly.length)
+지만 region / cause filter 의 영향 받음 (filteredPageData 의 source).
+
+Header 의 의미: **window-level 의 count** (region / cause 의 filter 의
+영향 받지 않는 fact). 즉 사용자가 region='NY' 만 선택해도 header 의 count
+는 모든 region 의 UPS DOs 의 fact.
+
+새 useMemo `upsHookDataCount` = `hookData.filter(carrier !== 'TRUCK').length`:
+- hookData 의 source (channel/region/cause filter 의 영향 X)
+- UPS only (Truck 만 제외)
+- 사용자분 의도 의 정확한 fact
+
+**Trust hierarchy:**
+
+- 사용자분 명시 의 design 의도 (page 별 운영 의미 의 차이)
+- splitData 의 single source of truth (UPS only) 의 invariant
+- Header 의 window-level semantic 의 보존 (region/cause filter 의 영향 X)
+- Mock-mode 의 보존 (`!== 'TRUCK'` 의 no-op for mock)
+
+**Validation:**
+
+- npm run build passes
+- Vite HMR 의 자동 적용 (frontend 만, server restart 안 필요)
+- Browser smoke:
+  - Split page header: "Last 7 days · 1,815 DOs · May 11 - May 18"
+    (이전 1,852 → 1,815, 37 Truck 제외)
+  - Geographic page header: 1,852 (변함 없음, 모든 carriers)
+  - In-page KPIs 변함 없음 (이미 UPS only)
+
+**No changes to:** Server (master query, adapter), useSplitShipments
+hook, mock generator, splitData / containerMetrics / ytdCustomerList 의
+logic (이미 UPS only), KPI markup, banners, other sections, filter
+dropdowns, search bar, pagination, Excel export, Geographic page 의
+header (UPS + TRUCK 그대로).
+
+**Depends on:** PR Truck-1, PR Truck-1-fix.
+
+**Lesson:**
+
+UPS only filter 의 scope 의 완전성 의 check:
+- 단순히 in-page useMemos 만 정정 부족
+- 외부 (App-level) 의 fact 도 review 필요 (header summary, badges, etc.)
+- Browser visual smoke 의 critical 한 점 (endpoint smoke 만 으로 부족)
+
+---
+
+### PR Truck-1-Region-Fix — regionOptions UPS only + master query trim → ltrim (completed 2026-05-15)
+
+PR Truck-1 + PR Truck-1-fix + PR Truck-1-Header-Fix 의 commit 전
+code-analyzer 검증에서 발견된 2 issues.
+
+**Issue 1: Master query 의 trim → ltrim**
+
+`server.js` 의 truck_data JOIN (line 1157, pre-fix):
+```sql
+left join truck_data td on trim(b.do_num, '0') = td.do_num
+    and b.pro_num = td.pronum and b.carrier = 'TRUCK'
+```
+
+Snowflake 의 fact:
+- `TRIM(str, '0')` = 양쪽 0 제거 (both ends)
+- `LTRIM(str, '0')` = 왼쪽 0 만 제거 (left only)
+
+사용자분 의 sibling clause (line 1051) 의 정확:
+```sql
+left join kdb.pbi_sf.zsd_c01_billing b on ltrim(sh.user_def4, '0') = b."Sales_document"
+```
+
+즉 truck_data 의 JOIN 도 LTRIM 의 의도 (consistency):
+- Truck DO 가 trailing 0 (예: `'0801950600'`) 의 경우 trim 의 양쪽 제거
+- `'0801950600'` → `'801950 6'` (의도 아님 — middle 의 string 의 fact 의 collapse)
+- truck_data.blnum 의 fact 와 join 실패
+- 결과: Truck row 의 origin_date / processing_date / delivered_date 가 NULL
+
+Fix: `trim` → `ltrim` + block comment 로 의도 명시.
+
+**Issue 2: regionOptions 의 UPS only filter**
+
+`src/ShippingSLAApp.jsx` 의 regionOptions (line 2038-2044, pre-fix):
+```javascript
+const regionOptions = useMemo(() => {
+  const states = new Set();
+  for (const o of pageData) {
+    if (o.state && o.state !== '—') states.add(o.state);
+  }
+  return ['all', ...Array.from(states).sort()];
+}, [pageData]);
+```
+
+문제:
+- pageData = UPS + TRUCK 의 모든 DOs
+- regionOptions 의 list 에 Truck-only states 포함 가능
+- 사용자분이 그 state 선택 → Split page 의 모든 KPI = 0 (UPS only filter
+  의 자연)
+- 사용자 혼란
+
+Fix:
+```javascript
+const regionOptions = useMemo(() => {
+  const states = new Set();
+  for (const o of pageData) {
+    if (o.carrier === 'TRUCK') continue;
+    if (o.state && o.state !== '—') states.add(o.state);
+  }
+  return ['all', ...Array.from(states).sort()];
+}, [pageData]);
+```
+
+즉 PR Truck-1 의 UPS only filter 의 scope 의 완전 확장:
+- splitData / containerMetrics / ytdCustomerList (PR Truck-1)
+- Header (PR Truck-1-Header-Fix)
+- regionOptions (PR Truck-1-Region-Fix)
+
+**causeOptions — 변경 없음:**
+
+`causeOptions` useMemo 의 존재 안 함 — filter cause 의 source 는
+`ROOT_CAUSE_LABELS` constants (hardcoded list). 정적 (static) — UPS /
+Truck 의 dynamic fact 영향 없음. PR Truck-1 의 filter scope 의 보존.
+
+**Trust hierarchy:**
+
+- 사용자분 의 master query 의 정정 (LTRIM 의 sibling consistency)
+- PR Truck-1 의 UPS only filter 의 scope 의 완전성
+- splitData 의 single source of truth 의 invariant
+- `!== 'TRUCK'` pattern 의 mock-mode 의 보존
+
+**Validation:**
+
+- npm run build passes
+- Server restart 후 endpoint smoke:
+  - Truck row 의 origin_date / processing_date / delivered_date 의
+    populated (LTRIM fix 의 효과)
+- Browser smoke (Split page):
+  - regionOptions dropdown 의 Truck-only states 제거
+  - 모든 displayed regions 의 UPS fact
+  - Header / in-page KPIs 변함 없음
+
+**No changes to:** GeoPage (모든 carriers 의 fact 그대로), causeOptions
+(이미 ROOT_CAUSE_LABELS constants), mock generator, useSplitShipments
+hook, KPI markup, banners, other sections, search bar, pagination,
+Excel export.
+
+**Depends on:** PR Truck-1, PR Truck-1-fix, PR Truck-1-Header-Fix.
+
+**Lesson:**
+
+PR Truck-1 의 UPS only filter 의 scope 의 완전성 의 check:
+- in-page metrics (splitData, containerMetrics, ytdCustomerList)
+- App-level summary (header, badges)
+- Filter dropdowns (regionOptions, etc.)
+- Static constants (ROOT_CAUSE_LABELS — no change needed)
+- Single source of truth 의 standard
+
+Master query 의 SQL function 의 정확한 의미 (TRIM vs LTRIM/RTRIM):
+- Snowflake 의 default behavior 의 review 필수
+- 사용자분 의 SQL 의 byte-exact paste 의 trade-off (typo/silent SQL
+  semantic 도 paste)
+- Code review (code-analyzer) 의 가치 박힘 (silent SQL function 의 fact
+  의 detection)
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type
