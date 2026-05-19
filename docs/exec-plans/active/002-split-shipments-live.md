@@ -5579,6 +5579,221 @@ Backlog:
 
 ---
 
+### PR Geo-4 — Geographic page 의 minor UI 정정 (Header date + Channel chips + Standards collapse) (completed 2026-05-19)
+
+PR Sample-Order-Filter cycle 의 commit 후 사용자분 명시:
+  "Geographic page 의 minor UI 변경"
+
+사용자분 의 명시 (verbatim):
+  "Geographic page 의 minor UI 변경 a, b, 는 정정 c는 정정하지 않아도 되지만
+   default 값으로 standard section 은 숨겨놓고 싶어
+   Network Total / Heat Map 이 부분은 라이브 데이터가 맞아"
+
+즉:
+  ✅ a. Header date: 정정 (mock → live)
+  ✅ b. Channel chips: 정정 (확장 list → BS-IVY / BS-RED / VIVACE 만)
+  ⚠️ c. Carrier Lead Time Standards: Default collapsed
+  ✅ d. Network Total / Heat Map: 변경 X (이미 PR Geo-3-fix 의 fact)
+
+사용자분 명시 의 company mapping (Master query 의 sh.user_def1):
+  '1100' = BS-IVY
+  '1400' = BS-RED
+  '1900' = VIVACE
+
+Scope confirmation cycle (AskUserQuestion):
+  - Header date: Geographic 만 라이브 (Exec / SKU / Reports 의 "Apr 1-17, 2026"
+    hardcoded 그대로 — 그 pages 의 mock 자연 의 fact)
+  - Channel chips: Split + Geographic 만 3 channels (Split mock 도 3 chips
+    promote — page-driven, source-driven 아님)
+  - Carrier Lead Time Standards: GeoPage 의 inline collapse (SectionCard
+    component 그대로 — 30+ call sites 의 backward-compatibility 보존)
+
+Changes:
+1. Header date 의 live wire (line 7401 의 non-split branch):
+   - `activePage === 'geo'` branch 추가
+   - PRESET_LABELS[dateRange] || formatShortDate(customRange.from + to)
+   - Split 의 date picker 의 패턴 의 미러
+   - 다른 non-split pages 의 hardcoded "Apr 1-17, 2026" 그대로
+
+2. Channel chips 의 3-channel subset (line 7420):
+   - Before: `activePage === 'split' && splitSource === 'live'`
+   - After:  `activePage === 'split' || activePage === 'geo'`
+   - 사용자분 결정: page-driven (source-driven 아님)
+   - Split mock mode 도 3 chips (운영 의미 의 일관)
+   - Geographic 도 3 chips (사용자분 명시)
+   - 다른 pages (Exec / SKU / Reports / etc.) 11 chips 그대로
+   - selectedChannels state 그대로 (navigation 의 persistence)
+
+3. Carrier Lead Time Standards 의 default collapsed (line ~1008):
+   - 새 useState: `const [standardsExpanded, setStandardsExpanded] = useState(false);`
+   - SectionCard 의 children 의 wrap:
+     - 새 toggle button (ChevronDown rotation pattern, 패턴 의 date picker 의 미러)
+     - `{standardsExpanded && <>... existing buttons + table ...</>}` 의 conditional
+   - SectionCard component 그대로 (30+ call sites 의 backward-compatibility)
+   - Default collapsed (사용자분 명시 — heat map 의 primary signal)
+
+4. Network Total / Heat Map: 변경 X (이미 PR Geo-3-fix 의 LIVE fact)
+
+Trust hierarchy:
+  - 사용자분 명시 의 company mapping (1100/1400/1900 → BS-IVY/BS-RED/VIVACE)
+  - PR Geo-3-fix 의 LIVE wiring 의 fact 그대로 (Network Total / Heat Map)
+  - PRESET_LABELS / formatShortDate 의 기존 utility 의 재사용 (Split date picker
+    의 패턴)
+  - LIVE_SPLIT_CHANNELS 의 기존 constant 의 재사용 (PR4b5 의 fact)
+  - SectionCard component 의 backward-compatibility (30+ call sites)
+  - Inline collapse pattern (date picker 의 ChevronDown rotation 의 미러)
+
+Files modified:
+- src/ShippingSLAApp.jsx
+  - Line 7401 의 non-split date branch 의 geo conditional
+  - Line 7420 의 channel chips conditional 의 `|| activePage === 'geo'`
+  - GeoPage 의 standardsExpanded useState + Carrier Lead Time Standards 의
+    inline collapse
+
+No changes to: SectionCard component, useSplitShipments hook, master query,
+adapter chain, mock generator, KPI markup, banners, search bar, pagination,
+Excel export, sample filter logic, Network Total / Heat Map 의 fact.
+
+Depends on: PR Geo-3, PR Geo-3-fix, PR Sample-Order-Filter cycle.
+
+Validation:
+- npm run build passes
+- Browser smoke (사용자분):
+  - Geographic page header: dateRange + customRange 의 live label
+  - Geographic page channel chips: 3 chips (BS-IVY / BS-RED / VIVACE) only
+  - Geographic page Carrier Lead Time Standards: default collapsed,
+    클릭 의 expand / collapse 의 functionality
+  - Network Total / Heat Map: 변경 없음 (regression 검증)
+  - Split page: 3 chips (mock 도, 이전 의 live-only 의 conditional 의 reversal)
+  - Other pages (Exec / SKU / Reports / etc.): 11 chips + hardcoded date 그대로
+  - Light + Dark mode 정상
+
+Backlog:
+- PR Geo-5: Issue Type 의 wire (Smartsheet 의 access 의 fact 박힘 후)
+- PR Overview: Executive page 의 live wire (header date + KPIs)
+- 운영팀 검증 (PR5): Geographic 의 cohort 의 검증
+
+---
+
+### PR Geo-4-fix — Geographic page header 의 Split 의 패턴 의 미러 (LIVE badge + live count + date picker) (completed 2026-05-19)
+
+PR Geo-4 의 commit 전 사용자분 의 visual smoke 의 fact 발견:
+
+사용자분 의 image 의 비교 (Split vs Geographic):
+  Split (의도된 fact):
+    [LIVE] badge + "1,863 DOs · Last 7 days · May 12 - May 19" + Date picker
+  Geographic (PR Geo-4 의 fact 후):
+    LIVE badge X + "320 / 320 shipments · Last 7 days" (mock-style) + Date picker X
+
+Root cause (PR Geo-4 의 scope 의 한계):
+  - PR Geo-4 의 Edit 1: non-split mock label branch 의 date string 만 정정
+  - 근데 LIVE badge / count / date picker 의 정정 X
+  - 사용자분 의 진짜 의도 = Split 의 header pattern 의 전체 미러
+
+사용자분 결정:
+  1. Header count source: hookData.length (Always total, channel filter 무관)
+     - Geographic = UPS + TRUCK (의도된 scope)
+     - Split = UPS only (upsHookDataCount)
+     - 즉 page 별 의 count semantics 의 자연
+     - pageData.length (channel filter 의 fact) 의 source 아님 — 명시 결정
+  2. Header format: "{count} DOs · Last 7 days · May 12 - May 19" (Split format)
+  3. LIVE badge: Geographic 의 visible (currentSource 의 fact)
+  4. Date picker: Geographic 의 visible (clickable)
+
+Implementation strategy:
+  - PR Geo-4 의 inline date conditional 의 revert (non-split mock label
+    branch 의 단순 화) — Geographic 는 이제 date picker branch 로 이동
+  - splitMeta + geoMeta → currentMeta dispatch by activePage
+  - splitSource → currentSource (LIVE badge generalize)
+  - Date picker conditional: `activePage === 'split'` → `(split || geo)`
+  - Date picker contents: `splitMeta?.X` → `currentMeta?.X` (4 spots)
+  - GeoPage: destructure source/filter from useSplitShipments + onMetaChange
+    prop + useEffect to publish meta + cleanup on unmount
+
+Changes:
+1. App-level: new geoMeta state + currentMeta + currentSource derived values:
+   - `const [geoMeta, setGeoMeta] = useState(null);`
+   - `const currentMeta = activePage === 'split' ? splitMeta : (activePage === 'geo' ? geoMeta : null);`
+   - `const currentSource = currentMeta?.source ?? null;`
+
+2. App-level: GeoPage render gets `onMetaChange={setGeoMeta}` prop.
+
+3. App-level: LIVE badge conditional 의 generalize:
+   - Before: `{activePage === 'split' && splitSource && (...)}`
+   - After:  `{currentSource && (...)}`
+   - splitSource references 4 → currentSource (background/border/text/label)
+
+4. App-level: Date picker conditional 의 extension:
+   - Before: `{activePage === 'split' ? (DatePicker) : (mockLabel)}`
+   - After:  `{(activePage === 'split' || activePage === 'geo') ? (DatePicker) : (mockLabel)}`
+   - splitMeta?.X references 4 → currentMeta?.X (count/source/filter.from/filter.to)
+   - Mock label branch 의 PR Geo-4 의 inline conditional 의 revert (단순 "Apr 1-17, 2026")
+
+5. GeoPage signature 의 onMetaChange prop 추가.
+
+6. GeoPage hook destructuring 의 확장:
+   - Before: `const { data: hookData, loading: hookLoading } = useSplitShipments(...)`
+   - After:  `const { data: hookData, loading: hookLoading, source, filter } = useSplitShipments(...)`
+
+7. GeoPage 의 새 useEffect (publish meta):
+   - `onMetaChange({ source, count: hookData?.length ?? 0, filter: filter ?? null })`
+   - Dependency: source, hookData, filter, onMetaChange
+   - ⚠️ count = hookData.length (Always total) — pageData.length 의 source 아님
+
+8. GeoPage 의 cleanup useEffect (mirror Split):
+   - `useEffect(() => () => { if (onMetaChange) onMetaChange(null); }, [onMetaChange])`
+   - GeoPage unmount 시 geoMeta = null → LIVE badge / count / date picker
+     의 자동 hide
+
+Trust hierarchy:
+  - Split page 의 패턴 의 미러 (사용자분 의 reference)
+  - Page 별 의 count semantics 의 자연 (Split UPS-only vs Geo UPS+Truck)
+  - 사용자분 명시 의 count source: hookData.length (Always total)
+  - pageData (channel filter) 의 source 아님 (sensitive 의 fact)
+  - useSplitShipments hook 의 source/filter return (이미 박힘)
+  - SplitShipmentPage onMetaChange pattern (이미 박힘 의 mirror)
+  - PR Geo-3 / Geo-3-fix 의 cohort/delayed fact 의 보존
+  - PR Geo-4 의 Channel chips + Standards collapse 의 fact 그대로
+
+Files modified:
+- src/ShippingSLAApp.jsx
+  - GeoPage signature: + onMetaChange prop
+  - GeoPage hook: + source / filter destructure
+  - GeoPage: + 2 useEffect (publish meta + cleanup)
+  - App-level: + geoMeta state + currentMeta + currentSource
+  - App-level: GeoPage render + onMetaChange={setGeoMeta}
+  - App-level: LIVE badge 의 currentSource 적용 (4 refs)
+  - App-level: Date picker conditional + currentMeta 적용 (4 refs)
+  - App-level: Non-split mock label branch 의 PR Geo-4 의 inline conditional revert
+
+No changes to: useSplitShipments hook itself, master query, adapter chain,
+mock generator, KPI markup, Network Total / Heat Map, Carrier Lead Time
+Standards collapse (PR Geo-4 의 fact 그대로), Channel chips (PR Geo-4 의
+fact 그대로), Sample filter logic, Split page header (regression-safe).
+
+Depends on: PR Geo-3-fix (hookData wiring), PR Geo-4 (working tree 그대로 —
+한 commit 의 자연 grouping).
+
+Validation:
+- npm run build passes
+- Browser smoke (사용자분):
+  - Geographic page header:
+    - LIVE badge visible (live mode), 또는 MOCK / MOCK-FALLBACK (자연)
+    - "{count} DOs · {dateLabel} · {from} – {to}" (live mode 의 fact)
+    - "{count} shipments · {dateLabel}" (mock mode 의 fact, "shipments" suffix)
+    - Date picker (clickable, preset 변경 가능, custom range input 가능)
+    - Channel chip toggle 시 count 변함 없음 (Always total, sensitive 의 fact)
+  - Split page header: 변경 없음 (regression — UPS-only count 그대로)
+  - 다른 pages (Exec / SKU / Reports): "Apr 1–17, 2026" mock 그대로
+    + LIVE badge 의 자연 hide (currentSource = null)
+  - GeoPage → 다른 page 의 navigation 시 LIVE badge 의 자연 hide (cleanup)
+  - Network Total / Heat Map: 변경 없음
+  - Carrier Lead Time Standards collapse: 변경 없음
+  - Channel chips (Split + Geo 3 chips): 변경 없음
+  - Light + Dark mode 정상
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

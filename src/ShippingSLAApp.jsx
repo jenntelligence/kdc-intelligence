@@ -797,10 +797,15 @@ const STATE_NAMES = {
 // ============================================================
 // GEO PAGE — Heat map with issue-type selector
 // ============================================================
-const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], sampleOrderFilter = 'exclude_samples' }) => {
+const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], sampleOrderFilter = 'exclude_samples', onMetaChange }) => {
   const [selectedIssue, setSelectedIssue] = useState('all'); // PR Geo-3: only 'all' is live; other buttons are disabled placeholders for PR Geo-4
   const [hoveredState, setHoveredState] = useState(null);
   const [carrierView, setCarrierView] = useState('UPS'); // 'UPS' or 'Truck'
+  // PR Geo-4: Carrier Lead Time Standards is reference info (static UPS / Truck
+  // zone tables) — useful but not the page's primary signal. User asked for it
+  // to default collapsed so the heat map + state metrics get the screen real
+  // estate, with a click to expand when needed.
+  const [standardsExpanded, setStandardsExpanded] = useState(false);
 
   // PR Geo-3-fix: data source switched from the App-level `filtered` prop
   // (which is built from the App's mock-only pageData) to the same hook
@@ -813,7 +818,23 @@ const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannel
   //
   // The legacy `filtered` prop stays in the signature for backward
   // compatibility; nothing in this page reads it anymore.
-  const { data: hookData, loading: hookLoading } = useSplitShipments(dateRange, customRange);
+  // PR Geo-4-fix: also destructure source + filter so we can publish meta to
+  // the App-level header (LIVE badge + count + date range), mirroring Split.
+  const { data: hookData, loading: hookLoading, source, filter } = useSplitShipments(dateRange, customRange);
+
+  // PR Geo-4-fix: publish meta upward so the App header shows LIVE / count /
+  // server-resolved date window. User-stated count rule: hookData.length —
+  // the always-total population, NOT filtered by channel chips. This is
+  // intentionally different from Split (which publishes upsHookDataCount):
+  // Geographic's scope is UPS + Truck, and Ops reads the header as the
+  // "what dataset am I looking at" indicator, not a live filter readout.
+  useEffect(() => {
+    if (!onMetaChange) return;
+    onMetaChange({ source, count: hookData ? hookData.length : 0, filter: filter ?? null });
+  }, [source, hookData, filter, onMetaChange]);
+  // Reset meta when GeoPage unmounts so the LIVE badge doesn't linger on
+  // other pages (mirrors SplitShipmentPage cleanup at line ~2125).
+  useEffect(() => () => { if (onMetaChange) onMetaChange(null); }, [onMetaChange]);
 
   // Apply the App-level channel-chip selection (mirrors SplitShipmentPage's
   // pageData useMemo). Empty selection = no filtering.
@@ -1006,6 +1027,18 @@ const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannel
       </SectionCard>
 
       <SectionCard title="Carrier Lead Time Standards" subtitle="Select carrier type to view expected transit times by state" tag="LEAD TIME" className="mt-3">
+        {/* PR Geo-4: inline collapse — default closed. ChevronDown rotates to
+            mirror the date picker pattern at line ~7372. SectionCard left
+            untouched (its API has no collapse prop and 30+ call sites depend
+            on the current signature). */}
+        <button
+          onClick={() => setStandardsExpanded(v => !v)}
+          className="w-full flex items-center gap-2 text-[12px] font-mono uppercase tracking-wider py-1 mb-2 transition-colors"
+          style={{ color: 'var(--text-secondary)' }}>
+          <ChevronDown size={12} style={{ transform: standardsExpanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s' }}/>
+          <span>{standardsExpanded ? 'Hide reference tables' : 'Show reference tables'}</span>
+        </button>
+        {standardsExpanded && (<>
         <div className="flex gap-2 mb-4">
           {['UPS', 'Truck'].map(ct => (
             <button key={ct} onClick={() => setCarrierView(ct)}
@@ -1046,6 +1079,7 @@ const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannel
             ))}
           </tbody>
         </table>
+        </>)}
       </SectionCard>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mt-4">
@@ -6582,6 +6616,15 @@ export default function ShippingSLAApp() {
   // Shape: { source: 'live'|'mock'|'mock-fallback', count: number, filter: {from, to}|null } | null
   const [splitMeta, setSplitMeta] = useState(null);
   const splitSource = splitMeta?.source ?? null;  // legacy alias used by badge/hint
+  // PR Geo-4-fix: GeoPage now publishes the same meta shape so the App-level
+  // header (LIVE badge + count + date picker) can mirror Split's pattern.
+  // currentMeta dispatches by activePage so a single header block renders
+  // correctly for either page. Note count semantics differ by page: Split
+  // ships UPS-only count (upsHookDataCount), Geographic ships hookData.length
+  // (UPS + Truck — user-stated decision: always-total, channel-filter-immune).
+  const [geoMeta, setGeoMeta] = useState(null);
+  const currentMeta = activePage === 'split' ? splitMeta : (activePage === 'geo' ? geoMeta : null);
+  const currentSource = currentMeta?.source ?? null;
   // PR4b3: drives the header summary dropdown on the Split page.
   const [datePickerOpen, setDatePickerOpen] = useState(false);
   const datePickerRef = useRef(null);
@@ -7195,14 +7238,16 @@ export default function ShippingSLAApp() {
                 preserved — the dropdown still uses them. */}
             {/* PR4b2: Split page hook source indicator (LIVE / MOCK / MOCK-FALLBACK).
                 Shown only when activePage === 'split' since the hook only runs there. */}
-            {activePage === 'split' && splitSource && (
+            {/* PR Geo-4-fix: badge now driven by currentMeta so Geographic
+                also gets LIVE / MOCK-FALLBACK / MOCK indication. */}
+            {currentSource && (
               <span className="h-8 flex items-center px-2 rounded text-[10px] font-mono uppercase tracking-wider"
                 style={
-                  splitSource === 'live' ? { background: '#2ECC7120', border: '1px solid #2ECC7160', color: '#2ECC71', fontWeight: 600 } :
-                  splitSource === 'mock-fallback' ? { background: '#E74C6F20', border: '1px solid #E74C6F60', color: '#E74C6F', fontWeight: 600 } :
+                  currentSource === 'live' ? { background: '#2ECC7120', border: '1px solid #2ECC7160', color: '#2ECC71', fontWeight: 600 } :
+                  currentSource === 'mock-fallback' ? { background: '#E74C6F20', border: '1px solid #E74C6F60', color: '#E74C6F', fontWeight: 600 } :
                   { background: '#f5a62320', border: '1px solid #f5a62360', color: '#f5a623', fontWeight: 600 }
                 }>
-                {splitSource === 'mock-fallback' ? 'MOCK-FALLBACK' : splitSource.toUpperCase()}
+                {currentSource === 'mock-fallback' ? 'MOCK-FALLBACK' : currentSource.toUpperCase()}
               </span>
             )}
             {/* Data source toggle */}
@@ -7324,9 +7369,12 @@ export default function ShippingSLAApp() {
               </select>
             </>
           )}
-          {/* PR4b3: Split page gets the live, clickable summary dropdown.
-              Other pages keep the legacy mock-driven text (unchanged on purpose). */}
-          {activePage === 'split' ? (
+          {/* PR4b3 → PR Geo-4-fix: live, clickable summary dropdown for any
+              page that publishes meta via onMetaChange. Currently Split +
+              Geographic; future live pages just need to set their meta to
+                opt in. References changed from splitMeta to currentMeta
+              so the same dropdown renders for whichever page is active. */}
+          {(activePage === 'split' || activePage === 'geo') ? (
             <div className="ml-auto relative hidden sm:block" ref={datePickerRef}>
               <button
                 onClick={() => setDatePickerOpen(o => !o)}
@@ -7336,12 +7384,12 @@ export default function ShippingSLAApp() {
                 <span>{PRESET_LABELS[dateRange] || PRESET_LABELS['7d']}</span>
                 <span style={{ color: THEME.textMuted }}>·</span>
                 <span style={{ color: THEME.textPrimary }}>
-                  {fmtNum(splitMeta?.count ?? 0)} {splitMeta?.source === 'live' ? 'DOs' : 'shipments'}
+                  {fmtNum(currentMeta?.count ?? 0)} {currentMeta?.source === 'live' ? 'DOs' : 'shipments'}
                 </span>
-                {splitMeta?.filter?.from && splitMeta?.filter?.to && (
+                {currentMeta?.filter?.from && currentMeta?.filter?.to && (
                   <>
                     <span style={{ color: THEME.textMuted }}>·</span>
-                    <span style={{ color: THEME.textSecondary }}>{formatShortDate(splitMeta.filter.from)} – {formatShortDate(splitMeta.filter.to)}</span>
+                    <span style={{ color: THEME.textSecondary }}>{formatShortDate(currentMeta.filter.from)} – {formatShortDate(currentMeta.filter.to)}</span>
                   </>
                 )}
                 <ChevronDown size={11} style={{ color: THEME.textMuted, transform: datePickerOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s' }}/>
@@ -7413,11 +7461,15 @@ export default function ShippingSLAApp() {
             className={`px-2.5 py-1 rounded text-[11px] font-mono uppercase tracking-wider border transition-all ${selectedChannels.length === 0 ? 'border-[#1ABC9C] bg-[#1ABC9C]/20 text-[#1ABC9C]' : 'border-[#2d3744] text-[#8a95a3] hover:border-[#1ABC9C]'}`}>
             All
           </button>
-          {/* PR4b5: Narrow the chip set to live-mode subset only on Split + live. Other
-              pages keep all 11 chips so their mock data renders correctly. selectedChannels
-              state is untouched — a user's BS-IVY pick survives page changes (Geo etc. still
-              show all 11 chips and can use that selection). Replaces PR4b2's inline hint. */}
-          {(activePage === 'split' && splitSource === 'live' ? LIVE_SPLIT_CHANNELS : CHANNELS).map(ch => {
+          {/* PR4b5 → PR Geo-4: Narrow the chip set to the 3 live channels
+              (BS-IVY / BS-RED / VIVACE) on Split AND Geographic — these are
+              the two pages with live wiring (BS-IVY/BS-RED/VIVACE via UPS,
+              002 plan §6b). Split's mock-mode also gets the 3-chip subset now
+              (user decision in PR Geo-4) so the chip set is page-driven, not
+              source-driven. Exec / SKU / Reports / etc. keep all 11 chips so
+              their mock data renders correctly. selectedChannels state is
+              untouched — a user's BS-IVY pick survives navigation. */}
+          {((activePage === 'split' || activePage === 'geo') ? LIVE_SPLIT_CHANNELS : CHANNELS).map(ch => {
             const group = getChannelGroup(ch);
             const color = CHANNEL_GROUP_COLORS[group] || '#8a95a3';
             const active = selectedChannels.includes(ch);
@@ -7866,7 +7918,7 @@ export default function ShippingSLAApp() {
           <AccessDenied currentUser={currentUser} page={activePage}/>
         ) : (
           <>
-            {activePage === 'geo' && <GeoPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} sampleOrderFilter={sampleOrderFilter} />}
+            {activePage === 'geo' && <GeoPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} sampleOrderFilter={sampleOrderFilter} onMetaChange={setGeoMeta}/>}
             {activePage === 'ai' && <AIRiskPage filtered={filtered} data={data}/>}
             {activePage === 'split' && <SplitShipmentPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} filterCause={filterCause} filterRegion={filterRegion} sampleOrderFilter={sampleOrderFilter} onMetaChange={setSplitMeta}/>}
             {activePage === 'costs' && <CostsPage filtered={filtered}/>}
