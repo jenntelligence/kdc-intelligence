@@ -5794,6 +5794,112 @@ Validation:
 
 ---
 
+## PR Geo-Delivered-Mode (PR 39) — Delivered-based delay mode + Ship-Confirm calendar fix + Strict aggregation (completed 2026-05-19)
+
+### Background
+
+PR Geo-3 의 fact (Ship Confirm mode 의 only) → 사용자분 의 추가 design 의 의도:
+  - "delayed shipments 를 delivered 된 shipment 기준으로만 toggle 해서 볼 수 있는 기능"
+  - "carrier = UPS 는 calendar day 로 가도 돼"
+  - "truck 은 calendar day 1 + business day 1 이면 on time"
+  - "business day 는 truck 에만 apply"
+  - "tbd 는 일단 건들지 말기"
+  - "모든 shipment 가 delivered 됐을 때를 보는게 맞아"
+  - "1개의 do 안에 1개의 tracking 이라도 delay 가 있으면 그냥 딜레이"
+
+### Scope
+
+1. Delivered mode 의 toggle:
+   - UI: "DELAY BASIS" + "SHIP CONFIRM | DELIVERED" toggle (Heat Map header, right-aligned)
+   - State: `delayedMode` useState (default `'ship_confirm'`)
+   - Dispatch: cohort + isDelayed 의 mode-aware conditional
+
+2. Lead time tables (Claude 의 추정, 운영팀 의 검증 대기 — `★` marker):
+   - `UPS_DELIVERY_DAYS_BY_STATE` (CD, 모든 states): GA=2, FL/SC/NC/TN/AL=3, NY/NJ/PA/OH=4 외 …
+   - `TRUCK_DELIVERY_BD_BY_STATE` (BD, KDC routes): GA=1, FL/SC/NC/TN/AL=2, VA/MD/DC=3 외 …
+   - Map 의 fact: 별도 constants (`UPS_ZONE_LEAD_TIMES` / `TRUCK_ROUTE_LEAD_TIMES` 의 display arrays 그대로 — Carrier Lead Time Standards table 의 fact 보존)
+
+3. Helpers (UTC-safe, day-grain calculation):
+   - `addBusinessDays(date, n)` — setUTCDate / getUTCDay 의 자연, Sat/Sun skip
+   - `getDeliveryLeadDays(state, carrier)` — carrier + state dispatch
+   - `isDeliveredDelayed(row)` — module-level pure classifier (UPS simple CD vs TRUCK Sequential 1 CD + N BD)
+
+4. Ship-Confirm calendar fix (사용자분 의 critical 발견):
+   - 사용자분 visual question: "NY State Detail 의 164, 109 는 어디서 나온 숫자지"
+   - 진짜 root cause: `getFullYear/Month/Date` 의 local timezone representation
+     - Live `so_created_date` arrives as `'YYYY-MM-DD'` → parsed as UTC midnight
+     - US east timezone 의 local representation = 의 previous day
+     - 즉 days delta 의 inflated by 1 → in-SLA rows mis-flagged
+   - Fix: `dateOnlyUTC` helper (string slice + UTC components from Date object), rebuild both as UTC midnight, compute calendar-day delta
+   - 영향 (May 12-19 window):
+     - 전체: 1,189 → 744 delayed (-445, -37% inflated)
+     - NY: 110 → 60 (사용자분 SQL `datediff < -1` 의 정확한 일관)
+     - Top reorder: GA top (76, 10.2%), NY 2nd (60, 8.1%)
+
+5. Strict aggregation (사용자분 의 design 의 의도):
+   - 사용자분 명시: "모든 shipment 가 delivered 됐을 때를 보는게 맞아" + "1개의 do 안에 1개의 tracking 이라도 delay → 그냥 딜레이"
+   - 진짜 root cause: `serverRowsToShipments` (line ~1964) takes `delivered_date` from first container only
+     - For SPLIT shipments with multiple tracking_nums delivering on different days, latest delivery hidden
+     - Partial-delivery DOs (some containers delivered, some not) treated as fully delivered
+   - Fix: `deliveredAggregated` useMemo re-derives per-DO from `r.containers`:
+     - `_is_fully_delivered = cs.every(c => c.delivered_date != null)`
+     - `delivered_date = MAX(c.delivered_date)` when fully delivered, else `null`
+   - Cohort filter keeps only fully delivered DOs; `null` forces `isDeliveredDelayed` to drop partials (belt-and-suspenders)
+   - 영향 (May 12-19 window):
+     - SQL any-row delivered: 732 (over-counts partial deliveries)
+     - First-row dedup (BUG): ~674
+     - Strict (all-containers): 608 → 610 (사용자분 browser smoke fact)
+     - Delayed: 498 → 514 → 516 (MAX picks latest delivery)
+     - Delay rate: 84.5%
+
+### Trust hierarchy
+
+- 사용자분 명시 의 design 의 의도 (Mixed mode, Strict cohort, MAX delivered)
+- 사용자분 의 SQL truth source (`datediff < -1`, any-row delivered = 732)
+- 사용자분 의 visual smoke (NY "164, 109" 의 의문 의 critical 발견)
+- 추측 회피 의 원칙 — pageData 의 actual shape (1-per-DO with containers[] nested)
+- YAGNI 의 원칙 — useSplitShipments hook 의 fact 변경 X (Split page 의 보존)
+- 기존 module-level constants 의 backward-compatibility (`UPS_ZONE_LEAD_TIMES` / `TRUCK_ROUTE_LEAD_TIMES` 의 display table 의 fact 그대로)
+- PR Geo-3 / Geo-3-fix / Geo-4 / Geo-4-fix 의 fact 의 보존 (Channel chips, Standards collapse, LIVE badge)
+
+### Validation (사용자분 의 visual smoke 의 fact 박힘)
+
+Default Ship Confirm mode (regression-safe):
+- Network Total: ~1,765 cohort, ~744 delayed (~42% rate)
+- NY State Detail: ~167 cohort, ~60 delayed (사용자분 SQL 의 일관)
+- Top: GA top (76, 10.2%)
+
+Delivered mode (NEW):
+- Network Total: 610 cohort, 516 delayed (84.5% rate)
+- Top 5: NY (54, 10.5%), GA (47, 9.1%), MD (35, 6.8%), NC (34, 6.6%), VA (32, 6.2%)
+- Heat Map / Insight 의 자동 정정 (NY top concentration)
+
+Toggle back to Ship Confirm → 744 의 fact 자연 (regression confirmed)
+
+### Files modified
+
+- `src/ShippingSLAApp.jsx`:
+  - Module-level: `UPS_DELIVERY_DAYS_BY_STATE`, `TRUCK_DELIVERY_BD_BY_STATE`, `getDeliveryLeadDays`, `addBusinessDays`, `isDeliveredDelayed`
+  - GeoPage: `delayedMode` useState + `deliveredAggregated` useMemo + cohort/isDelayed 의 mode dispatch
+  - GeoPage: toggle UI (Heat Map SectionCard 의 first child, right-aligned)
+  - Ship-Confirm calendar fix: `dateOnlyUTC` inline helper + UTC midnight rebuild
+
+### No changes to
+
+useSplitShipments hook, master query, server adapter, mock generator, KPI markup,
+Network Total / Heat Map / Top 5 / Insight markup, sample filter logic,
+SectionCard component signature, `UPS_ZONE_LEAD_TIMES` / `TRUCK_ROUTE_LEAD_TIMES` /
+`getLeadTimeForState` (display-side helpers 그대로).
+
+### Future work (사용자분 backlog)
+
+- Lead time tables 의 운영팀 의 검증 (`★` claude 추정 marker 의 정정 의 후보)
+- Cohort label 의 conditional (Delivered mode 에서 "ship-confirmed" 의 hardcoded label 의 fact — 다음 polish 의 의제?)
+- PR Geo-5: Issue Type + Smartsheet
+- PR Overview: Executive page 의 live wire
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

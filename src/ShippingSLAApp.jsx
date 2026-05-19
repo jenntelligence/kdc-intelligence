@@ -116,6 +116,136 @@ const TRUCK_ROUTE_LEAD_TIMES = [
   { route: 'Other / TBD', states: [], kdcTargetBD: 1, truckLTBD: 'TBD', kdcTargetCD: 2, truckLTCD: 'TBD' },
 ];
 
+// PR Geo-Delivered-Mode: state-level delivery-lead-time lookup maps.
+// Separate from UPS_ZONE_LEAD_TIMES / TRUCK_ROUTE_LEAD_TIMES (which describe
+// zone *groups* for the Carrier Lead Time Standards display table) — these
+// give one number per state for the delivered-date SLA calculation.
+//
+// UPS values = "total calendar days from so_created until expected delivery"
+// (matches the existing `totalLT` field for known states). Includes Claude's
+// regional inferences for states missing from the user-provided image —
+// marked with `// ★` so operations can re-confirm.
+const UPS_DELIVERY_DAYS_BY_STATE = {
+  // Zone 2 (2 days) — Local
+  'GA': 2,
+
+  // Zone 3 (3 days) — Southeast
+  'FL': 3, 'SC': 3, 'NC': 3, 'TN': 3,
+  'AL': 3,  // ★ Claude inference
+
+  // Zone 4 (4 days) — Mid-Atlantic / Northeast / Great Lakes
+  'NY': 4, 'NJ': 4, 'PA': 4, 'OH': 4,
+  'MD': 4, 'VA': 4, 'DC': 4, 'DE': 4, 'WV': 4,  // ★ Mid-Atlantic
+  'KY': 4,  // ★ Southeast border
+  'IN': 4, 'MI': 4,  // ★ Great Lakes
+  'CT': 4, 'MA': 4, 'RI': 4, 'NH': 4, 'VT': 4, 'ME': 4,  // ★ Northeast
+
+  // Zone 5 (5 days) — South Central / Midwest / Plains
+  'IL': 5, 'TX': 5, 'MO': 5,
+  'LA': 5, 'MS': 5, 'AR': 5,  // ★ South Central
+  'WI': 5, 'MN': 5, 'IA': 5,  // ★ Midwest
+  'NE': 5, 'KS': 5, 'OK': 5,  // ★ Plains
+
+  // Zone 6 (6 days) — Mountain / West
+  'CA': 6, 'CO': 6, 'AZ': 6,
+  'NM': 6, 'UT': 6, 'NV': 6,  // ★ Mountain West
+
+  // Zone 7-8 (8 days) — Far West
+  'WA': 8, 'OR': 8, 'HI': 8, 'AK': 8,
+  'ID': 8, 'MT': 8, 'WY': 8, 'ND': 8, 'SD': 8,  // ★ Mountain/Plains far
+};
+
+// TRUCK values = "business days the carrier takes from ship_estimated to
+// delivered" — i.e. the truck portion only. KDC's 1 CD ship side is handled
+// separately in the formula. Uses the high bound of the truckLTBD ranges
+// (e.g. '1-2' → 2) per user decision: cautious SLA target.
+// Missing states (e.g. 'Other / TBD' in the standards table) intentionally
+// excluded so they fall out of the cohort — user-stated "tbd 는 일단 건들지 말기".
+const TRUCK_DELIVERY_BD_BY_STATE = {
+  // GA Local: 1 BD
+  'GA': 1,
+  // Southeast: 1-2 BD (high bound)
+  'FL': 2, 'SC': 2, 'NC': 2, 'TN': 2, 'AL': 2,
+  // Mid-Atlantic: 2-3 BD (high bound)
+  'VA': 3, 'MD': 3, 'DC': 3,
+  // Midwest: 2-3 BD (high bound)
+  'OH': 3, 'IL': 3, 'IN': 3, 'MI': 3,
+  // South Central: 2-3 BD (high bound)
+  'TX': 3, 'LA': 3, 'MS': 3, 'AR': 3,
+  // West Coast: 4-5 BD (high bound)
+  'CA': 5, 'OR': 5, 'WA': 5,
+};
+
+// PR Geo-Delivered-Mode: per-state delivery lead-time lookup. Returns the
+// number of days/BD to add (semantics depend on carrier — see comments at the
+// maps above) or null if the state isn't defined (→ row falls out of the
+// delivered-mode cohort).
+function getDeliveryLeadDays(state, carrier) {
+  if (carrier === 'UPS')   return UPS_DELIVERY_DAYS_BY_STATE[state] ?? null;
+  if (carrier === 'TRUCK') return TRUCK_DELIVERY_BD_BY_STATE[state] ?? null;
+  return null;
+}
+
+// PR Geo-Delivered-Mode: UTC-safe business-day addition. CRITICAL: all date
+// arithmetic in delivered-mode MUST use the UTC methods because:
+//   1. `new Date('YYYY-MM-DD')` (the live so_created_date / delivered_date
+//      format) parses as UTC midnight, not local midnight.
+//   2. `setHours(0,0,0,0)` zeroes the *local* time — in a non-UTC timezone
+//      this shifts the underlying timestamp into the previous day, causing
+//      a one-day-off mismatch in getDay()/setDate() comparisons.
+// User identified this during code review on the first draft. Always use
+// setUTCHours / setUTCDate / getUTCDay here, even when it feels redundant.
+function addBusinessDays(startDate, businessDays) {
+  const result = new Date(startDate);
+  let added = 0;
+  while (added < businessDays) {
+    result.setUTCDate(result.getUTCDate() + 1);
+    const day = result.getUTCDay();
+    if (day !== 0 && day !== 6) added++;  // Sat=6, Sun=0
+  }
+  return result;
+}
+
+// PR Geo-Delivered-Mode: per-row "did this delivery beat its lead time?"
+// Returns true when delivered_date is strictly past delivered_expected
+// (day-grain, both sides UTC-midnight-aligned).
+//
+//   UPS (calendar days):
+//     delivered_expected = so_created + totalLT CD
+//   TRUCK (sequential, mixed CD/BD):
+//     ship_estimated     = so_created + 1 CD  (KDC outbound)
+//     delivered_expected = addBusinessDays(ship_estimated, truckLT BD)
+//
+// Returns false (i.e. "not delayed / not in scope") for rows missing the
+// needed fields or for states without a defined lead time.
+function isDeliveredDelayed(row) {
+  if (!row || !row.delivered_date) return false;
+  const orderRaw = row.so_created_date || row.orderCreate;
+  if (!orderRaw) return false;
+  const leadTime = getDeliveryLeadDays(row.state, row.carrier);
+  if (leadTime === null) return false;
+
+  const soCreated = new Date(orderRaw);
+  soCreated.setUTCHours(0, 0, 0, 0);
+  const delivered = new Date(row.delivered_date);
+  delivered.setUTCHours(0, 0, 0, 0);
+  if (Number.isNaN(soCreated.getTime()) || Number.isNaN(delivered.getTime())) return false;
+
+  let deliveredExpected;
+  if (row.carrier === 'UPS') {
+    deliveredExpected = new Date(soCreated);
+    deliveredExpected.setUTCDate(deliveredExpected.getUTCDate() + leadTime);
+  } else if (row.carrier === 'TRUCK') {
+    const shipEstimated = new Date(soCreated);
+    shipEstimated.setUTCDate(shipEstimated.getUTCDate() + 1);  // KDC 1 CD
+    deliveredExpected = addBusinessDays(shipEstimated, leadTime);
+  } else {
+    return false;
+  }
+
+  return delivered > deliveredExpected;
+}
+
 // Helper: find lead time for a state
 const getLeadTimeForState = (state, carrierType) => {
   if (carrierType === 'UPS') {
@@ -806,6 +936,15 @@ const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannel
   // to default collapsed so the heat map + state metrics get the screen real
   // estate, with a click to expand when needed.
   const [standardsExpanded, setStandardsExpanded] = useState(false);
+  // PR Geo-Delivered-Mode: two perspectives on "delayed":
+  //   'ship_confirm' (default) — KDC-side SLA: did KDC ship within 1 day of
+  //     order create? Cohort = trailing_status >= 700 (handed off to carrier).
+  //   'delivered' — customer-side SLA: did the parcel arrive within the
+  //     carrier lead time? Cohort = delivered_date present + state has a
+  //     defined lead time. UPS uses calendar days; TRUCK uses sequential
+  //     1 CD KDC + N BD truck per user spec.
+  // Default is ship_confirm so PR Geo-3 numbers stay regression-safe.
+  const [delayedMode, setDelayedMode] = useState('ship_confirm');
 
   // PR Geo-3-fix: data source switched from the App-level `filtered` prop
   // (which is built from the App's mock-only pageData) to the same hook
@@ -860,11 +999,77 @@ const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannel
   // operational intent for this page: "delay 가 KDC 책임인지 아닌지" —
   // so the cohort is intentionally KDC-side-finished work, regardless
   // of UPS delivery state.
+  // PR Geo-Delivered-Mode (Strict aggregation): per-DO aggregation for
+  // delivered mode only. User-stated design intent:
+  //   1. "모든 shipment 가 delivered 됐을 때를 보는게 맞아"
+  //      → Strict cohort: a DO counts only when *every* one of its
+  //        containers has a delivered_date.
+  //   2. "1개의 tracking 이라도 delay → DO delay"
+  //      → ANY-late = DO-late, equivalent to taking MAX(delivered_date)
+  //        across the DO's containers and comparing to expected.
+  //
+  // Why the adapter's `r.delivered_date` isn't enough:
+  // serverRowsToShipments at line ~1854 groups raw rows by do_num and then
+  // copies `delivered_date` from the *first* container of each group
+  // (`doRow.delivered_date` at line ~1964). For SPLIT shipments with
+  // multiple tracking_nums delivering on different days, that first-row
+  // dedup quietly hid the latest delivery — so the SLA decision was made
+  // against a delivered date that might be earlier than the true completion.
+  // We can't fix this in the adapter without touching Split page's pipeline
+  // (user-stated: do this GeoPage-local). Each DO already carries the full
+  // `containers` array, so we re-derive the two aggregates locally.
+  //
+  // Smoke (May 12-19 window, user-verified):
+  //   SQL any-row delivered:      732   (over-counts partial-deliveries)
+  //   First-row dedup (BUG):     ~674
+  //   Strict (all-containers):    608   ← used as the cohort
+  //   Delayed (MAX > expected):   514   (84.5% rate)
+  //
+  // Returns null when not in delivered mode so downstream useMemos can
+  // skip the work.
+  const deliveredAggregated = useMemo(() => {
+    if (delayedMode !== 'delivered') return null;
+    return pageData.map(r => {
+      const cs = Array.isArray(r.containers) ? r.containers : null;
+      if (!cs || cs.length === 0) {
+        // Mock-fallback path (no containers[]) or DO not yet shipped — fall
+        // back to the row's own delivered_date as a single-shipment proxy.
+        const fully = r.delivered_date != null;
+        return { ...r, _is_fully_delivered: fully, delivered_date: fully ? r.delivered_date : null };
+      }
+      let allDelivered = true;
+      let maxDelivered = null;
+      for (const c of cs) {
+        if (!c.delivered_date) { allDelivered = false; break; }
+        if (!maxDelivered || c.delivered_date > maxDelivered) {
+          maxDelivered = c.delivered_date;
+        }
+      }
+      return {
+        ...r,
+        _is_fully_delivered: allDelivered,
+        // MAX drives isDeliveredDelayed when fully delivered; null forces
+        // the cohort filter (and isDeliveredDelayed's own null guard) to
+        // drop partial-delivery DOs.
+        delivered_date: allDelivered ? maxDelivered : null,
+      };
+    });
+  }, [pageData, delayedMode]);
+
+  // PR Geo-Delivered-Mode: cohort definition depends on the active mode.
+  //   ship_confirm — original PR Geo-3 cohort (handed off to carrier)
+  //   delivered    — strictly-aggregated DOs (fully delivered) that go to
+  //                  a state with a defined lead time
   const cohort = useMemo(() => {
+    if (delayedMode === 'delivered') {
+      return (deliveredAggregated || []).filter(r =>
+        r._is_fully_delivered && getDeliveryLeadDays(r.state, r.carrier) !== null
+      );
+    }
     return pageData.filter(r =>
       r.trailing_status != null && Number(r.trailing_status) >= 700
     );
-  }, [pageData]);
+  }, [pageData, delayedMode, deliveredAggregated]);
 
   // PR Geo-3: day-grain delayed classifier — true if KDC took longer than
   // the kdcTarget (1 day) to reach the trailing status. Comparison is
@@ -881,17 +1086,55 @@ const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannel
   // — the adapter is NOT applied to mock. We accept either field so the
   // classifier works under both branches without rewiring the mock.
   // `new Date()` handles both ISO strings and Date objects.
+  // PR Geo-Delivered-Mode: classifier dispatches by mode.
+  //   delivered  → module-level isDeliveredDelayed (UTC-safe, lead-time-aware)
+  //   ship_confirm → calendar-day SLA: trailing_status_date occurred more than
+  //                  1 calendar day after so_created_date (kdcTarget = 1 day)
+  //
+  // PR Geo-Delivered-Mode (Ship-Confirm calendar fix): user discovered a
+  // false-positive ~37% inflation in the ship_confirm count. Cause: the
+  // original implementation did `new Date(orderRaw).getFullYear()/getMonth()/
+  // getDate()` — but `getFullYear/Month/Date` return the value in the *local*
+  // timezone. Live `so_created_date` arrives as 'YYYY-MM-DD' (UTC midnight on
+  // parse) and `trailing_status_date` arrives as 'YYYY-MM-DD HH:MM:SS.000'
+  // (ET-normalized timestamp). In US east timezones, the local representation
+  // of so_created shifted to the previous day → days delta inflated by 1 →
+  // many in-SLA rows mis-flagged as delayed.
+  //
+  // Smoke (May 12-19 window, user-verified):
+  //   NY before fix: 110 delayed   →  after fix: 60 (matches user's SQL `datediff < -1`)
+  //   Total before:  1,189         →  after:    744  (445 false-positives removed)
+  //
+  // The fix mirrors the slice-and-rebuild pattern used in isDeliveredDelayed:
+  // extract the 'YYYY-MM-DD' prefix from each string and rebuild both dates
+  // as UTC midnight. Now the comparison is purely calendar-day, matching the
+  // SQL semantics operations think in.
   const isDelayed = useCallback((r) => {
+    if (delayedMode === 'delivered') return isDeliveredDelayed(r);
     const orderRaw = r.so_created_date || r.orderCreate;
     if (!r.trailing_status_date || !orderRaw) return false;
-    const order = new Date(orderRaw);
-    const trailing = new Date(r.trailing_status_date);
-    if (Number.isNaN(order.getTime()) || Number.isNaN(trailing.getTime())) return false;
-    const orderDay = new Date(order.getFullYear(), order.getMonth(), order.getDate());
-    const trailingDay = new Date(trailing.getFullYear(), trailing.getMonth(), trailing.getDate());
-    const daysDelta = (trailingDay.getTime() - orderDay.getTime()) / 86400000;
-    return daysDelta > 1; // KDC kdcTarget = 1 day
-  }, []);
+    // Extract 'YYYY-MM-DD' from either string (live) or Date object (mock).
+    // Live arrives as 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM:SS.000' — slice(0,10)
+    // works. Mock arrives as a JS Date — String(Date).slice(0,10) gives the
+    // locale string instead, so use UTC components there.
+    const dateOnlyUTC = (d) => {
+      if (typeof d === 'string') return d.slice(0, 10);
+      if (d instanceof Date && !Number.isNaN(d.getTime())) {
+        const y = d.getUTCFullYear();
+        const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(d.getUTCDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      }
+      return null;
+    };
+    const soStr = dateOnlyUTC(orderRaw);
+    const stsStr = dateOnlyUTC(r.trailing_status_date);
+    if (!soStr || !stsStr) return false;
+    const so = new Date(soStr + 'T00:00:00Z');
+    const sts = new Date(stsStr + 'T00:00:00Z');
+    if (Number.isNaN(so.getTime()) || Number.isNaN(sts.getTime())) return false;
+    return (sts.getTime() - so.getTime()) / 86400000 > 1; // > 1 calendar day
+  }, [delayedMode]);
 
   // PR Geo-3: convenience — delayed slice of the cohort. Network Total
   // and the Top-5 ranking derive from this. Splitting it out keeps the
@@ -1085,6 +1328,36 @@ const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannel
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mt-4">
         {/* MAP */}
         <SectionCard title="US Heat Map" subtitle={`Color intensity = % of ${selectedIssue === 'all' ? 'all delays' : CAUSE_LABELS[selectedIssue]} concentrated in each state`} tag="TILE MAP" className="col-span-2">
+          {/* PR Geo-Delivered-Mode: delay basis toggle, top-right of the
+              Heat Map card per user-stated placement. Sits above the SVG
+              so the toggle is the first thing the eye lands on when the
+              user looks at the map. SectionCard has no header-action prop
+              (would mutate 30+ call sites), so we inline at top of children
+              — same pattern as PR Geo-4's Standards collapse. */}
+          <div className="flex items-center justify-end gap-2 mb-3 -mt-1 flex-wrap">
+            <span className="text-[11px] uppercase tracking-wider font-mono" style={{ color: 'var(--text-muted)' }}>
+              Delay basis
+            </span>
+            {[
+              { key: 'ship_confirm', label: 'Ship Confirm', hint: 'KDC SLA: handed off within 1 day' },
+              { key: 'delivered',    label: 'Delivered',    hint: 'Customer SLA: delivered within carrier lead time' },
+            ].map(opt => {
+              const active = delayedMode === opt.key;
+              return (
+                <button
+                  key={opt.key}
+                  onClick={() => setDelayedMode(opt.key)}
+                  title={opt.hint}
+                  className={`px-3 py-1.5 rounded text-[11px] font-mono uppercase tracking-wider border transition-all ${
+                    active
+                      ? 'border-[#1ABC9C] text-[#1ABC9C] bg-[#1ABC9C]/15 font-semibold'
+                      : 'border-[#2d3744] text-[#8a95a3] hover:border-[#1ABC9C] hover:text-[#e8ecef]'
+                  }`}>
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
           <div className="flex flex-col items-center">
             <svg width={(maxCol+1) * (cellSize+gap)} height={(maxRow+1) * (cellSize+gap) + 20} className="select-none">
               {Object.entries(STATE_GRID).map(([state, pos]) => {
