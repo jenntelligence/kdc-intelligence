@@ -5334,6 +5334,251 @@ Master query 의 SQL function 의 정확한 의미 (TRIM vs LTRIM/RTRIM):
 
 ---
 
+### PR Sample-Order-Filter — Bill doc type 의 sample order filter (completed 2026-05-18)
+
+PR Truck-1 cycle 의 commit 후 사용자분 명시 다음 작업:
+  "base cte 에 and b.\"Sales_doc._type\"을 추가해서 sample order 를
+   필터할 수 있는 기능을 넣어야할 것 같은데"
+
+사용자분 명시 의 운영 의도 (verbatim):
+  "default 에서는 sample order 를 포함하지 않고 보여주고
+   뭔가 버튼을 추가하면 sample order 도 같이 볼 수 있는 필터"
+
+**사용자분 의 Snowflake 검증 fact:**
+
+`b."Sales_doc._type"` 의 distinct values + volume (~10M 의 rows):
+```
+Sales Order:           5,795,387  ← Standard shipping
+Rush Order:            1,622,798  ← Express
+New Item Order:          431,111
+ACI Sales Order:         239,294
+Sample Order:            135,695  ★ Filter target (exact match)
+Branch Sales Order:       27,001
+Consignment Issue:        26,792
+International Order:      23,635
+Use n Consumption BR:     15,466
+Whole Returns:            15,015
+... (smaller buckets)
+Sample Order EndCust:      4,024  (별도 — variant, 미래 PR)
+Samplel Returns:           1,455  (별도 — typo in SAP, 미래 PR)
+Branch Sample Order:         940  (별도 — variant, 미래 PR)
+```
+
+**사용자분 결정:**
+
+1. Sample 의 의미: `'Sample Order'` 의 exact match (옵션 A)
+   - 운영적 standard sample type
+   - 다른 sample variants (EndCust, Returns, Branch) 의 별도 처리
+   - 미래 PR 의 의제 (운영팀 검증 후)
+
+2. Filter UI 의 options (3 states):
+   - `'exclude_samples'` (default) — 운영 standard view
+   - `'all'` — sample + non-sample 둘 다
+   - `'samples_only'` — sample tracking 의 운영 분석
+
+3. UI placement (사용자분 명시):
+   - Filter row 의 새 dropdown ("All regions" 옆)
+   - App level visibility (Split + Geographic 둘 다 active)
+
+**Changes:**
+
+1. Master query (`server.js` / `SPLIT_SHIPMENTS_SQL`):
+   - base CTE 의 `b."Sales_doc._type" as sales_doc_type` 그대로 (이미
+     PR Truck-1 부터 base CTE 에 있음)
+   - final CTE 의 SELECT list 에 `b.sales_doc_type` 추가 (이전 PR Truck-1
+     의 의도 안 한 부분 — 이번 PR 의 의도된 fact)
+
+2. Server adapter (`toFactShape`):
+   - `sales_doc_type: row.SALES_DOC_TYPE` 복원 (PR Truck-1-fix 에서
+     dead code 로 제거한 매핑이 이제 의도된 fact)
+
+3. Frontend adapter (`serverRowsToShipments`):
+   - DO row 의 `sales_doc_type: doRow.sales_doc_type` 복원 (동일 의도)
+
+4. App-level state (`src/ShippingSLAApp.jsx`):
+   - `const [sampleOrderFilter, setSampleOrderFilter] = useState('exclude_samples');`
+   - `filterRegion` state 의 옆 (line ~6561)
+
+5. Filter UI dropdown:
+   - Position: "All regions" select 의 바로 오른쪽 (사용자분 명시)
+   - 3 options: `Exclude samples` / `All orders` / `Samples only`
+   - Style: 기존 select dropdown 의 pattern (Tailwind class 일관)
+   - Visibility: App-level filter bar — 모든 pages 에 visible
+
+6. Prop wiring:
+   - App → SplitShipmentPage 의 `sampleOrderFilter` prop
+   - App → GeoPage 의 `sampleOrderFilter` prop
+
+7. Filter logic (page-aware, upstream of all metrics):
+   - SplitShipmentPage 의 `pageData` useMemo:
+     - channel filter 의 뒤에 sample filter 추가
+     - upstream of splitData / containerMetrics / ytdCustomerList /
+       regionOptions / filteredPageData
+   - SplitShipmentPage 의 `upsHookDataCount` useMemo:
+     - hookData 의 직접 access → sample filter 도 적용 (header count 의
+       정확성)
+   - GeoPage 의 `pageData` useMemo:
+     - channel filter 의 뒤에 sample filter 추가
+     - upstream of cohort / delayedShipments / stateMetrics
+
+**Trust hierarchy:**
+
+- 사용자분 의 master query 의 fact (base CTE 의 `b."Sales_doc._type"`)
+- PR Truck-1-fix 의 dead code 의 reversal — 의도된 매핑의 복원
+- App-level state 의 single source of truth (`sampleOrderFilter`)
+- Page-aware filter logic — 각 page 의 pageData 의 첫 transformation
+- `'Sample Order'` 의 exact match (typo variants 의 별도 처리)
+
+**Validation:**
+
+- npm run build passes
+- Server restart 후 endpoint smoke:
+  - `sales_doc_type` field 의 fact (populated for rows with billing fact)
+  - Distinct values 의 fact (`Sales Order`, `Rush Order`, `Sample Order` 등)
+- Browser smoke:
+  - Filter row 의 새 dropdown 의 visible (App-level)
+  - Default 'Exclude samples' → Sample Order rows 제외
+  - Toggle 'All orders' → 모든 rows
+  - Toggle 'Samples only' → Sample Order rows 만
+  - 모든 KPI / charts / lists 의 update (Split + Geographic 둘 다)
+  - Light + Dark mode 정상
+
+**No changes to:** Other filters (channel, region, cause) 의 logic
+그대로, `useSplitShipments` hook, master query 의 base CTE (이미 fact
+있음), adapter chain 의 다른 fields, mock generator, KPI markup, banners,
+search bar, pagination, Excel export.
+
+**Depends on:** PR Truck-1 cycle (4 PRs — sales_doc_type 의 base CTE 의
+fact 의 의존).
+
+**Backlog:**
+
+- Sample variants 의 다른 처리 (`Sample Order EndCust`, `Samplel
+  Returns`, `Branch Sample Order`) 의 미래 PR — 운영팀 검증 후
+- 운영팀 검증 (PR5): `Sample Order` 의 실제 operational impact
+- 다른 pages (Exec / SKU / Reports 등) 의 sample filter 의 영향 (현재 mock
+  data 로 의미 없음 — 미래 live wiring 시 review)
+
+---
+
+### PR Sample-Order-Filter-Style-Fix — Filter dropdowns 의 theme-aware fact (completed 2026-05-18)
+
+사용자분 의 image 의 fact (PR Sample-Order-Filter 의 commit 전):
+  Filter row:
+    [All causes ▼]      흰색 background (light mode)
+    [All regions ▼]     흰색 background (light mode, SearchableDropdown)
+    [Exclude samples ▼] dark gray (#232c37) — dark mode 의 fixed!
+
+Root cause:
+  - 새 dropdown (sampleOrderFilter) 의 className 의 hardcoded `bg-[#232c37]`
+  - 기존 native `<select>` 도 같은 hardcoded fact 였지만, light mode 의 global
+    `select { background: var(--bg-input) !important }` override (line 6979)
+    가 catch 함 → 시각적으로 일관
+  - 단 dark mode 의 fact:
+    - native `<select>` (filterCause, sampleOrderFilter) → #232c37
+    - SearchableDropdown (filterRegion on split) → #0f1419
+    - → SearchableDropdown 의 outlier
+
+사용자분 결정 (AskUserQuestion): "All three → CSS var (theme-aware)"
+
+Fix:
+- 3 dropdowns 모두 inline `style={{ background: 'var(--bg-input)', border:
+  '1px solid var(--border)', color: 'var(--text-primary)' }}` 로 정정
+- `bg-[#232c37] border-[#2d3744] text-[#e8ecef]` Tailwind classes 제거
+- SearchableDropdown 의 patterns 와 정확히 일관
+
+Result:
+  Light mode: 3 dropdowns 모두 #FAFAF8 (theme-aware)
+  Dark mode:  3 dropdowns 모두 #0f1419 (theme-aware)
+
+Files modified:
+- src/ShippingSLAApp.jsx (filterCause / non-split filterRegion /
+  sampleOrderFilter 의 className + inline style)
+
+No changes to: Filter logic, useSplitShipments hook, master query,
+adapter chain, mock generator.
+
+Validation:
+- npm run build passes
+- Browser visual smoke (사용자분): 3 dropdowns 의 light + dark 모두 일관
+
+---
+
+### PR Sample-Order-Filter-Visibility-Fix — Filter dropdowns 의 visibility + GeoPage sample logic 의 Split page 만 의 fact (completed 2026-05-18)
+
+PR Sample-Order-Filter + Style-Fix 의 commit 전 사용자분 명시:
+  "all causes, All regions, Exclude samples 모두 split shipment 에만 일단
+  보이게 해야돼"
+
+사용자분 의 "일단" 의 의미:
+  - 지금 = 보수적 fact (Split page 만)
+  - 미래 의 다른 pages 도 visible 의 가능성
+
+Root cause (PR Sample-Order-Filter 의 작업 의 fact):
+  - Filter UI (All causes / All regions / Exclude samples) 의 자연 fact 가
+    모든 pages 에 visible (App level filter bar 의 sibling)
+  - Filter logic 도 모든 pages 의 영향 (Geographic 도 sample 제외 의 cohort)
+
+사용자분 의 의도 (명시 후):
+  - Filter UI: Split page 만 의 visible
+  - Filter logic: Split page 만 의 영향
+  - Geographic 의 cohort: 모든 orders (sample 포함)
+
+Fix:
+1. Filter row 의 visibility — `activePage === 'split' && (...)` 의 conditional
+   render 의 wrap:
+   - Filters label (Filter icon + "FILTERS" text)
+   - All causes ▼ (filterCause select)
+   - All regions ▼ (SearchableDropdown, Split 만 의 fact 의 이미 inner
+     conditional 이 었으므로 단순화)
+   - Exclude samples ▼ (sampleOrderFilter select)
+   - 다른 pages 의 filter row 의 visible X
+2. GeoPage 의 pageData useMemo 의 sample filter 의 logic 제거:
+   - `sampleOrderFilter === 'exclude_samples'` / `'samples_only'` branches 제거
+   - useMemo 의 dependency array 에서 sampleOrderFilter 제거
+   - Channel filter 의 logic 만 남음
+   - 모든 orders 의 cohort (sample 포함) — 운영팀 의 delayed 의 의미 의 자연
+3. App level state (sampleOrderFilter) 그대로:
+   - State 의 location 의 fact (미래 의 ready)
+   - GeoPage 의 sampleOrderFilter prop 의 signature 그대로 (legacy `filtered`
+     prop 와 같은 precedent — 미래 의 opt-in 의 ready)
+4. SplitShipmentPage 의 sample filter 의 fact 그대로 (변경 X)
+
+Trust hierarchy:
+  - 사용자분 명시 "일단" 의 의도
+  - PR16 의 원래 fact 의 일관 (Filter row = Split 만 의 자연)
+  - Split page 의 운영 의미 (운영팀 의 split rate 의 분석)
+  - Geographic 의 fact = 모든 orders (운영팀 의 delayed 의 의미)
+  - State 의 App level (미래 의 ready)
+
+Files modified:
+- src/ShippingSLAApp.jsx
+  - Filter row 의 conditional render (`activePage === 'split' && <>...</>`)
+  - GeoPage 의 pageData useMemo 의 sample filter logic 제거
+
+No changes to: Filter logic 의 자체 (Split 의 filteredPageData 의 fact 그대로),
+sampleOrderFilter App-level state, SplitShipmentPage's sample filter,
+useSplitShipments hook, master query, adapter chain, mock generator,
+KPI markup, banners, search bar, pagination, Excel export.
+
+Depends on: PR Sample-Order-Filter + Style-Fix.
+
+Validation:
+- npm run build passes
+- Browser smoke (사용자분):
+  - Split page: 3 dropdowns 의 visible (All causes / All regions / Exclude samples)
+  - 다른 pages (Exec / Geographic / SKU 등): filter row 의 visible X
+  - Sample filter 의 functionality 의 Split 만 의 영향
+  - Geographic 의 cohort 의 변함 없음 (sample 포함, PR Geo-3 의 base 의 fact)
+  - Light + Dark mode 정상
+
+Backlog:
+- 미래 의 다른 pages 의 sample filter 의 visibility (사용자분 명시 "일단" 의 의도)
+- 운영팀 검증 (PR5): Sample Order 의 진짜 operational impact 후 default
+  의 결정
+
+---
+
 ### PR5 — Validation with operations
 
 **Goal:** Real-world correctness check. Operations confirms the 3-type

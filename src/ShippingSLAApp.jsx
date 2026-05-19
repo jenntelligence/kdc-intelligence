@@ -797,7 +797,7 @@ const STATE_NAMES = {
 // ============================================================
 // GEO PAGE — Heat map with issue-type selector
 // ============================================================
-const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [] }) => {
+const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], sampleOrderFilter = 'exclude_samples' }) => {
   const [selectedIssue, setSelectedIssue] = useState('all'); // PR Geo-3: only 'all' is live; other buttons are disabled placeholders for PR Geo-4
   const [hoveredState, setHoveredState] = useState(null);
   const [carrierView, setCarrierView] = useState('UPS'); // 'UPS' or 'Truck'
@@ -817,6 +817,14 @@ const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannel
 
   // Apply the App-level channel-chip selection (mirrors SplitShipmentPage's
   // pageData useMemo). Empty selection = no filtering.
+  //
+  // PR Sample-Order-Filter-Visibility-Fix: sample-order filter logic
+  // intentionally removed here. User-stated intent ("일단") = sample
+  // dropdown is Split-only for now; Geographic operates on every order
+  // (samples included) because Ops reads "delayed delivery to Texas" as
+  // the full delivery cohort regardless of sales doc type. The
+  // sampleOrderFilter prop is kept in the signature so a future page-level
+  // toggle (or App-level reversal) can opt back in without re-plumbing.
   const pageData = useMemo(() => {
     if (!hookData) return [];
     if (!selectedChannels || selectedChannels.length === 0) return hookData;
@@ -1729,12 +1737,15 @@ function serverRowsToShipments(rows) {
       // 'UPS Ground', 'FedEx Ground', so `carrier !== 'TRUCK'` keeps mock
       // behavior intact.
       //
-      // PR Truck-1-fix: pro_num + sales_doc_type 의 mapping 제거.
-      // Master query 의 final CTE 가 두 fields 의 직접 SELECT 안 함
-      // (사용자분 의도). pro_num 의 fact 는 tracking_num 의 coalesce 의
-      // inside (UPS 의 tracking_number 또는 Truck 의 pro_num) — frontend
-      // 의 r.tracking_num access 만 으로 양쪽 carrier 의 fact 충분.
+      // PR Truck-1-fix: pro_num 의 mapping 제거 (final CTE 의 coalesce 의
+      // inside 만 — r.tracking_num access 로 양쪽 carrier 의 fact 충분).
       carrier: doRow.carrier,
+
+      // PR Sample-Order-Filter: Sales document type from billing. Drives
+      // App-level sample-order filter (default 'exclude_samples', toggleable
+      // to 'all' or 'samples_only'). Filter is applied at pageData level
+      // upstream of every other useMemo (splitData, regionOptions, etc).
+      sales_doc_type: doRow.sales_doc_type,
 
       // DO-level aggregations
       tracking_cnt: doRow.tracking_cnt,
@@ -1932,7 +1943,7 @@ function useSplitShipments(dateRange = '7d', customRange = {}) {
 // ============================================================
 // SPLIT SHIPMENT PAGE
 // ============================================================
-const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], filterCause = 'all', filterRegion = 'all', onMetaChange }) => {
+const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], filterCause = 'all', filterRegion = 'all', sampleOrderFilter = 'exclude_samples', onMetaChange }) => {
   const [expandedOrder, setExpandedOrder] = useState(null);
   // PR14: page-level expand-all toggle for Container Tracking. The clickable
   // subtitle on that SectionCard flips this; rendering combines it with the
@@ -1980,8 +1991,19 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
     const channelFiltered = selectedChannels.length === 0
       ? base
       : base.filter(o => selectedChannels.includes(o.channel));
-    if (!isLive) return channelFiltered;
-    return channelFiltered.map(o => ({
+    // PR Sample-Order-Filter: App-level sample order filter applied at the
+    // pageData boundary — upstream of every metric/UI useMemo (splitData,
+    // containerMetrics, ytdCustomerList, regionOptions, upsHookDataCount).
+    // Exact-match on 'Sample Order' per user's operational decision; sample
+    // variants ('Sample Order EndCust', 'Samplel Returns', 'Branch Sample
+    // Order') are handled separately in a future PR.
+    const sampleFiltered = sampleOrderFilter === 'exclude_samples'
+      ? channelFiltered.filter(o => o.sales_doc_type !== 'Sample Order')
+      : sampleOrderFilter === 'samples_only'
+      ? channelFiltered.filter(o => o.sales_doc_type === 'Sample Order')
+      : channelFiltered;
+    if (!isLive) return sampleFiltered;
+    return sampleFiltered.map(o => ({
       ...o,
       containers: (o.containers || []).map(c => ({
         ...c,
@@ -1998,7 +2020,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
         lastLocation: c.delivered_state || null,
       })),
     }));
-  }, [hookData, selectedChannels, isLive]);
+  }, [hookData, selectedChannels, isLive, sampleOrderFilter]);
 
   // PR16: dashboard-level filter dropdowns ("All causes" + "All regions") in
   // the global filter bar at the top of the page. Pre-PR16 they were mock-UI
@@ -2067,8 +2089,16 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
   // operations there spans both carriers (cohort = 1,852 = UPS + Truck).
   const upsHookDataCount = useMemo(() => {
     if (!hookData) return 0;
-    return hookData.filter(o => o.carrier !== 'TRUCK').length;
-  }, [hookData]);
+    // PR Sample-Order-Filter: respect the App-level sample filter so the
+    // header "X DOs" reflects what's actually shown on the page.
+    let scope = hookData.filter(o => o.carrier !== 'TRUCK');
+    if (sampleOrderFilter === 'exclude_samples') {
+      scope = scope.filter(o => o.sales_doc_type !== 'Sample Order');
+    } else if (sampleOrderFilter === 'samples_only') {
+      scope = scope.filter(o => o.sales_doc_type === 'Sample Order');
+    }
+    return scope.length;
+  }, [hookData, sampleOrderFilter]);
   useEffect(() => {
     if (!onMetaChange) return;
     onMetaChange({ source, count: upsHookDataCount, filter: filter ?? null, regions: regionOptions });
@@ -6556,6 +6586,21 @@ export default function ShippingSLAApp() {
   const [datePickerOpen, setDatePickerOpen] = useState(false);
   const datePickerRef = useRef(null);
   const [filterRegion, setFilterRegion] = useState('all');
+  // PR Sample-Order-Filter: App-level sample order filter.
+  // Operations team standard: sample orders (Sales_doc._type = 'Sample Order')
+  // are excluded from default views since they're not part of standard
+  // operational fact. User intent (verbatim): "default 에서는 sample order
+  // 를 포함하지 않고 보여주고 뭔가 버튼을 추가하면 sample order 도 같이 볼
+  // 수 있는 필터". Toggle states:
+  //   - 'exclude_samples' (default) — hide Sample Order rows
+  //   - 'all' — show every row (sample + non-sample)
+  //   - 'samples_only' — show only Sample Order rows
+  // Page-aware: passed as prop to SplitShipmentPage and GeoPage; each page
+  // applies the filter at its pageData level (upstream of all metric/UI
+  // useMemos), so a single source-of-truth toggle drives Split + Geographic
+  // simultaneously. Other pages (Exec / SKU / etc.) stay on mock and aren't
+  // affected operationally.
+  const [sampleOrderFilter, setSampleOrderFilter] = useState('exclude_samples');
   const [selectedChannels, setSelectedChannels] = useState([]); // empty = All channels
   const [selectedShipment, setSelectedShipment] = useState(null);
   const [selectedMetric, setSelectedMetric] = useState(null);
@@ -7223,43 +7268,61 @@ export default function ShippingSLAApp() {
       {/* Filter bar */}
       <div className="max-w-[2560px] mx-auto px-3 sm:px-4 md:px-6 py-3 space-y-2" style={{ borderBottom: `1px solid ${THEME.border}`, background: THEME.bgPrimary }}>
         <div className="flex items-center gap-3 flex-wrap">
-          <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono">
-            <Filter size={11}/> Filters
-          </div>
-          {/* PR16: on the Split page these two dropdowns drive the live
-              filteredPageData pipeline — cause uses the 5 ROOT_CAUSE_LABELS
-              keys (Manifest / UPS Trailer / Zone / Wave / Unclassified) and
-              region uses the unique `state` codes lifted from the active
-              dataset via splitMeta.regions. On every other page the
-              dropdowns keep the legacy CAUSE_LABELS + mock-region behavior
-              so the Exec / SKU / etc. views don't change. SplitShipmentPage
-              guards against cross-page filter values (e.g. cause='UPS' from
-              Exec) so navigation between pages doesn't break the Split
-              view's metrics. */}
-          <select value={filterCause} onChange={e => setFilterCause(e.target.value)}
-            className="bg-[#232c37] border border-[#2d3744] text-[12px] font-mono px-2 py-1 rounded text-[#e8ecef] focus:border-[#1ABC9C] outline-none">
-            <option value="all">All causes</option>
-            {activePage === 'split'
-              ? ROOT_CAUSE_ORDER.map(k => <option key={k} value={k}>{ROOT_CAUSE_LABELS[k]}</option>)
-              : Object.keys(CAUSE_LABELS).map(k => <option key={k} value={k}>{CAUSE_LABELS[k]}</option>)}
-          </select>
-          {/* PR17a: Split page gets the searchable combobox so 20-30 state codes
-              are findable by typing. Other pages keep the native <select> for
-              their existing CAUSE_LABELS / regions mock UI. The cause dropdown
-              above stays native too — only 5 root causes, no search needed. */}
-          {activePage === 'split' ? (
-            <SearchableDropdown
-              options={splitMeta?.regions || ['all']}
-              value={filterRegion}
-              onChange={setFilterRegion}
-              placeholder="All regions"
-              getLabel={r => r === 'all' ? 'All regions' : r}
-            />
-          ) : (
-            <select value={filterRegion} onChange={e => setFilterRegion(e.target.value)}
-              className="bg-[#232c37] border border-[#2d3744] text-[12px] font-mono px-2 py-1 rounded text-[#e8ecef] focus:border-[#1ABC9C] outline-none">
-              {regions.map(r => <option key={r} value={r}>{r === 'all' ? 'All regions' : r}</option>)}
-            </select>
+          {/* PR Sample-Order-Filter-Visibility-Fix: gate the entire filter
+              cluster (Filters label + All causes + All regions + Exclude
+              samples) behind activePage === 'split'. User-stated intent
+              ("일단" = for now): all three dropdowns are Split-only — other
+              pages don't show them. Filter STATE remains App-level so the
+              values persist across navigation and a future page can opt back
+              in by removing this gate. */}
+          {activePage === 'split' && (
+            <>
+              <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono">
+                <Filter size={11}/> Filters
+              </div>
+              {/* PR16: drives Split's filteredPageData pipeline. ROOT_CAUSE_LABELS
+                  (Manifest / UPS Trailer / Zone / Wave / Unclassified) is the
+                  only option list now that this is Split-only. */}
+              {/* PR Sample-Order-Filter-Style-Fix: theme-aware via CSS variables
+                  (matches SearchableDropdown + sampleOrderFilter). */}
+              <select value={filterCause} onChange={e => setFilterCause(e.target.value)}
+                className="text-[12px] font-mono px-2 py-1 rounded outline-none focus:border-[#1ABC9C]"
+                style={{
+                  background: 'var(--bg-input)',
+                  border: '1px solid var(--border)',
+                  color: 'var(--text-primary)',
+                }}>
+                <option value="all">All causes</option>
+                {ROOT_CAUSE_ORDER.map(k => <option key={k} value={k}>{ROOT_CAUSE_LABELS[k]}</option>)}
+              </select>
+              {/* PR17a: SearchableDropdown for the 20-30 state codes lifted
+                  from splitMeta.regions. */}
+              <SearchableDropdown
+                options={splitMeta?.regions || ['all']}
+                value={filterRegion}
+                onChange={setFilterRegion}
+                placeholder="All regions"
+                getLabel={r => r === 'all' ? 'All regions' : r}
+              />
+              {/* PR Sample-Order-Filter: App-level sample order toggle. Now
+                  Split-only per PR Sample-Order-Filter-Visibility-Fix; the
+                  STATE stays App-level so future pages (Geographic etc.) can
+                  opt back in without re-plumbing.
+
+                  PR Sample-Order-Filter-Style-Fix: CSS variables for
+                  light+dark consistency with SearchableDropdown. */}
+              <select value={sampleOrderFilter} onChange={e => setSampleOrderFilter(e.target.value)}
+                className="text-[12px] font-mono px-2 py-1 rounded outline-none focus:border-[#1ABC9C]"
+                style={{
+                  background: 'var(--bg-input)',
+                  border: '1px solid var(--border)',
+                  color: 'var(--text-primary)',
+                }}>
+                <option value="exclude_samples">Exclude samples</option>
+                <option value="all">All orders</option>
+                <option value="samples_only">Samples only</option>
+              </select>
+            </>
           )}
           {/* PR4b3: Split page gets the live, clickable summary dropdown.
               Other pages keep the legacy mock-driven text (unchanged on purpose). */}
@@ -7803,9 +7866,9 @@ export default function ShippingSLAApp() {
           <AccessDenied currentUser={currentUser} page={activePage}/>
         ) : (
           <>
-            {activePage === 'geo' && <GeoPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} />}
+            {activePage === 'geo' && <GeoPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} sampleOrderFilter={sampleOrderFilter} />}
             {activePage === 'ai' && <AIRiskPage filtered={filtered} data={data}/>}
-            {activePage === 'split' && <SplitShipmentPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} filterCause={filterCause} filterRegion={filterRegion} onMetaChange={setSplitMeta}/>}
+            {activePage === 'split' && <SplitShipmentPage filtered={filtered} dateRange={dateRange} customRange={customRange} selectedChannels={selectedChannels} filterCause={filterCause} filterRegion={filterRegion} sampleOrderFilter={sampleOrderFilter} onMetaChange={setSplitMeta}/>}
             {activePage === 'costs' && <CostsPage filtered={filtered}/>}
             {activePage === 'customers' && <CustomerImpactPage filtered={filtered}/>}
             {activePage === 'sku' && <SKUProblemPage filtered={filtered}/>}

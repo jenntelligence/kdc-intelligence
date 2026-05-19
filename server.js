@@ -320,13 +320,17 @@ function toFactShape(row) {
     // shipment_header.carrier). Used by frontend to filter Split metrics
     // to UPS only (Truck has no split concept).
     //
-    // PR Truck-1-fix: pro_num + sales_doc_type 의 mapping 제거.
-    // Master query 의 final CTE 가 두 fields 의 직접 SELECT 안 함
-    // (사용자분 의도). pro_num 은 coalesce 의 inside 만 사용 — tracking_num
-    // 의 substitute 로 UPS 의 tracking_number 또는 Truck 의 pro_num.
-    // 즉 frontend 가 r.tracking_num 의 access 만 으로 양쪽 carrier 의 fact.
-    // sales_doc_type 은 미래 필요 시 다시 추가.
+    // PR Truck-1-fix: pro_num 의 mapping 제거 (final CTE 가 coalesce 의
+    // inside 만 사용 — r.tracking_num 의 access 로 양쪽 carrier 의 fact).
     carrier: row.CARRIER,
+
+    // PR Sample-Order-Filter: Sales document type from zsd_c01_billing
+    // ("Sample Order" / "Sales Order" / "Rush Order" / etc). User's
+    // Snowflake fact: Sample Order = 135,695 of ~10M rows. Drives the
+    // App-level sample-order filter (default 'exclude_samples') — sample
+    // orders are not part of standard operational fact analysis but can
+    // be toggled in for sample-specific tracking.
+    sales_doc_type: row.SALES_DOC_TYPE,
 
     // UPS / Truck tracking (ups_data + truck_data CTEs; coalesced in final)
     // PR Truck-1: delivered_state removed (not in new ups_data CTE).
@@ -1143,6 +1147,7 @@ with base as (
         b.billing_date,
         b.invoice_amount,
         b.carrier,
+        b.sales_doc_type,
         b.cust_state,
         b.shiptoparty_key,
         b.cust_name,
