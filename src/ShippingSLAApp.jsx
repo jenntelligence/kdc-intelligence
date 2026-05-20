@@ -1480,9 +1480,16 @@ const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannel
                 <div className="font-mono text-3xl mt-2" style={{ color: baseColor }}>{issueTotal}</div>
                 {/* PR Geo-3: cohort denominator so ops can read the ratio
                     at a glance — "X delayed out of Y ship-confirmed" frames
-                    the rate against KDC's completed work, not all shipments. */}
+                    the rate against KDC's completed work, not all shipments.
+                    PR Geo-Cohort-Label: label tracks delayedMode so Delivered
+                    mode reads as "delivered (fully delivered DOs)" instead of
+                    the ship-confirm wording. Matches the cohort definition in
+                    deliveredAggregated (strict: every container delivered). */}
                 <div className="text-[11px] font-mono text-[#5d6b7a] mt-1">
-                  Cohort: <span style={{ color: '#8a95a3' }}>{cohort.length}</span> ship-confirmed (trailing ≥ 700)
+                  Cohort: <span style={{ color: '#8a95a3' }}>{cohort.length}</span>{' '}
+                  {delayedMode === 'delivered'
+                    ? 'delivered (fully delivered DOs)'
+                    : 'ship-confirmed (trailing ≥ 700)'}
                 </div>
                 <div className="text-[12px] text-[#8a95a3] mt-1">Hover a state for details</div>
               </>
