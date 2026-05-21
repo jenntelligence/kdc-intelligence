@@ -81,7 +81,7 @@ const LIVE_SPLIT_CHANNELS = ['BS-IVY', 'BS-RED', 'VIVACE'];
 const CHANNEL_GROUP_COLORS = {
   'CS': '#1ABC9C',       // Hark Turquoise
   'BS': '#2C3E9B',       // Hark Persian Blue
-  'VIVACE': '#E74C6F',   // Hark Cerise
+  'VIVACE': '#E87149',   // Pantone 4011 C (matches CHANNEL_BRAND_COLORS for group-fallback consistency)
   'AST': '#2ECC71',      // Hark Green
   'IIO': '#3498DB',      // Hark Turquoise +10 (lighter blue)
   'KIO': '#1B2A4A',      // Hark Blue (dark navy)
@@ -93,6 +93,21 @@ const getChannelGroup = (ch) => {
   if (ch.startsWith('BS')) return 'BS';
   if (ch.startsWith('ECOM')) return 'ECOM';
   return ch;
+};
+
+// PR Overview-A polish: brand-specific colors for the 3 live channels
+// (BS-IVY / BS-RED / VIVACE). Brand override first, then group lookup,
+// then a neutral fallback. Non-live channels (CS-*, ECOM-*, AST, IIO,
+// KIO) fall through to CHANNEL_GROUP_COLORS unchanged.
+const CHANNEL_BRAND_COLORS = {
+  'BS-IVY': '#0033A0',   // Pantone 286 C — Trust Blue
+  'VIVACE': '#E87149',   // Pantone 4011 C — Vivid orange/coral
+  'BS-RED': '#BF0D3E',   // Pantone 193 C
+};
+
+const getChannelColor = (ch) => {
+  if (ch && CHANNEL_BRAND_COLORS[ch]) return CHANNEL_BRAND_COLORS[ch];
+  return CHANNEL_GROUP_COLORS[getChannelGroup(ch || '')] || '#8a95a3';
 };
 
 // UPS Parcel Zone Lead Times (from GA origin)
@@ -1148,21 +1163,21 @@ const OverviewPage = ({
       {(() => {
         const m = liveMetrics;
         const kpiCards = [
-          { key: 'cycle',        label: 'Order→Dock Cycle',     value: (m.cycleHrs || 0).toFixed(1), unit: 'hrs', delta: 'Target: 18.0 hrs',                                  deltaType: 'neutral',                                  icon: Clock },
-          { key: 'ontime-ship',  label: 'On-Time Ship',         value: fmtPct(m.onTimeShipPct),                  delta: `${fmtNum(m.shippedCount)} shipped`,                  deltaType: m.onTimeShipPct  >= 0.95 ? 'good' : 'bad',  icon: Package },
+          { key: 'cycle',        label: 'Order→Dock Cycle',     value: '—',                                       delta: 'Coming in Phase C',                                  deltaType: 'neutral',                                  icon: Clock },
+          { key: 'ontime-ship',  label: 'On-Time Ship',         value: fmtPct(m.onTimeShipPct),                  delta: `${fmtNum(m.shippedCount)} shipped (≥700)`, deltaType: m.onTimeShipPct  >= 0.95 ? 'good' : 'bad',  icon: Package },
           { key: 'ontime-deliv', label: 'On-Time Delivery',     value: fmtPct(m.onTimeDelivPct),                 delta: `${fmtNum(m.deliveredCount)} delivered`,              deltaType: m.onTimeDelivPct >= 0.95 ? 'good' : 'bad',  icon: Truck },
           { key: 'delayed',      label: 'Delayed Deliveries',   value: fmtNum(m.deliveredDelayed),               delta: `${fmtPct(m.deliveredDelayed/(m.deliveredCount||1))} of ${fmtNum(m.deliveredCount)} delivered`, deltaType: 'bad',              icon: AlertTriangle },
-          { key: 'split',        label: 'Split Shipment',       value: fmtPct(m.splitPct),                       delta: `${fmtNum(m.splitCount)} of ${fmtNum(m.splitSettledCount)} settled UPS · Target 0.0%`, deltaType: 'bad',              icon: Split },
+          { key: 'split',        label: 'Split Shipment',       value: fmtPct(m.splitPct),                       delta: `${fmtNum(m.splitCount)} of ${fmtNum(m.splitSettledCount)} settled UPS`, deltaType: 'bad',              icon: Split },
           { key: 'damage',       label: 'Damage / Problem',     value: '—',                                      delta: 'Coming in Phase C',                                  deltaType: 'neutral',                                  icon: AlertTriangle },
           { key: 'backorder',    label: 'In-Stock Backorders',  value: '—',                                      delta: 'Coming in Phase C',                                  deltaType: 'neutral',                                  icon: Package },
         ];
 
         const dollarCards = [
           { key: 'cycle',        label: 'Total Volume $',         value: `$${fmtNum(Math.round(m.totalDollars))}`,        delta: `${fmtNum(m.total)} DOs`,           deltaType: 'neutral', icon: DollarSign },
-          { key: 'ontime-ship',  label: 'On-Time Ship $',         value: `$${fmtNum(Math.round(m.onTimeShipDollars))}`,   delta: `${fmtNum(m.shippedOnTime)} shipments`,   deltaType: 'good',    icon: DollarSign },
+          { key: 'ontime-ship',  label: 'On-Time Ship $',         value: `$${fmtNum(Math.round(m.onTimeShipDollars))}`,   delta: `${fmtNum(m.shippedOnTime)} shipments · ${fmtNum(Math.max(0, m.shippedCount - m.shippedOnTime))} delayed`,   deltaType: 'good',    icon: DollarSign },
           { key: 'ontime-deliv', label: 'On-Time Delivery $',     value: `$${fmtNum(Math.round(m.onTimeDelivDollars))}`,  delta: `${fmtNum(m.deliveredOnTime)} delivered`, deltaType: 'good',    icon: DollarSign },
           { key: 'delayed',      label: '$ at Risk (Delayed)',    value: `$${fmtNum(Math.round(m.delayedDollars))}`,      delta: `${fmtNum(m.deliveredDelayed)} delayed`,  deltaType: 'bad',     icon: DollarSign },
-          { key: 'split',        label: 'Split Penalties',        value: `$${fmtNum(Math.round(m.splitDollars))}`,        delta: `${fmtNum(m.splitCount)} split DOs`,      deltaType: 'bad',     icon: DollarSign },
+          { key: 'split',        label: 'Split Volume',           value: `$${fmtNum(Math.round(m.splitDollars))}`,        delta: `${fmtNum(m.splitCount)} split DOs`,      deltaType: 'bad',     icon: DollarSign },
           { key: 'damage',       label: 'Damage Chargebacks',     value: '—',                                              delta: 'Coming in Phase C',                      deltaType: 'neutral', icon: DollarSign },
           { key: 'backorder',    label: 'Backorder Value',        value: '—',                                              delta: 'Coming in Phase C',                      deltaType: 'neutral', icon: DollarSign },
         ];
@@ -1224,22 +1239,19 @@ const OverviewPage = ({
         };
 
         const metricConfig = {
-          // CYCLE — Order→Dock cycle hours per DO, longest first. Cohort =
-          // ship-confirm-or-beyond (trailing_status ≥ 700), same as the KPI.
+          // CYCLE — ship-confirm cohort table (DO #, customer, channel,
+          // carrier, order/ship dates). The Cycle Time column itself renders
+          // "—" because the cycle hours metric definition is still pending
+          // Phase C review — Ops can still scan which DOs are ship-confirmed
+          // without seeing an uncertain hours value. KPI card stays "—" /
+          // "Coming in Phase C" as well.
           'cycle': {
             title: 'Order→Dock Cycle Time',
             filter: (r) => r.trailing_status != null && Number(r.trailing_status) >= 700,
             cols: ['do_num', 'customer', 'channel', 'carrier', 'so_created_date', 'trailing_status_date', '_cycleHrs'],
-            formatRow: (r) => {
-              const startStr = (typeof r.so_created_date === 'string')
-                ? r.so_created_date.slice(0, 10) + 'T00:00:00Z'
-                : r.so_created_date;
-              const start = new Date(startStr);
-              const end   = new Date(r.trailing_status_date);
-              const hrs   = (end.getTime() - start.getTime()) / 3_600_000;
-              return { ...r, _cycleHrs: Number.isFinite(hrs) ? hrs.toFixed(1) + 'h' : '—' };
-            },
-            sort: (a, b) => parseFloat(b._cycleHrs) - parseFloat(a._cycleHrs),
+            formatRow: (r) => ({ ...r, _cycleHrs: '—' }),
+            // No sort — every row's _cycleHrs is identical, so master-query
+            // insertion order is the most useful default.
           },
 
           // ON-TIME SHIP — ship-confirm cohort + status badge. Inline delay
@@ -1381,9 +1393,9 @@ const OverviewPage = ({
                           </td>
                         );
                         if (c === 'channel') {
-                          const g = getChannelGroup(val || '');
+                          const cc = getChannelColor(val || '');
                           return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded font-mono"
-                            style={{ background: (CHANNEL_GROUP_COLORS[g]||'#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[g]||'#8a95a3' }}>{val}</span></td>;
+                            style={{ background: cc + '20', color: cc }}>{val}</span></td>;
                         }
                         return <td key={c} className="py-2 pr-4 font-mono" style={{ color: 'var(--text-primary)' }}>{val ?? '—'}</td>;
                       })}
@@ -1397,35 +1409,50 @@ const OverviewPage = ({
         );
       })()}
 
-      {/* Channel performance strip — mock until Phase C */}
-      <SectionCard title="Performance by Distribution Channel" subtitle={selectedChannels.length > 0 ? `Showing ${selectedChannels.length} selected channel(s)` : 'All 11 channels · click pills in filter bar to drill'} tag="CHANNEL MIX" className="mb-4">
+      {/* Channel performance strip — only BS-IVY / BS-RED / VIVACE are live
+          (LIVE_SPLIT_CHANNELS). The other 8 channels still render so the grid
+          shape is preserved, but they are disabled, opacity-dimmed, and show
+          '—' instead of mock counts (PR Overview-A polish #6). Mock channel
+          metrics were misleading once the live cards above shipped. */}
+      <SectionCard title="Performance by Distribution Channel" subtitle={selectedChannels.length > 0 ? `Showing ${selectedChannels.length} selected channel(s)` : `${LIVE_SPLIT_CHANNELS.length} live channels · ${CHANNELS.length - LIVE_SPLIT_CHANNELS.length} disabled until live wiring`} tag="CHANNEL MIX" className="mb-4">
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-11 gap-2">
           {CHANNELS.map(ch => {
+            const isLive = LIVE_SPLIT_CHANNELS.includes(ch);
             const chRows = data.filter(r => r.channel === ch);
             const total = chRows.length;
             const delayed = chRows.filter(r => r.cause).length;
             const delayRate = total ? delayed/total : 0;
             const isSelected = selectedChannels.length === 0 || selectedChannels.includes(ch);
             const group = getChannelGroup(ch);
-            const color = CHANNEL_GROUP_COLORS[group] || '#8a95a3';
+            const color = getChannelColor(ch);
             return (
               <div key={ch}
-                onClick={() => setSelectedChannels(prev =>
+                onClick={isLive ? () => setSelectedChannels(prev =>
                   prev.includes(ch) ? prev.filter(c => c !== ch) : [...prev, ch]
-                )}
-                className={`bg-[#1a2129] rounded border p-2 cursor-pointer transition-all ${isSelected ? '' : 'opacity-40'}`}
-                style={{ borderColor: selectedChannels.includes(ch) ? color : '#2d3744' }}>
+                ) : undefined}
+                className={`bg-[#1a2129] rounded border p-2 transition-all ${isLive ? 'cursor-pointer' : 'cursor-not-allowed'} ${isLive && isSelected ? '' : 'opacity-40'}`}
+                style={{ borderColor: isLive && selectedChannels.includes(ch) ? color : '#2d3744', opacity: isLive ? undefined : 0.35 }}>
                 <div className="flex items-center gap-1 mb-1">
                   <div className="w-1.5 h-1.5 rounded-sm" style={{ background: color }}/>
                   <div className="text-[10px] font-mono uppercase tracking-wider text-[#8a95a3] truncate">{ch}</div>
                 </div>
-                <div className="font-mono text-sm font-semibold">{total}</div>
-                <div className={`font-mono text-[11px] ${delayRate > 0.4 ? 'text-[#E74C6F]' : delayRate > 0.25 ? 'text-[#f5a623]' : 'text-[#2ECC71]'}`}>
-                  {fmtPct(delayRate)}
-                </div>
-                <div className="mt-1 h-0.5 bg-[#0f1419] rounded overflow-hidden">
-                  <div className="h-full" style={{ width: `${Math.min(delayRate*100*2.5, 100)}%`, background: delayRate > 0.4 ? '#E74C6F' : delayRate > 0.25 ? '#f5a623' : '#2ECC71' }}/>
-                </div>
+                {isLive ? (
+                  <>
+                    <div className="font-mono text-sm font-semibold">{total}</div>
+                    <div className={`font-mono text-[11px] ${delayRate > 0.4 ? 'text-[#E74C6F]' : delayRate > 0.25 ? 'text-[#f5a623]' : 'text-[#2ECC71]'}`}>
+                      {fmtPct(delayRate)}
+                    </div>
+                    <div className="mt-1 h-0.5 bg-[#0f1419] rounded overflow-hidden">
+                      <div className="h-full" style={{ width: `${Math.min(delayRate*100*2.5, 100)}%`, background: delayRate > 0.4 ? '#E74C6F' : delayRate > 0.25 ? '#f5a623' : '#2ECC71' }}/>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="font-mono text-sm font-semibold text-[#5d6b7a]">—</div>
+                    <div className="font-mono text-[11px] text-[#5d6b7a]">—</div>
+                    <div className="mt-1 h-0.5 bg-[#0f1419] rounded"/>
+                  </>
+                )}
               </div>
             );
           })}
@@ -2058,7 +2085,7 @@ const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannel
                   {stateMetrics[hoveredState].topChannel && (
                     <div className="flex justify-between pt-1.5 border-t border-[#2d3744]">
                       <span className="text-[#8a95a3]">Top channel</span>
-                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: (CHANNEL_GROUP_COLORS[getChannelGroup(stateMetrics[hoveredState].topChannel)] || '#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[getChannelGroup(stateMetrics[hoveredState].topChannel)] || '#8a95a3' }}>
+                      <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: (getChannelColor(stateMetrics[hoveredState].topChannel))+'20', color: getChannelColor(stateMetrics[hoveredState].topChannel) }}>
                         {stateMetrics[hoveredState].topChannel} ({stateMetrics[hoveredState].topChannelCount})
                       </span>
                     </div>
@@ -2309,7 +2336,7 @@ const AIRiskPage = ({ filtered, data }) => {
                     </div>
                   </td>
                   <td className="py-2">
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: (CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)] || '#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)] || '#8a95a3' }}>{o.channel}</span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: (getChannelColor(o.channel))+'20', color: getChannelColor(o.channel) }}>{o.channel}</span>
                   </td>
                   <td className="py-2 font-mono text-[#8a95a3]">{o.state} · Z{o.zone}</td>
                   <td className="py-2">
@@ -3491,7 +3518,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
                 }}>
                 {/* Channel label + group-color dot */}
                 <div className="flex items-center gap-1.5 mb-2">
-                  <div className="w-1.5 h-1.5 rounded-sm flex-shrink-0" style={{ background: CHANNEL_GROUP_COLORS[c.group] || '#8a95a3' }}/>
+                  <div className="w-1.5 h-1.5 rounded-sm flex-shrink-0" style={{ background: getChannelColor(c.channel) }}/>
                   <div className="text-[10px] font-mono uppercase tracking-wider truncate" style={{ color: 'var(--text-muted)' }}>{c.channel}</div>
                 </div>
                 {/* Headline percentage in the channel color (or muted dash when empty) */}
@@ -3644,7 +3671,7 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
                       </td>
                       <td className="py-2.5 pr-3" style={{ color: 'var(--text-primary)' }}>{o.customer}</td>
                       <td className="py-2.5 pr-3">
-                        <span className="text-[10px] px-1.5 py-0.5 rounded font-mono" style={{ background: (CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)]||'#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)]||'#8a95a3' }}>{o.channel}</span>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded font-mono" style={{ background: (getChannelColor(o.channel))+'20', color: getChannelColor(o.channel) }}>{o.channel}</span>
                       </td>
                       <td className="py-2.5 pr-3 text-center font-mono">{o.containers?.length || o.splitCartons || 0}x</td>
                       <td className="py-2.5 pr-3 text-center font-mono text-[#E74C6F]">{o.splitGapDays != null ? `${o.splitGapDays}d` : '—'}</td>
@@ -4019,7 +4046,7 @@ const CostsPage = ({ filtered }) => {
             return CHANNELS.map(ch => {
               const c = byChannel[ch] || { channel: ch, total: 0, chargeback: 0, delayed: 0 };
               const group = getChannelGroup(ch);
-              const color = CHANNEL_GROUP_COLORS[group] || '#8a95a3';
+              const color = getChannelColor(ch);
               return (
                 <div key={ch} className="bg-[#1a2129] rounded border border-[#2d3744] p-2">
                   <div className="flex items-center gap-1 mb-1">
@@ -4142,7 +4169,7 @@ const CustomerImpactPage = ({ filtered }) => {
                 <td className="py-2">
                   <div className="flex gap-0.5 flex-wrap">
                     {c.channelList.slice(0, 4).map(ch => {
-                      const color = CHANNEL_GROUP_COLORS[getChannelGroup(ch)] || '#8a95a3';
+                      const color = getChannelColor(ch);
                       return <span key={ch} className="text-[10px] font-mono px-1 py-0.5 rounded" style={{ background: color+'20', color: color }} title={ch}>{ch.replace('ECOM - ', '').replace('CS - ', 'CS-')}</span>;
                     })}
                     {c.channelList.length > 4 && <span className="text-[10px] font-mono text-[#5d6b7a]">+{c.channelList.length - 4}</span>}
@@ -4233,7 +4260,7 @@ const SKUProblemPage = ({ filtered }) => {
                 <td className="py-2 text-center">{s.fragile ? <span className="text-[#f5a623]">●</span> : <span className="text-[#5d6b7a]">—</span>}</td>
                 <td className="py-2">
                   {s.topChannel ? (
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: (CHANNEL_GROUP_COLORS[getChannelGroup(s.topChannel)] || '#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[getChannelGroup(s.topChannel)] || '#8a95a3' }}>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: (getChannelColor(s.topChannel))+'20', color: getChannelColor(s.topChannel) }}>
                       {s.topChannel} {s.channelCount > 1 && <span className="opacity-60">+{s.channelCount-1}</span>}
                     </span>
                   ) : '—'}
@@ -4392,7 +4419,7 @@ const ShiftHeatmapPage = ({ filtered }) => {
                     {CHANNELS.map(ch => {
                       const chTotal = shifts.reduce((s, sh) => s + matrix[ch][sh].total, 0);
                       const group = getChannelGroup(ch);
-                      const groupColor = CHANNEL_GROUP_COLORS[group] || '#8a95a3';
+                      const groupColor = getChannelColor(ch);
                       return (
                         <tr key={ch} className="border-b border-[#2d3744]">
                           <td className="py-2">
@@ -5169,7 +5196,7 @@ const AdminPortalPage = ({ currentUser }) => {
                     <div className="grid grid-cols-2 gap-2">
                       {CHANNELS.map(channel => {
                         const group = getChannelGroup(channel);
-                        const groupColor = CHANNEL_GROUP_COLORS[group] || '#8a95a3';
+                        const groupColor = getChannelColor(channel);
                         const checked = selectedUserObj.channels.includes(channel);
                         return (
                           <button
@@ -5476,7 +5503,7 @@ const AdminSLAPage = ({ channelSlas, setChannelSlas, kpiTargets, setKpiTargets, 
         <div className="text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono shrink-0">Channel Overrides:</div>
         {CHANNELS.map(ch => {
           const grp = getChannelGroup(ch);
-          const color = CHANNEL_GROUP_COLORS[grp] || '#8a95a3';
+          const color = getChannelColor(ch);
           const hasOv = !!editingMap[ch];
           return (
             <div key={ch} className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono border"
@@ -5494,7 +5521,7 @@ const AdminSLAPage = ({ channelSlas, setChannelSlas, kpiTargets, setKpiTargets, 
         {tabs.map(tab => {
           const isDefault = tab === 'default';
           const grp = isDefault ? null : getChannelGroup(tab);
-          const color = isDefault ? '#1ABC9C' : (CHANNEL_GROUP_COLORS[grp] || '#8a95a3');
+          const color = isDefault ? '#1ABC9C' : getChannelColor(tab);
           const hasOv = !isDefault && !!editingMap[tab];
           const active = selectedTab === tab;
           return (
@@ -5663,7 +5690,7 @@ const AdminSLAPage = ({ channelSlas, setChannelSlas, kpiTargets, setKpiTargets, 
           <tbody>
             {auditLog.slice(0, 15).map((a, i) => {
               const grp = a.channel && a.channel !== 'default' && a.channel !== 'global' ? getChannelGroup(a.channel) : null;
-              const color = grp ? (CHANNEL_GROUP_COLORS[grp] || '#8a95a3') : '#5d6b7a';
+              const color = grp ? getChannelColor(a.channel) : '#5d6b7a';
               return (
                 <tr key={i} className="border-b border-[#2d3744]">
                   <td className="py-2 font-mono text-[11px] text-[#8a95a3]">{a.ts.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
@@ -6212,7 +6239,7 @@ const FlightBoardPage = ({ data: allData }) => {
                   <td className="py-2">{o.customer}</td>
                   <td className="py-2 font-mono text-[#8a95a3]">{o.state}</td>
                   <td className="py-2">
-                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: (CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)] || '#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[getChannelGroup(o.channel)] || '#8a95a3' }}>{o.channel}</span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded" style={{ background: (getChannelColor(o.channel))+'20', color: getChannelColor(o.channel) }}>{o.channel}</span>
                   </td>
                   <td className="py-2 text-[#8a95a3]">{o.carrier}</td>
                   <td className="py-2 font-mono text-right">${fmtNum(o.orderValue.toFixed(0))}</td>
@@ -7214,7 +7241,7 @@ const EventCalendarPage = ({ currentUser }) => {
                   {ev.channels.length > 0 && (
                     <div className="flex flex-wrap gap-1">
                       {ev.channels.map(ch => (
-                        <span key={ch} className="text-[9px] px-1.5 py-0.5 rounded font-mono" style={{ backgroundColor: (CHANNEL_GROUP_COLORS[getChannelGroup(ch)] || '#8a95a3') + '22', color: CHANNEL_GROUP_COLORS[getChannelGroup(ch)] || '#8a95a3' }}>{ch}</span>
+                        <span key={ch} className="text-[9px] px-1.5 py-0.5 rounded font-mono" style={{ backgroundColor: (getChannelColor(ch)) + '22', color: getChannelColor(ch) }}>{ch}</span>
                       ))}
                     </div>
                   )}
@@ -8327,17 +8354,18 @@ export default function ShippingSLAApp() {
             className={`px-2.5 py-1 rounded text-[11px] font-mono uppercase tracking-wider border transition-all ${selectedChannels.length === 0 ? 'border-[#1ABC9C] bg-[#1ABC9C]/20 text-[#1ABC9C]' : 'border-[#2d3744] text-[#8a95a3] hover:border-[#1ABC9C]'}`}>
             All
           </button>
-          {/* PR4b5 → PR Geo-4: Narrow the chip set to the 3 live channels
-              (BS-IVY / BS-RED / VIVACE) on Split AND Geographic — these are
-              the two pages with live wiring (BS-IVY/BS-RED/VIVACE via UPS,
-              002 plan §6b). Split's mock-mode also gets the 3-chip subset now
-              (user decision in PR Geo-4) so the chip set is page-driven, not
-              source-driven. Exec / SKU / Reports / etc. keep all 11 chips so
-              their mock data renders correctly. selectedChannels state is
-              untouched — a user's BS-IVY pick survives navigation. */}
-          {((activePage === 'split' || activePage === 'geo') ? LIVE_SPLIT_CHANNELS : CHANNELS).map(ch => {
+          {/* PR4b5 → PR Geo-4 → PR Overview-A polish: Narrow the chip set to
+              the 3 live channels (BS-IVY / BS-RED / VIVACE) on Split, Geo,
+              AND Exec (Overview) — these are the three pages with live wiring
+              (BS-IVY/BS-RED/VIVACE via UPS, 002 plan §6b). Split's mock-mode
+              also gets the 3-chip subset (PR Geo-4 user decision) so the chip
+              set is page-driven, not source-driven. SKU / Reports / etc. keep
+              all 11 chips so their mock data renders correctly.
+              selectedChannels state is untouched — a user's BS-IVY pick
+              survives navigation. */}
+          {((activePage === 'split' || activePage === 'geo' || activePage === 'exec') ? LIVE_SPLIT_CHANNELS : CHANNELS).map(ch => {
             const group = getChannelGroup(ch);
-            const color = CHANNEL_GROUP_COLORS[group] || '#8a95a3';
+            const color = getChannelColor(ch);
             const active = selectedChannels.includes(ch);
             return (
               <button key={ch}
