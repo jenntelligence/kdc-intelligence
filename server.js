@@ -316,6 +316,12 @@ function toFactShape(row) {
     trailing_sts: row.TRAILING_STS,
     trailing_sts_date: row.TRAILING_STS_DATE,
 
+    // PR Overview-A cycle wire: SH.creation_date_time_stamp ET-converted in
+    // master query. Marks when the SO entered SCALE / KDC operations — used
+    // as the start point for container-level cycle hours
+    // (manifest_date_time - order_received_at).
+    order_received_at: row.ORDER_RECEIVED_AT,
+
     // PR Truck-1: carrier identity. 'UPS' or 'TRUCK' (raw SCALE
     // shipment_header.carrier). Used by frontend to filter Split metrics
     // to UPS only (Truck has no split concept).
@@ -1004,6 +1010,7 @@ with base as (
         b."Calendar_day" as billing_date,
         b."Sales_doc._type" as sales_doc_type,
         sh.carrier,
+        convert_timezone('UTC', 'America/New_York', sh.creation_date_time_stamp) as order_received_at,
         sum(b."GROSS($)") as invoice_amount
     from sci.l0.shipping_container sc
     join sci.l0.shipment_header sh on sc.internal_shipment_num = sh.internal_shipment_num
@@ -1041,7 +1048,7 @@ with base as (
     and (sh.carrier = 'UPS' or sh.carrier = 'TRUCK')
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') >= ?
     AND TO_DATE(CASE WHEN salesdocdate = '00000000' then null else salesdocdate end, 'YYYYMMDD') <= ?
-    group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
+    group by 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27
 )
 , ia_work_instruction as (
     select
@@ -1091,6 +1098,7 @@ with base as (
         ia.manifest_date_time,
         b.trailing_sts,
         b.trailing_sts_date,
+        b.order_received_at,
         b.container_id,
         b.container_status,
         b.container_type,

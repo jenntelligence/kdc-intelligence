@@ -1093,19 +1093,29 @@ const OverviewPage = ({
     const splitSettled = upsOnly.filter(r => r.split_status === 'SPLIT' || r.split_status === 'NOT_SPLIT');
     const splitRows    = splitSettled.filter(r => r.is_split_shipment);
 
-    // Cycle hours: avg of (trailing_sts_date - so_created_date) hours over the
-    // ship-confirm cohort. Substitutes for legacy SQL DATEDIFF('HOUR',
-    // CREATION_DATE_TIME_STAMP, ACTUAL_SHIP_DATE_TIME).
+    // PR Overview-A cycle wire: container-level (manifest_date_time -
+    // order_received_at). avg = sum / count across ALL manifested containers
+    // across all DOs (not DO-level MIN/MAX averaging). Cohort = DOs with at
+    // least one manifested container — implicit because containers without
+    // manifest_date_time are skipped.
+    //
+    // Both timestamps are ET-converted in master query; treating them as
+    // local-time Dates and subtracting cancels the local-TZ shift, so the
+    // hours math is timezone-stable.
     let cycleHrsSum = 0;
     let cycleHrsN   = 0;
-    for (const r of shipped) {
-      const orderRaw = r.so_created_date || r.orderCreate;
-      if (!orderRaw || !r.trailing_status_date) continue;
-      const so  = new Date(orderRaw);
-      const sts = new Date(r.trailing_status_date);
-      if (Number.isNaN(so.getTime()) || Number.isNaN(sts.getTime())) continue;
-      cycleHrsSum += (sts.getTime() - so.getTime()) / 3600000;
-      cycleHrsN   += 1;
+    for (const r of pageData) {
+      if (!r.order_received_at) continue;
+      const received = new Date(r.order_received_at);
+      if (Number.isNaN(received.getTime())) continue;
+      const cs = Array.isArray(r.containers) ? r.containers : [];
+      for (const c of cs) {
+        if (!c.manifest_date_time) continue;
+        const manifested = new Date(c.manifest_date_time);
+        if (Number.isNaN(manifested.getTime())) continue;
+        cycleHrsSum += (manifested.getTime() - received.getTime()) / 3600000;
+        cycleHrsN   += 1;
+      }
     }
     const cycleHrs = cycleHrsN ? cycleHrsSum / cycleHrsN : 0;
 
@@ -1124,6 +1134,7 @@ const OverviewPage = ({
       splitSettledCount:  splitSettled.length,
       splitCount:         splitRows.length,
       cycleHrs,
+      cycleHrsN,
       onTimeShipPct:  shipped.length      ? shippedOnTime.length    / shipped.length      : 0,
       onTimeDelivPct: delivered.length    ? deliveredOnTime.length  / delivered.length    : 0,
       splitPct:       splitSettled.length ? splitRows.length        / splitSettled.length : 0,
@@ -1177,7 +1188,7 @@ const OverviewPage = ({
       {(() => {
         const m = liveMetrics;
         const kpiCards = [
-          { key: 'cycle',        label: 'Order→Dock Cycle',     value: '—',                                       delta: 'Coming in Phase C',                                  deltaType: 'neutral',                                  icon: Clock },
+          { key: 'cycle',        label: 'Order→Dock Cycle',     value: (m.cycleHrs || 0).toFixed(1), unit: 'hrs', delta: `${fmtNum(m.cycleHrsN || 0)} container manifests`,    deltaType: 'neutral',                                  icon: Clock },
           { key: 'ontime-ship',  label: 'On-Time Ship',         value: fmtPct(m.onTimeShipPct),                  delta: `${fmtNum(m.shippedCount)} shipped (≥700)`, deltaType: m.onTimeShipPct  >= 0.95 ? 'good' : 'bad',  icon: Package },
           { key: 'ontime-deliv', label: 'On-Time Delivery',     value: fmtPct(m.onTimeDelivPct),                 delta: `${fmtNum(m.deliveredCount)} delivered`,              deltaType: m.onTimeDelivPct >= 0.95 ? 'good' : 'bad',  icon: Truck },
           { key: 'delayed',      label: 'Delayed Deliveries',   value: fmtNum(m.deliveredDelayed),               delta: `${fmtPct(m.deliveredDelayed/(m.deliveredCount||1))} of ${fmtNum(m.deliveredCount)} delivered`, deltaType: 'bad',              icon: AlertTriangle },
@@ -1237,19 +1248,50 @@ const OverviewPage = ({
         };
 
         const metricConfig = {
-          // CYCLE — ship-confirm cohort table (DO #, customer, channel,
-          // carrier, order/ship dates). The Cycle Time column itself renders
-          // "—" because the cycle hours metric definition is still pending
-          // Phase C review — Ops can still scan which DOs are ship-confirmed
-          // without seeing an uncertain hours value. KPI card stays "—" /
-          // "Coming in Phase C" as well.
+          // CYCLE — DO rows with at least one manifested container. Each row
+          // shows Min Cycle / Max Cycle across the DO's containers, where
+          // cycle = manifest_date_time - order_received_at. The KPI card
+          // averages every manifested container individually (not DO-level
+          // MIN/MAX averaging), so the card value and the table reflect
+          // different but complementary views.
           'cycle': {
             title: 'Order→Dock Cycle Time',
-            filter: (r) => r.trailing_status != null && Number(r.trailing_status) >= 700,
-            cols: ['do_num', 'customer', 'channel', 'carrier', 'so_created_date', 'trailing_status_date', '_cycleHrs'],
-            formatRow: (r) => ({ ...r, _cycleHrs: '—' }),
-            // No sort — every row's _cycleHrs is identical, so master-query
-            // insertion order is the most useful default.
+            filter: (r) => r.order_received_at != null
+                       && Array.isArray(r.containers)
+                       && r.containers.some(c => c.manifest_date_time != null),
+            cols: ['do_num', 'customer', 'channel', 'carrier', '_orderReceived', '_minCycleHrs', '_maxCycleHrs'],
+            formatRow: (r) => {
+              const received = new Date(r.order_received_at);
+              if (Number.isNaN(received.getTime())) {
+                return { ...r, _orderReceived: '—', _minCycleHrs: '—', _maxCycleHrs: '—' };
+              }
+              // ET-clock display: timestamps were converted UTC → ET in the
+              // master query, so toLocaleString with timeZone: 'UTC' on the
+              // parsed JS Date renders the ET clock time directly.
+              const orderReceivedDisplay = received.toLocaleString('en-US', {
+                month: 'short', day: 'numeric', year: 'numeric',
+                hour: 'numeric', minute: '2-digit',
+                timeZone: 'UTC',
+              });
+              const cycles = (r.containers || [])
+                .filter(c => c.manifest_date_time)
+                .map(c => {
+                  const m = new Date(c.manifest_date_time);
+                  return Number.isNaN(m.getTime()) ? null : (m.getTime() - received.getTime()) / 3600000;
+                })
+                .filter(v => v !== null);
+              if (cycles.length === 0) {
+                return { ...r, _orderReceived: orderReceivedDisplay, _minCycleHrs: '—', _maxCycleHrs: '—' };
+              }
+              return {
+                ...r,
+                _orderReceived: orderReceivedDisplay,
+                _minCycleHrs: Math.min(...cycles).toFixed(1) + 'h',
+                _maxCycleHrs: Math.max(...cycles).toFixed(1) + 'h',
+              };
+            },
+            // Worst-case first — Max Cycle descending.
+            sort: (a, b) => parseFloat(b._maxCycleHrs) - parseFloat(a._maxCycleHrs),
           },
 
           // ON-TIME SHIP — ship-confirm cohort + status badge. Inline delay
@@ -1351,7 +1393,9 @@ const OverviewPage = ({
           delivered_date: 'Delivered',
           orderValue: 'Value',
           splitReason: 'Split Reason',
-          _cycleHrs: 'Cycle Time',
+          _orderReceived: 'Order Received',
+          _minCycleHrs: 'Min Cycle',
+          _maxCycleHrs: 'Max Cycle',
           _status: 'Status',
           _daysLate: 'Days Late',
           _containerCount: 'Containers',
@@ -2660,6 +2704,12 @@ function serverRowsToShipments(rows) {
       // and lives on each entry of `containers`, not on the DO row.
       trailing_status: doRow.trailing_sts,
       trailing_status_date: doRow.trailing_sts_date,
+
+      // PR Overview-A cycle wire: SH.creation_date_time_stamp (ET-converted in
+      // master query). Hoisted to DO-level since every container row in a DO
+      // shares the same SH timestamp. Used as the start point for container-
+      // level cycle hours (manifest_date_time - order_received_at).
+      order_received_at: doRow.order_received_at,
 
       // PR Truck-1: carrier identity. 'UPS' or 'TRUCK' (raw SCALE
       // shipment_header.carrier). Used by splitData / containerMetrics /
