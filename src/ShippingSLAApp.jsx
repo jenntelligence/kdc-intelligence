@@ -221,43 +221,57 @@ function addBusinessDays(startDate, businessDays) {
   return result;
 }
 
-// PR Geo-Delivered-Mode: per-row "did this delivery beat its lead time?"
-// Returns true when delivered_date is strictly past delivered_expected
-// (day-grain, both sides UTC-midnight-aligned).
+// PR Overview-A backorder-prep: expected delivery date for a row, derived
+// from carrier rules. Centralizes the math that was previously inlined in
+// isDeliveredDelayed (below) and the Overview Detail Table's computeDaysLate
+// (line ~1219). All three call sites (delayed-mode delivered classification,
+// days-late display, and future backorder cohort) need the same UTC-midnight-
+// aligned expected date:
 //
 //   UPS (calendar days):
-//     delivered_expected = so_created + totalLT CD
+//     delivered_expected = so_created + leadTime CD
 //   TRUCK (sequential, mixed CD/BD):
 //     ship_estimated     = so_created + 1 CD  (KDC outbound)
-//     delivered_expected = addBusinessDays(ship_estimated, truckLT BD)
+//     delivered_expected = addBusinessDays(ship_estimated, leadTime BD)
+//
+// Returns null when the row can't be classified — missing so_created_date,
+// missing carrier, state without a defined lead time, or invalid carrier.
+function getExpectedDeliveryDate(row) {
+  if (!row) return null;
+  const orderRaw = row.so_created_date || row.orderCreate;
+  if (!orderRaw) return null;
+  const leadTime = getDeliveryLeadDays(row.state, row.carrier);
+  if (leadTime === null) return null;
+  const soCreated = new Date(orderRaw);
+  soCreated.setUTCHours(0, 0, 0, 0);
+  if (Number.isNaN(soCreated.getTime())) return null;
+  if (row.carrier === 'UPS') {
+    const expected = new Date(soCreated);
+    expected.setUTCDate(expected.getUTCDate() + leadTime);
+    return expected;
+  }
+  if (row.carrier === 'TRUCK') {
+    const shipEstimated = new Date(soCreated);
+    shipEstimated.setUTCDate(shipEstimated.getUTCDate() + 1);  // KDC 1 CD
+    return addBusinessDays(shipEstimated, leadTime);
+  }
+  return null;
+}
+
+// PR Geo-Delivered-Mode: per-row "did this delivery beat its lead time?"
+// Returns true when delivered_date is strictly past delivered_expected
+// (day-grain, both sides UTC-midnight-aligned). Expected-date math lives in
+// getExpectedDeliveryDate (above, PR Overview-A backorder-prep refactor).
 //
 // Returns false (i.e. "not delayed / not in scope") for rows missing the
 // needed fields or for states without a defined lead time.
 function isDeliveredDelayed(row) {
   if (!row || !row.delivered_date) return false;
-  const orderRaw = row.so_created_date || row.orderCreate;
-  if (!orderRaw) return false;
-  const leadTime = getDeliveryLeadDays(row.state, row.carrier);
-  if (leadTime === null) return false;
-
-  const soCreated = new Date(orderRaw);
-  soCreated.setUTCHours(0, 0, 0, 0);
+  const deliveredExpected = getExpectedDeliveryDate(row);
+  if (!deliveredExpected) return false;
   const delivered = new Date(row.delivered_date);
   delivered.setUTCHours(0, 0, 0, 0);
-  if (Number.isNaN(soCreated.getTime()) || Number.isNaN(delivered.getTime())) return false;
-
-  let deliveredExpected;
-  if (row.carrier === 'UPS') {
-    deliveredExpected = new Date(soCreated);
-    deliveredExpected.setUTCDate(deliveredExpected.getUTCDate() + leadTime);
-  } else if (row.carrier === 'TRUCK') {
-    const shipEstimated = new Date(soCreated);
-    shipEstimated.setUTCDate(shipEstimated.getUTCDate() + 1);  // KDC 1 CD
-    deliveredExpected = addBusinessDays(shipEstimated, leadTime);
-  } else {
-    return false;
-  }
-
+  if (Number.isNaN(delivered.getTime())) return false;
   return delivered > deliveredExpected;
 }
 
@@ -1209,32 +1223,16 @@ const OverviewPage = ({
           available via _is_fully_delivered). Damage / Backorders render a
           "Coming in Phase C" placeholder until cause / raid type wiring lands. */}
       {selectedMetric && (() => {
-        // Days-late helper for the Delayed metric. Mirrors the expected-date
-        // logic in module-level `isDeliveredDelayed` (line ~221) so the
-        // displayed days agree with the delayed-cohort filter:
-        //   UPS   — so_created + leadTime CD
-        //   TRUCK — (so_created + 1 CD KDC) + leadTime BD
-        // Simple calendar-day subtraction would under-count for TRUCK rows
-        // because it omits the BD weekend skip + the +1 CD KDC outbound.
+        // Days-late helper for the Delayed metric. Both the cohort filter
+        // (isDeliveredDelayed) and this display helper share the same
+        // expected-date math via getExpectedDeliveryDate (line ~225).
         const computeDaysLate = (r) => {
-          const lead = getDeliveryLeadDays(r.state, r.carrier);
-          if (lead === null || !r.delivered_date || !r.so_created_date) return 0;
-          const soCreated = new Date(r.so_created_date);
-          soCreated.setUTCHours(0, 0, 0, 0);
+          if (!r.delivered_date) return 0;
+          const expected = getExpectedDeliveryDate(r);
+          if (!expected) return 0;
           const delivered = new Date(r.delivered_date);
           delivered.setUTCHours(0, 0, 0, 0);
-          if (Number.isNaN(soCreated.getTime()) || Number.isNaN(delivered.getTime())) return 0;
-          let expected;
-          if (r.carrier === 'UPS') {
-            expected = new Date(soCreated);
-            expected.setUTCDate(expected.getUTCDate() + lead);
-          } else if (r.carrier === 'TRUCK') {
-            const shipEstimated = new Date(soCreated);
-            shipEstimated.setUTCDate(shipEstimated.getUTCDate() + 1); // KDC 1 CD
-            expected = addBusinessDays(shipEstimated, lead);
-          } else {
-            return 0;
-          }
+          if (Number.isNaN(delivered.getTime())) return 0;
           return Math.round((delivered.getTime() - expected.getTime()) / 86400000);
         };
 
