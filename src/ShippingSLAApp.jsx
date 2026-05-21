@@ -925,6 +925,428 @@ const STATE_NAMES = {
 };
 
 // ============================================================
+// OVERVIEW PAGE — Executive dashboard
+// ============================================================
+// PR Overview-A: KPI + Dollar cards wired to the master split-shipments
+// query via useSplitShipments (same hook Split + Geographic already use).
+// Mirrors Geo/Split component pattern: hook → pageData (sample filter +
+// channel chips) → liveMetrics → cards. Banner / Channel strip / Donut /
+// Bar / Bottleneck stay on the mock data path until Phase C wires
+// cause + raid-type signals (Smartsheet Phase 2 → frontend).
+// Damage / Backorders KPIs intentionally render "—" placeholders.
+const OverviewPage = ({
+  filtered,            // mock-derived rows — used by AI banner, donut/bar, detail table
+  data,                // raw mock rows — used by Channel strip totals
+  metrics,             // App-level mock metrics — donut subtitle ("X delayed shipments")
+  causeBreakdown,      // mock — donut data
+  trendData,           // mock — stacked bar
+  bottleneck,          // mock — bottleneck card
+  selectedChannels = [],
+  setSelectedChannels,
+  sampleOrderFilter = 'exclude_samples',
+  dateRange = '7d',
+  customRange = {},
+  selectedMetric,
+  setSelectedMetric,
+  setActivePage,
+  onMetaChange,
+}) => {
+  const { data: hookData, loading: hookLoading, source, filter } = useSplitShipments(dateRange, customRange);
+
+  // Publish meta upward so the App-level header (LIVE badge + count +
+  // server-resolved date window) renders. Same shape Geo/Split publish.
+  useEffect(() => {
+    if (!onMetaChange) return;
+    onMetaChange({ source, count: hookData ? hookData.length : 0, filter: filter ?? null });
+  }, [source, hookData, filter, onMetaChange]);
+  useEffect(() => () => { if (onMetaChange) onMetaChange(null); }, [onMetaChange]);
+
+  // PR Overview-A hotfix: sample-order filter intentionally omitted to match
+  // Geographic page's cohort. Verified: 2 sample-order DOs (VIVACE NJ + VIVACE
+  // MI) were fully-delivered + delayed in the May 13-20 test window — exactly
+  // the 689 vs 691 gap between Overview and Geographic. Split page keeps its
+  // own sample-exclude filter (separate cohort by design). The sampleOrderFilter
+  // prop is retained in the component signature to mirror Split / Geo prop
+  // shapes; Geographic also receives and ignores it.
+  const pageData = useMemo(() => {
+    if (!hookData) return [];
+    if (!selectedChannels || selectedChannels.length === 0) return hookData;
+    return hookData.filter(r => selectedChannels.includes(r.channel));
+  }, [hookData, selectedChannels]);
+
+  // PR Overview-A hotfix: live aggregates derived from the master query.
+  //   - Ship-confirm cohort (trailing_status ≥ 700) still drives Order→Dock
+  //     Cycle and On-Time Ship — those are KDC-side handoff metrics.
+  //   - Delayed Orders + On-Time Delivery now use Geographic page's delivered-
+  //     mode STRICT per-DO aggregation (line ~1030-1072). A DO counts as
+  //     "fully delivered" only when every one of its containers has a
+  //     delivered_date; the DO's delivered date = MAX(container.delivered).
+  //     This collapses Overview / Geographic onto the same definition.
+  //   - Split rate now mirrors SplitShipmentPage's splitData (line ~2841-
+  //     2845): UPS-only DOs in settled split_status (SPLIT or NOT_SPLIT),
+  //     numerator = is_split_shipment. PENDING / MISSING_TRACKING / UNKNOWN
+  //     excluded from the denominator per Split's PR10 rationale.
+  // Damage / Backorders still deferred to Phase C (cause / raid type wiring).
+  const liveMetrics = useMemo(() => {
+    const dateOnlyUTC = (d) => {
+      if (typeof d === 'string') return d.slice(0, 10);
+      if (d instanceof Date && !Number.isNaN(d.getTime())) {
+        const y = d.getUTCFullYear();
+        const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+        const day = String(d.getUTCDate()).padStart(2, '0');
+        return `${y}-${m}-${day}`;
+      }
+      return null;
+    };
+    const isShipConfirmDelayed = (r) => {
+      const orderRaw = r.so_created_date || r.orderCreate;
+      if (!r.trailing_status_date || !orderRaw) return false;
+      const soStr = dateOnlyUTC(orderRaw);
+      const stsStr = dateOnlyUTC(r.trailing_status_date);
+      if (!soStr || !stsStr) return false;
+      const so = new Date(soStr + 'T00:00:00Z');
+      const sts = new Date(stsStr + 'T00:00:00Z');
+      if (Number.isNaN(so.getTime()) || Number.isNaN(sts.getTime())) return false;
+      return (sts.getTime() - so.getTime()) / 86400000 > 1;
+    };
+
+    const total = pageData.length;
+
+    // Ship-confirm cohort — handed off to carrier (drives OTS + cycle hours).
+    const shipped = pageData.filter(r =>
+      r.trailing_status != null && Number(r.trailing_status) >= 700
+    );
+    const shippedOnTime  = shipped.filter(r => !isShipConfirmDelayed(r));
+
+    // Strict per-DO delivered aggregation — verbatim from GeoPage
+    // deliveredAggregated useMemo (line ~1030-1057). Fully delivered iff every
+    // container has a delivered_date; DO delivered_date = MAX(container).
+    // Mock-fallback path (no containers[]) treats the row's own delivered_date
+    // as a single-shipment proxy.
+    const aggregated = pageData.map(r => {
+      const cs = Array.isArray(r.containers) ? r.containers : null;
+      if (!cs || cs.length === 0) {
+        const fully = r.delivered_date != null;
+        return { ...r, _is_fully_delivered: fully, delivered_date: fully ? r.delivered_date : null };
+      }
+      let allDelivered = true;
+      let maxDelivered = null;
+      for (const c of cs) {
+        if (!c.delivered_date) { allDelivered = false; break; }
+        if (!maxDelivered || c.delivered_date > maxDelivered) maxDelivered = c.delivered_date;
+      }
+      return {
+        ...r,
+        _is_fully_delivered: allDelivered,
+        delivered_date: allDelivered ? maxDelivered : null,
+      };
+    });
+    // Cohort filter mirrors GeoPage cohort useMemo (line ~1063-1072): fully
+    // delivered AND state×carrier has a defined lead time.
+    const delivered        = aggregated.filter(r => r._is_fully_delivered && getDeliveryLeadDays(r.state, r.carrier) !== null);
+    const deliveredDelayed = delivered.filter(isDeliveredDelayed);
+    const deliveredOnTime  = delivered.filter(r => !isDeliveredDelayed(r));
+
+    // Split rate — mirror SplitShipmentPage splitData (line ~2841-2845).
+    // upsOnly excludes TRUCK; settled excludes PENDING / MISSING_TRACKING /
+    // UNKNOWN. Denominator is settled (not upsOnly), numerator is is_split.
+    const upsOnly      = pageData.filter(r => r.carrier !== 'TRUCK');
+    const splitSettled = upsOnly.filter(r => r.split_status === 'SPLIT' || r.split_status === 'NOT_SPLIT');
+    const splitRows    = splitSettled.filter(r => r.is_split_shipment);
+
+    // Cycle hours: avg of (trailing_sts_date - so_created_date) hours over the
+    // ship-confirm cohort. Substitutes for legacy SQL DATEDIFF('HOUR',
+    // CREATION_DATE_TIME_STAMP, ACTUAL_SHIP_DATE_TIME).
+    let cycleHrsSum = 0;
+    let cycleHrsN   = 0;
+    for (const r of shipped) {
+      const orderRaw = r.so_created_date || r.orderCreate;
+      if (!orderRaw || !r.trailing_status_date) continue;
+      const so  = new Date(orderRaw);
+      const sts = new Date(r.trailing_status_date);
+      if (Number.isNaN(so.getTime()) || Number.isNaN(sts.getTime())) continue;
+      cycleHrsSum += (sts.getTime() - so.getTime()) / 3600000;
+      cycleHrsN   += 1;
+    }
+    const cycleHrs = cycleHrsN ? cycleHrsSum / cycleHrsN : 0;
+
+    // Dollar aggregates from orderValue (per-DO sum of invoice_amount built
+    // by serverRowsToShipments). orderValue can be null for DOs that haven't
+    // billed yet; Number(...) || 0 collapses both null and NaN to 0.
+    const sumValue = (rows) => rows.reduce((s, r) => s + (Number(r.orderValue) || 0), 0);
+
+    return {
+      total,
+      shippedCount:       shipped.length,
+      shippedOnTime:      shippedOnTime.length,
+      deliveredCount:     delivered.length,
+      deliveredOnTime:    deliveredOnTime.length,
+      deliveredDelayed:   deliveredDelayed.length,
+      splitSettledCount:  splitSettled.length,
+      splitCount:         splitRows.length,
+      cycleHrs,
+      onTimeShipPct:  shipped.length      ? shippedOnTime.length    / shipped.length      : 0,
+      onTimeDelivPct: delivered.length    ? deliveredOnTime.length  / delivered.length    : 0,
+      splitPct:       splitSettled.length ? splitRows.length        / splitSettled.length : 0,
+      totalDollars:        sumValue(pageData),
+      onTimeShipDollars:   sumValue(shippedOnTime),
+      onTimeDelivDollars:  sumValue(deliveredOnTime),
+      // $ at Risk now follows the same delivered-mode delayed cohort as the
+      // Delayed Deliveries KPI, so the count and the dollar figure agree.
+      delayedDollars:      sumValue(deliveredDelayed),
+      splitDollars:        sumValue(splitRows),
+    };
+  }, [pageData]);
+
+  if (hookLoading) {
+    return (
+      <div className="p-8 text-center text-[12px] font-mono" style={{ color: 'var(--text-muted)' }}>
+        Loading shipment data…
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {/* AI Watchlist banner — Phase B will review; currently uses mock
+          fields (isOpen, cause, isSplit). Live signal arrives once cause /
+          raid type wires through. */}
+      {(() => {
+        const highRiskOpen = filtered.filter(o => o.isOpen && (o.cause || o.isSplit)).length;
+        const splitCount = filtered.filter(o => o.isSplit).length;
+        const splitRate = filtered.length ? splitCount/filtered.length : 0;
+        return (highRiskOpen > 0 || splitRate > 0.05) && (
+          <div className="bg-gradient-to-r from-[#1ABC9C]/15 to-transparent border-l-2 border-[#1ABC9C] rounded p-3 mb-4 flex items-center gap-4">
+            <Brain size={20} className="text-[#1ABC9C]"/>
+            <div className="flex-1">
+              <div className="text-[12px] text-[#1ABC9C] font-semibold uppercase tracking-wider">AI Watchlist</div>
+              <div className="text-[13px] mt-0.5 text-[#c5ccd4]">
+                <span className="font-mono text-[#E74C6F]">{highRiskOpen}</span> open orders at elevated delay risk ·
+                <span className="font-mono text-[#E74C6F] ml-2">{splitCount}</span> split shipments ({fmtPct(splitRate)}) violating customer SLA
+              </div>
+            </div>
+            <button onClick={() => setActivePage('ai')} className="px-3 py-1.5 rounded bg-[#1ABC9C] text-[#0a0e12] text-[12px] font-semibold hover:bg-[#3d8de6] flex items-center gap-1.5">
+              View AI Feed <ChevronRight size={12}/>
+            </button>
+          </div>
+        );
+      })()}
+
+      {/* KPI + Dollar grids — 5 of 7 each wired to liveMetrics; Damage /
+          Backorders render "—" placeholders until Phase C wires the
+          cause / raid-type signal. */}
+      {(() => {
+        const m = liveMetrics;
+        const kpiCards = [
+          { key: 'cycle',        label: 'Order→Dock Cycle',     value: (m.cycleHrs || 0).toFixed(1), unit: 'hrs', delta: 'Target: 18.0 hrs',                                  deltaType: 'neutral',                                  icon: Clock },
+          { key: 'ontime-ship',  label: 'On-Time Ship',         value: fmtPct(m.onTimeShipPct),                  delta: `${fmtNum(m.shippedCount)} shipped`,                  deltaType: m.onTimeShipPct  >= 0.95 ? 'good' : 'bad',  icon: Package },
+          { key: 'ontime-deliv', label: 'On-Time Delivery',     value: fmtPct(m.onTimeDelivPct),                 delta: `${fmtNum(m.deliveredCount)} delivered`,              deltaType: m.onTimeDelivPct >= 0.95 ? 'good' : 'bad',  icon: Truck },
+          { key: 'delayed',      label: 'Delayed Deliveries',   value: fmtNum(m.deliveredDelayed),               delta: `${fmtPct(m.deliveredDelayed/(m.deliveredCount||1))} of ${fmtNum(m.deliveredCount)} delivered`, deltaType: 'bad',              icon: AlertTriangle },
+          { key: 'split',        label: 'Split Shipment',       value: fmtPct(m.splitPct),                       delta: `${fmtNum(m.splitCount)} of ${fmtNum(m.splitSettledCount)} settled UPS · Target 0.0%`, deltaType: 'bad',              icon: Split },
+          { key: 'damage',       label: 'Damage / Problem',     value: '—',                                      delta: 'Coming in Phase C',                                  deltaType: 'neutral',                                  icon: AlertTriangle },
+          { key: 'backorder',    label: 'In-Stock Backorders',  value: '—',                                      delta: 'Coming in Phase C',                                  deltaType: 'neutral',                                  icon: Package },
+        ];
+
+        const dollarCards = [
+          { key: 'cycle',        label: 'Total Volume $',         value: `$${fmtNum(Math.round(m.totalDollars))}`,        delta: `${fmtNum(m.total)} DOs`,           deltaType: 'neutral', icon: DollarSign },
+          { key: 'ontime-ship',  label: 'On-Time Ship $',         value: `$${fmtNum(Math.round(m.onTimeShipDollars))}`,   delta: `${fmtNum(m.shippedOnTime)} shipments`,   deltaType: 'good',    icon: DollarSign },
+          { key: 'ontime-deliv', label: 'On-Time Delivery $',     value: `$${fmtNum(Math.round(m.onTimeDelivDollars))}`,  delta: `${fmtNum(m.deliveredOnTime)} delivered`, deltaType: 'good',    icon: DollarSign },
+          { key: 'delayed',      label: '$ at Risk (Delayed)',    value: `$${fmtNum(Math.round(m.delayedDollars))}`,      delta: `${fmtNum(m.deliveredDelayed)} delayed`,  deltaType: 'bad',     icon: DollarSign },
+          { key: 'split',        label: 'Split Penalties',        value: `$${fmtNum(Math.round(m.splitDollars))}`,        delta: `${fmtNum(m.splitCount)} split DOs`,      deltaType: 'bad',     icon: DollarSign },
+          { key: 'damage',       label: 'Damage Chargebacks',     value: '—',                                              delta: 'Coming in Phase C',                      deltaType: 'neutral', icon: DollarSign },
+          { key: 'backorder',    label: 'Backorder Value',        value: '—',                                              delta: 'Coming in Phase C',                      deltaType: 'neutral', icon: DollarSign },
+        ];
+
+        return (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-2">
+              {kpiCards.map(kpi => (
+                <div key={kpi.key} onClick={() => setSelectedMetric(selectedMetric === kpi.key ? null : kpi.key)}
+                  className="cursor-pointer transition-all" style={{ borderRadius: 8, outline: selectedMetric === kpi.key ? '2px solid #1ABC9C' : '2px solid transparent' }}>
+                  <KPI label={kpi.label} value={kpi.value} unit={kpi.unit} delta={kpi.delta} deltaType={kpi.deltaType} icon={kpi.icon}/>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-4">
+              {dollarCards.map(kpi => (
+                <div key={'$'+kpi.key} onClick={() => setSelectedMetric(selectedMetric === kpi.key ? null : kpi.key)}
+                  className="cursor-pointer transition-all" style={{ borderRadius: 8, outline: selectedMetric === kpi.key ? '2px solid #1ABC9C' : '2px solid transparent' }}>
+                  <KPI label={kpi.label} value={kpi.value} delta={kpi.delta} deltaType={kpi.deltaType} icon={kpi.icon}/>
+                </div>
+              ))}
+            </div>
+          </>
+        );
+      })()}
+
+      {/* Metric Detail Table — still backed by mock `filtered`. Phase B wires
+          this to live DO rows (per-metric filter against pageData). */}
+      {selectedMetric && (() => {
+        const metricConfig = {
+          'ontime-ship': { title: 'On-Time Ship — All Shipments', filter: () => true, cols: ['id','customer','channel','carrier','state','promiseShip','shipConfirm','status'], formatRow: r => ({ ...r, status: r.onTimeShip ? 'On Time' : 'Late' }) },
+          'ontime-deliv': { title: 'On-Time Delivery — All Deliveries', filter: r => r.delivered !== null, cols: ['id','customer','channel','carrier','state','promiseDeliver','delivered','status'], formatRow: r => ({ ...r, status: r.onTimeDelivery ? 'On Time' : r.onTimeDelivery === false ? 'Late' : 'In Transit' }) },
+          'cycle': { title: 'Order-to-Dock Cycle Time', filter: () => true, cols: ['id','customer','channel','carrier','orderCreate','shipConfirm','cycleHrs'], formatRow: r => ({ ...r, cycleHrs: (diffMin(r.orderCreate, r.shipConfirm)/60).toFixed(1) + 'h' }) },
+          'delayed': { title: 'Delayed Orders', filter: r => r.cause !== '', cols: ['id','customer','channel','carrier','state','cause','orderValue','chargeback'], formatRow: r => r },
+          'split': { title: 'Split Shipments', filter: r => r.isSplit, cols: ['id','customer','channel','carrier','splitCartons','splitGapDays','splitReason','orderValue'], formatRow: r => r },
+          'damage': { title: 'Damage / Problem Shipments', filter: r => r.cause === 'Damage', cols: ['id','customer','channel','carrier','state','orderValue','chargeback'], formatRow: r => r },
+          'backorder': { title: 'In-Stock Backorders (Past Due)', filter: r => r.isOpen && r.promiseDeliver && r.promiseDeliver < new Date(), cols: ['id','customer','channel','primarySku','primarySkuName','carrier','state','promiseDeliver','orderValue','daysPastDue'], formatRow: r => ({ ...r, daysPastDue: Math.round((new Date() - r.promiseDeliver) / 86400000) + 'd' }) },
+        };
+        const cfg = metricConfig[selectedMetric];
+        if (!cfg) return null;
+        const rows = filtered.filter(cfg.filter).slice(0, 50).map(cfg.formatRow);
+        const colLabels = { id: 'Shipment', customer: 'Customer', channel: 'Channel', carrier: 'Carrier', state: 'State', cause: 'Root Cause', promiseShip: 'Promise Ship', shipConfirm: 'Ship Confirm', promiseDeliver: 'Promise Deliver', delivered: 'Delivered', orderCreate: 'Order Created', splitCartons: 'Cartons', splitGapDays: 'Gap Days', splitReason: 'Split Reason', orderValue: 'Value', chargeback: 'Chargeback', status: 'Status', cycleHrs: 'Cycle Time', daysPastDue: 'Days Past Due', primarySku: 'SKU', primarySkuName: 'SKU Name' };
+
+        return (
+          <SectionCard title={cfg.title} subtitle={`${rows.length} records (top 50) · click a KPI to switch · click again to close`} tag="DETAIL VIEW" className="mb-4">
+            <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: 420 }}>
+              <table className="w-full text-[13px]">
+                <thead>
+                  <tr className="text-[11px] uppercase tracking-wider font-mono" style={{ color: 'var(--text-muted)' }}>
+                    {cfg.cols.map(c => <th key={c} className="text-left py-2.5 pr-4 sticky top-0" style={{ background: 'var(--bg-panel)', zIndex: 1 }}>{colLabels[c] || c}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r, i) => (
+                    <tr key={r.id + '-' + i} style={{ borderTop: '1px solid var(--border)' }}>
+                      {cfg.cols.map(c => {
+                        let val = r[c];
+                        if (val instanceof Date) val = val.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                        if (c === 'orderValue' || c === 'chargeback') val = '$' + (val || 0).toLocaleString();
+                        if (c === 'cause') return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded-full font-mono" style={{ background: (CAUSE_COLORS[val] || '#8a95a3') + '20', color: CAUSE_COLORS[val] || '#8a95a3' }}>{CAUSE_LABELS[val] || val || '—'}</span></td>;
+                        if (c === 'status') return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded-full font-mono font-semibold" style={{ background: val === 'On Time' ? '#2ECC7120' : val === 'Late' ? '#E74C6F20' : '#f5a62320', color: val === 'On Time' ? '#2ECC71' : val === 'Late' ? '#E74C6F' : '#f5a623' }}>{val}</span></td>;
+                        if (c === 'channel') { const g = getChannelGroup(val || ''); return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded font-mono" style={{ background: (CHANNEL_GROUP_COLORS[g]||'#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[g]||'#8a95a3' }}>{val}</span></td>; }
+                        return <td key={c} className="py-2 pr-4 font-mono" style={{ color: 'var(--text-primary)' }}>{val ?? '—'}</td>;
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {rows.length === 0 && <div className="text-center py-10 text-[14px]" style={{ color: 'var(--text-muted)' }}>No matching records for this metric</div>}
+            </div>
+          </SectionCard>
+        );
+      })()}
+
+      {/* Channel performance strip — mock until Phase C */}
+      <SectionCard title="Performance by Distribution Channel" subtitle={selectedChannels.length > 0 ? `Showing ${selectedChannels.length} selected channel(s)` : 'All 11 channels · click pills in filter bar to drill'} tag="CHANNEL MIX" className="mb-4">
+        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-11 gap-2">
+          {CHANNELS.map(ch => {
+            const chRows = data.filter(r => r.channel === ch);
+            const total = chRows.length;
+            const delayed = chRows.filter(r => r.cause).length;
+            const delayRate = total ? delayed/total : 0;
+            const isSelected = selectedChannels.length === 0 || selectedChannels.includes(ch);
+            const group = getChannelGroup(ch);
+            const color = CHANNEL_GROUP_COLORS[group] || '#8a95a3';
+            return (
+              <div key={ch}
+                onClick={() => setSelectedChannels(prev =>
+                  prev.includes(ch) ? prev.filter(c => c !== ch) : [...prev, ch]
+                )}
+                className={`bg-[#1a2129] rounded border p-2 cursor-pointer transition-all ${isSelected ? '' : 'opacity-40'}`}
+                style={{ borderColor: selectedChannels.includes(ch) ? color : '#2d3744' }}>
+                <div className="flex items-center gap-1 mb-1">
+                  <div className="w-1.5 h-1.5 rounded-sm" style={{ background: color }}/>
+                  <div className="text-[10px] font-mono uppercase tracking-wider text-[#8a95a3] truncate">{ch}</div>
+                </div>
+                <div className="font-mono text-sm font-semibold">{total}</div>
+                <div className={`font-mono text-[11px] ${delayRate > 0.4 ? 'text-[#E74C6F]' : delayRate > 0.25 ? 'text-[#f5a623]' : 'text-[#2ECC71]'}`}>
+                  {fmtPct(delayRate)}
+                </div>
+                <div className="mt-1 h-0.5 bg-[#0f1419] rounded overflow-hidden">
+                  <div className="h-full" style={{ width: `${Math.min(delayRate*100*2.5, 100)}%`, background: delayRate > 0.4 ? '#E74C6F' : delayRate > 0.25 ? '#f5a623' : '#2ECC71' }}/>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </SectionCard>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-4">
+        <SectionCard title="Delay Root Cause Mix" subtitle={`${metrics.delayed} delayed shipments`} tag="DONUT">
+          <div className="flex items-center gap-4">
+            <ResponsiveContainer width={180} height={180}>
+              <PieChart>
+                <Pie data={causeBreakdown} dataKey="value" innerRadius={40} outerRadius={75} paddingAngle={2}>
+                  {causeBreakdown.map((e, i) => <Cell key={i} fill={CAUSE_GRADIENTS[e.raw] || CAUSE_COLORS[e.raw]}/>)}
+                </Pie>
+                <Tooltip contentStyle={{ background: '#1a2129', border: '1px solid #2d3744', fontSize: 11 }}/>
+              </PieChart>
+            </ResponsiveContainer>
+            <div className="flex-1 space-y-1.5">
+              {causeBreakdown.sort((a,b)=>b.value-a.value).map(c => (
+                <div key={c.raw} className="flex items-center justify-between text-[12px]">
+                  <div className="flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-sm" style={{ background: CAUSE_COLORS[c.raw] }}/>
+                    <span className="text-[#8a95a3]">{c.name}</span>
+                  </div>
+                  <span className="font-mono text-[#e8ecef]">{c.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </SectionCard>
+
+        <SectionCard title="Bottleneck Alert" subtitle="Worst performing stage" tag="INSIGHT" className="col-span-2">
+          {bottleneck && (
+            <div className="flex gap-4">
+              <div className="flex-1 bg-[#1a2129] rounded border border-[#E74C6F]/30 p-4">
+                <div className="text-[11px] uppercase tracking-wider text-[#E74C6F] font-mono mb-1">Bottleneck Detected</div>
+                <div className="text-xl font-semibold mb-2">{bottleneck.name}</div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mt-3">
+                  <div>
+                    <div className="text-[10px] uppercase text-[#5d6b7a] font-mono">SLA Target</div>
+                    <div className="font-mono text-sm mt-0.5">{bottleneck.target}m</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase text-[#5d6b7a] font-mono">Actual Avg</div>
+                    <div className="font-mono text-sm mt-0.5 text-[#E74C6F]">{bottleneck.avg}m</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase text-[#5d6b7a] font-mono">Breach %</div>
+                    <div className="font-mono text-sm mt-0.5 text-[#E74C6F]">{fmtPct(bottleneck.breachPct)}</div>
+                  </div>
+                </div>
+              </div>
+              <div className="flex-1 bg-[#1a2129] rounded border border-[#2d3744] p-4">
+                <div className="text-[11px] uppercase tracking-wider text-[#1ABC9C] font-mono mb-2">Recommended Action</div>
+                <div className="text-[13px] leading-relaxed text-[#c5ccd4]">
+                  {bottleneck.name.includes('Wave') && 'Audit wave release logic. Likely causes: SAP-SCALE sync lag or allocation hold. Review TPA confirmation queue.'}
+                  {bottleneck.name.includes('Pick') && 'Pick productivity below target. Check picker staffing by shift, empty-location rate, and zone congestion on top-velocity SKUs.'}
+                  {bottleneck.name.includes('Carrier') && 'UPS dwell time elevated. Verify daily pickup cutoff, trailer utilization, and whether load planning is fragmenting trailers.'}
+                  {bottleneck.name.includes('Dock') && 'Dock consolidation delay. Review trailer staging sequence and load-splitting rules in SCALE.'}
+                  {bottleneck.name.includes('Pack') && 'Pack station backlog. Check labor balance vs pick output and SSRS pack list generation time.'}
+                  {bottleneck.name.includes('Order') && 'Order confirmation delay in SAP. Check credit holds and master data completeness.'}
+                  {bottleneck.name.includes('Confirm') && 'Delivery document creation lag. Review SAP batch job schedule and delivery type config.'}
+                  {bottleneck.name.includes('SAP→SCALE') && 'Interface lag between SAP and SCALE. Check middleware queue and outbound delivery IDoc processing.'}
+                </div>
+                <div className="mt-3 text-[11px] text-[#5d6b7a] font-mono">Est. impact of fixing: −{Math.round(bottleneck.avg-bottleneck.target)}m per shipment</div>
+              </div>
+            </div>
+          )}
+        </SectionCard>
+      </div>
+
+      <SectionCard title="Delay Trend by Root Cause" subtitle="Daily counts · stacked" tag="STACKED BAR">
+        <ResponsiveContainer width="100%" height={220}>
+          <BarChart data={trendData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#2d3744"/>
+            <XAxis dataKey="date" stroke="#5d6b7a" style={{ fontSize: 10, fontFamily: 'IBM Plex Mono' }}/>
+            <YAxis stroke="#5d6b7a" style={{ fontSize: 10, fontFamily: 'IBM Plex Mono' }}/>
+            <Tooltip contentStyle={{ background: '#1a2129', border: '1px solid #2d3744', fontSize: 11 }}/>
+            <Bar dataKey="UPS" stackId="a" fill="url(#gradCerise)"/>
+            <Bar dataKey="DC" stackId="a" fill="url(#gradSkyBlue)"/>
+            <Bar dataKey="Missing" stackId="a" fill="url(#gradPurple)"/>
+            <Bar dataKey="Damage" stackId="a" fill="url(#gradTurquoise)"/>
+            <Bar dataKey="Other" stackId="a" fill="url(#gradGray)"/>
+          </BarChart>
+        </ResponsiveContainer>
+      </SectionCard>
+    </>
+  );
+};
+
+// ============================================================
 // GEO PAGE — Heat map with issue-type selector
 // ============================================================
 const GeoPage = ({ filtered, dateRange = '7d', customRange = {}, selectedChannels = [], sampleOrderFilter = 'exclude_samples', onMetaChange }) => {
@@ -6903,7 +7325,14 @@ export default function ShippingSLAApp() {
   // ships UPS-only count (upsHookDataCount), Geographic ships hookData.length
   // (UPS + Truck — user-stated decision: always-total, channel-filter-immune).
   const [geoMeta, setGeoMeta] = useState(null);
-  const currentMeta = activePage === 'split' ? splitMeta : (activePage === 'geo' ? geoMeta : null);
+  // PR Overview-A: Overview now publishes the same meta shape via OverviewPage's
+  // useSplitShipments hook, so the header LIVE badge + count + date window
+  // also light up on the exec page.
+  const [overviewMeta, setOverviewMeta] = useState(null);
+  const currentMeta = activePage === 'split' ? splitMeta
+    : activePage === 'geo'  ? geoMeta
+    : activePage === 'exec' ? overviewMeta
+    : null;
   const currentSource = currentMeta?.source ?? null;
   // PR4b3: drives the header summary dropdown on the Split page.
   const [datePickerOpen, setDatePickerOpen] = useState(false);
@@ -6933,7 +7362,6 @@ export default function ShippingSLAApp() {
   const [dataSource, setDataSource] = useState('mock'); // 'mock' | 'live'
   const [isConnecting, setIsConnecting] = useState(false);
   const [liveToast, setLiveToast] = useState(null);
-  const [liveKpis, setLiveKpis] = useState(null);
   const fileInputRef = useRef(null);
 
   const handleDataSourceToggle = useCallback(async () => {
@@ -6964,15 +7392,6 @@ export default function ShippingSLAApp() {
     }
   }, [currentUser, activePage, theme]);
 
-  // Fetch live KPIs from Snowflake when in LIVE mode
-  useEffect(() => {
-    if (dataSource !== 'live') { setLiveKpis(null); return; }
-    fetch('http://localhost:3001/api/scale/overview-kpis')
-      .then(r => r.json())
-      .then(d => { if (d.success) setLiveKpis(d.data); })
-      .catch(() => {});
-  }, [dataSource, lastRefresh]);
-
   // PR4b3: Close date-picker dropdown when clicking outside it.
   useEffect(() => {
     if (!datePickerOpen) return;
@@ -6985,9 +7404,12 @@ export default function ShippingSLAApp() {
     return () => document.removeEventListener('mousedown', onMouseDown);
   }, [datePickerOpen]);
 
-  // PR4b3: Close the dropdown automatically when leaving the Split page.
+  // PR4b3 → PR Overview-A: Close the dropdown when leaving any page that uses
+  // the live date picker. Originally Split-only; now Split + Geographic + Overview.
   useEffect(() => {
-    if (activePage !== 'split') setDatePickerOpen(false);
+    if (activePage !== 'split' && activePage !== 'geo' && activePage !== 'exec') {
+      setDatePickerOpen(false);
+    }
   }, [activePage]);
 
   // Data refresh handler
@@ -6998,13 +7420,7 @@ export default function ShippingSLAApp() {
       setLastRefresh(new Date());
       setIsRefreshing(false);
     }, 800);
-    if (dataSource === 'live') {
-      fetch('http://localhost:3001/api/scale/overview-kpis')
-        .then(r => r.json())
-        .then(d => { if (d.success) setLiveKpis(d.data); })
-        .catch(() => {});
-    }
-  }, [dataSource]);
+  }, []);
 
   const THEME = theme === 'dark' ? {
     bgPrimary: '#0f1419',
@@ -7654,7 +8070,7 @@ export default function ShippingSLAApp() {
               Geographic; future live pages just need to set their meta to
                 opt in. References changed from splitMeta to currentMeta
               so the same dropdown renders for whichever page is active. */}
-          {(activePage === 'split' || activePage === 'geo') ? (
+          {(activePage === 'split' || activePage === 'geo' || activePage === 'exec') ? (
             <div className="ml-auto relative hidden sm:block" ref={datePickerRef}>
               <button
                 onClick={() => setDatePickerOpen(o => !o)}
@@ -7792,299 +8208,23 @@ export default function ShippingSLAApp() {
             PAGE 1: EXECUTIVE SUMMARY
         ====================================================== */}
         {activePage === 'exec' && (
-          <>
-            {/* AI Alert Banner */}
-            {(() => {
-              const highRiskOpen = filtered.filter(o => o.isOpen && (o.cause || o.isSplit)).length;
-              const splitCount = filtered.filter(o => o.isSplit).length;
-              const splitRate = filtered.length ? splitCount/filtered.length : 0;
-              return (highRiskOpen > 0 || splitRate > 0.05) && (
-                <div className="bg-gradient-to-r from-[#1ABC9C]/15 to-transparent border-l-2 border-[#1ABC9C] rounded p-3 mb-4 flex items-center gap-4">
-                  <Brain size={20} className="text-[#1ABC9C]"/>
-                  <div className="flex-1">
-                    <div className="text-[12px] text-[#1ABC9C] font-semibold uppercase tracking-wider">AI Watchlist</div>
-                    <div className="text-[13px] mt-0.5 text-[#c5ccd4]">
-                      <span className="font-mono text-[#E74C6F]">{highRiskOpen}</span> open orders at elevated delay risk ·
-                      <span className="font-mono text-[#E74C6F] ml-2">{splitCount}</span> split shipments ({fmtPct(splitRate)}) violating customer SLA
-                    </div>
-                  </div>
-                  <button onClick={() => setActivePage('ai')} className="px-3 py-1.5 rounded bg-[#1ABC9C] text-[#0a0e12] text-[12px] font-semibold hover:bg-[#3d8de6] flex items-center gap-1.5">
-                    View AI Feed <ChevronRight size={12}/>
-                  </button>
-                </div>
-              );
-            })()}
-
-            {/* Live Snowflake Data Banner */}
-            {liveKpis && (
-              <div className="bg-gradient-to-r from-[#2ECC71]/15 to-transparent border-l-2 border-[#2ECC71] rounded p-3 mb-4 flex items-center gap-3">
-                <Database size={18} className="text-[#2ECC71]"/>
-                <div className="flex-1">
-                  <div className="text-[12px] text-[#2ECC71] font-semibold uppercase tracking-wider">Live Snowflake Data</div>
-                  <div className="text-[13px] mt-0.5" style={{ color: 'var(--text-secondary)' }}>
-                    Connected to SCI.PUBLIC.SHIPMENT_HEADER · {fmtNum(liveKpis.TOTAL_ORDERS)} orders (90d) · Last refreshed: {lastRefresh.toLocaleTimeString()}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {(() => {
-              const ontimeShipRows = filtered.filter(r => r.onTimeShip);
-              const ontimeShipVal = ontimeShipRows.reduce((s,r) => s + (r.orderValue||0), 0);
-              const ontimeDelivRows = filtered.filter(r => r.onTimeDelivery === true);
-              const ontimeDelivVal = ontimeDelivRows.reduce((s,r) => s + (r.orderValue||0), 0);
-              const delayedRows = filtered.filter(r => r.cause !== '');
-              const delayedVal = delayedRows.reduce((s,r) => s + (r.orderValue||0), 0);
-              const delayedCB = delayedRows.reduce((s,r) => s + (r.chargeback||0), 0);
-              const splitRows = filtered.filter(r => r.isSplit);
-              const splitVal = splitRows.reduce((s,r) => s + (r.orderValue||0), 0);
-              const splitCB = splitRows.reduce((s,r) => s + (r.chargeback||0), 0);
-              const damageRows = filtered.filter(r => r.cause === 'Damage');
-              const damageVal = damageRows.reduce((s,r) => s + (r.orderValue||0), 0);
-              const damageCB = damageRows.reduce((s,r) => s + (r.chargeback||0), 0);
-              const totalVal = filtered.reduce((s,r) => s + (r.orderValue||0), 0);
-
-              const backorderRows = filtered.filter(r => r.isOpen && r.promiseDeliver && r.promiseDeliver < new Date());
-              const backorderVal = backorderRows.reduce((s,r) => s + (r.orderValue||0), 0);
-              const backorderPct = metrics.total ? backorderRows.length / metrics.total : 0;
-
-              // If live data is available, override metrics with Snowflake data
-              const liveMode = liveKpis !== null;
-              const displayMetrics = liveMode ? {
-                onTimeShipPct: (liveKpis.ON_TIME_SHIP_PCT || 0) / 100,
-                onTimeDelivPct: (liveKpis.ON_TIME_SHIP_PCT || 0) / 100,
-                avgO2DHrs: liveKpis.AVG_CYCLE_HRS || 0,
-                delayed: liveKpis.DELAYED || 0,
-                total: liveKpis.TOTAL_ORDERS || 0,
-                damageRate: 0,
-              } : metrics;
-              const displayTotal = liveMode ? liveKpis.TOTAL_ORDERS : metrics.total;
-              const displayBackorders = liveMode ? liveKpis.BACKORDERS : backorderRows.length;
-
-              // YoY calculations
-              const yoy = liveMode && liveKpis.PY_SHIPPED ? {
-                otsPctDiff: (liveKpis.ON_TIME_SHIP_PCT || 0) - (liveKpis.PY_ON_TIME_SHIP_PCT || 0),
-                delayedDiff: (liveKpis.DELAYED || 0) - (liveKpis.PY_DELAYED || 0),
-                cycleDiff: (liveKpis.AVG_CYCLE_HRS || 0) - (liveKpis.PY_AVG_CYCLE_HRS || 0),
-                volumeDiff: (liveKpis.TOTAL_ORDERS || 0) - (liveKpis.PY_TOTAL_ORDERS || 0),
-                pyOtsPct: liveKpis.PY_ON_TIME_SHIP_PCT || 0,
-                pyDelayed: liveKpis.PY_DELAYED || 0,
-                pyCycle: liveKpis.PY_AVG_CYCLE_HRS || 0,
-                pyTotal: liveKpis.PY_TOTAL_ORDERS || 0,
-              } : null;
-              const yoyFmt = (diff, suffix = '') => `${diff > 0 ? '+' : ''}${typeof diff === 'number' && diff % 1 !== 0 ? diff.toFixed(1) : diff}${suffix} YoY`;
-              const yoyType = (diff, invert = false) => diff === 0 ? 'neutral' : (invert ? diff > 0 : diff < 0) ? 'bad' : 'good';
-
-              const kpiCards = [
-                { key: 'cycle', label: 'Order→Dock Cycle', value: (displayMetrics.avgO2DHrs || 0).toFixed(1), unit: 'hrs', delta: 'Target: 18.0 hrs', deltaType: 'neutral', icon: Clock,
-                  delta2: yoy ? yoyFmt(yoy.cycleDiff, 'h') + ` (was ${yoy.pyCycle}h)` : null, delta2Type: yoy ? yoyType(yoy.cycleDiff, true) : null },
-                { key: 'ontime-ship', label: 'On-Time Ship', value: fmtPct(displayMetrics.onTimeShipPct), delta: '+2.1 pp vs last wk', deltaType: 'good', icon: Package,
-                  delta2: yoy ? yoyFmt(yoy.otsPctDiff, ' pp') + ` (was ${yoy.pyOtsPct}%)` : null, delta2Type: yoy ? yoyType(yoy.otsPctDiff) : null },
-                { key: 'ontime-deliv', label: 'On-Time Delivery', value: fmtPct(displayMetrics.onTimeDelivPct), delta: '-1.4 pp vs last wk', deltaType: 'bad', icon: Truck,
-                  delta2: yoy ? yoyFmt(yoy.otsPctDiff, ' pp') + ` (was ${yoy.pyOtsPct}%)` : null, delta2Type: yoy ? yoyType(yoy.otsPctDiff) : null },
-                { key: 'delayed', label: 'Delayed Orders', value: fmtNum(displayMetrics.delayed), delta: `${fmtPct(displayMetrics.delayed/(displayTotal||1))} of volume`, deltaType: 'bad', icon: AlertTriangle,
-                  delta2: yoy ? yoyFmt(yoy.delayedDiff) + ` (was ${fmtNum(yoy.pyDelayed)})` : null, delta2Type: yoy ? yoyType(yoy.delayedDiff, true) : null },
-                { key: 'split', label: 'Split Shipment', value: fmtPct(splitRows.length/(metrics.total||1)), delta: 'Target: 0.0%', deltaType: 'bad', icon: Split },
-                { key: 'damage', label: 'Damage / Problem', value: fmtPct(displayMetrics.damageRate), delta: `${damageRows.length} shipments`, deltaType: 'bad', icon: AlertTriangle },
-                { key: 'backorder', label: 'In-Stock Backorders', value: fmtNum(displayBackorders), delta: `${fmtPct((displayBackorders||0)/(displayTotal||1))} of open orders`, deltaType: (displayBackorders||0) > 0 ? 'bad' : 'good', icon: Package },
-              ];
-
-              const dollarCards = [
-                { key: 'cycle', label: 'Total Volume $', value: `$${fmtNum(Math.round(totalVal))}`, delta: `${fmtNum(metrics.total)} shipments`, deltaType: 'neutral', icon: DollarSign },
-                { key: 'ontime-ship', label: 'On-Time Ship $', value: `$${fmtNum(Math.round(ontimeShipVal))}`, delta: `${ontimeShipRows.length} shipments`, deltaType: 'good', icon: DollarSign },
-                { key: 'ontime-deliv', label: 'On-Time Delivery $', value: `$${fmtNum(Math.round(ontimeDelivVal))}`, delta: `${ontimeDelivRows.length} delivered`, deltaType: 'good', icon: DollarSign },
-                { key: 'delayed', label: '$ at Risk (Delayed)', value: `$${fmtNum(Math.round(delayedVal))}`, delta: `$${fmtNum(Math.round(delayedCB))} chargebacks`, deltaType: 'bad', icon: DollarSign },
-                { key: 'split', label: 'Split Penalties', value: `$${fmtNum(Math.round(splitCB))}`, delta: `$${fmtNum(Math.round(splitVal))} order value`, deltaType: 'bad', icon: DollarSign },
-                { key: 'damage', label: 'Damage Chargebacks', value: `$${fmtNum(Math.round(damageCB))}`, delta: `$${fmtNum(Math.round(damageVal))} order value`, deltaType: 'bad', icon: DollarSign },
-                { key: 'backorder', label: 'Backorder Value', value: `$${fmtNum(Math.round(backorderVal))}`, delta: `${backorderRows.length} past-due orders`, deltaType: backorderRows.length > 0 ? 'bad' : 'good', icon: DollarSign },
-              ];
-
-              return (
-                <>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-2">
-                    {kpiCards.map(kpi => (
-                      <div key={kpi.key} onClick={() => setSelectedMetric(selectedMetric === kpi.key ? null : kpi.key)}
-                        className="cursor-pointer transition-all" style={{ borderRadius: 8, outline: selectedMetric === kpi.key ? '2px solid #1ABC9C' : '2px solid transparent' }}>
-                        <KPI label={kpi.label} value={kpi.value} unit={kpi.unit} delta={kpi.delta} deltaType={kpi.deltaType} delta2={kpi.delta2} delta2Type={kpi.delta2Type} icon={kpi.icon}/>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 mb-4">
-                    {dollarCards.map(kpi => (
-                      <div key={'$'+kpi.key} onClick={() => setSelectedMetric(selectedMetric === kpi.key ? null : kpi.key)}
-                        className="cursor-pointer transition-all" style={{ borderRadius: 8, outline: selectedMetric === kpi.key ? '2px solid #1ABC9C' : '2px solid transparent' }}>
-                        <KPI label={kpi.label} value={kpi.value} delta={kpi.delta} deltaType={kpi.deltaType} icon={kpi.icon}/>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              );
-            })()}
-
-            {/* Metric Detail Table — shown when a KPI is clicked */}
-            {selectedMetric && (() => {
-              const metricConfig = {
-                'ontime-ship': { title: 'On-Time Ship — All Shipments', filter: () => true, cols: ['id','customer','channel','carrier','state','promiseShip','shipConfirm','status'], formatRow: r => ({ ...r, status: r.onTimeShip ? 'On Time' : 'Late' }) },
-                'ontime-deliv': { title: 'On-Time Delivery — All Deliveries', filter: r => r.delivered !== null, cols: ['id','customer','channel','carrier','state','promiseDeliver','delivered','status'], formatRow: r => ({ ...r, status: r.onTimeDelivery ? 'On Time' : r.onTimeDelivery === false ? 'Late' : 'In Transit' }) },
-                'cycle': { title: 'Order-to-Dock Cycle Time', filter: () => true, cols: ['id','customer','channel','carrier','orderCreate','shipConfirm','cycleHrs'], formatRow: r => ({ ...r, cycleHrs: (diffMin(r.orderCreate, r.shipConfirm)/60).toFixed(1) + 'h' }) },
-                'delayed': { title: 'Delayed Orders', filter: r => r.cause !== '', cols: ['id','customer','channel','carrier','state','cause','orderValue','chargeback'], formatRow: r => r },
-                'split': { title: 'Split Shipments', filter: r => r.isSplit, cols: ['id','customer','channel','carrier','splitCartons','splitGapDays','splitReason','orderValue'], formatRow: r => r },
-                'damage': { title: 'Damage / Problem Shipments', filter: r => r.cause === 'Damage', cols: ['id','customer','channel','carrier','state','orderValue','chargeback'], formatRow: r => r },
-                'backorder': { title: 'In-Stock Backorders (Past Due)', filter: r => r.isOpen && r.promiseDeliver && r.promiseDeliver < new Date(), cols: ['id','customer','channel','primarySku','primarySkuName','carrier','state','promiseDeliver','orderValue','daysPastDue'], formatRow: r => ({ ...r, daysPastDue: Math.round((new Date() - r.promiseDeliver) / 86400000) + 'd' }) },
-              };
-              const cfg = metricConfig[selectedMetric];
-              if (!cfg) return null;
-              const rows = filtered.filter(cfg.filter).slice(0, 50).map(cfg.formatRow);
-              const colLabels = { id: 'Shipment', customer: 'Customer', channel: 'Channel', carrier: 'Carrier', state: 'State', cause: 'Root Cause', promiseShip: 'Promise Ship', shipConfirm: 'Ship Confirm', promiseDeliver: 'Promise Deliver', delivered: 'Delivered', orderCreate: 'Order Created', splitCartons: 'Cartons', splitGapDays: 'Gap Days', splitReason: 'Split Reason', orderValue: 'Value', chargeback: 'Chargeback', status: 'Status', cycleHrs: 'Cycle Time', daysPastDue: 'Days Past Due', primarySku: 'SKU', primarySkuName: 'SKU Name' };
-
-              return (
-                <SectionCard title={cfg.title} subtitle={`${rows.length} records (top 50) · click a KPI to switch · click again to close`} tag="DETAIL VIEW" className="mb-4">
-                  <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: 420 }}>
-                    <table className="w-full text-[13px]">
-                      <thead>
-                        <tr className="text-[11px] uppercase tracking-wider font-mono" style={{ color: 'var(--text-muted)' }}>
-                          {cfg.cols.map(c => <th key={c} className="text-left py-2.5 pr-4 sticky top-0" style={{ background: 'var(--bg-panel)', zIndex: 1 }}>{colLabels[c] || c}</th>)}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {rows.map((r, i) => (
-                          <tr key={r.id + '-' + i} style={{ borderTop: '1px solid var(--border)' }}>
-                            {cfg.cols.map(c => {
-                              let val = r[c];
-                              if (val instanceof Date) val = val.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                              if (c === 'orderValue' || c === 'chargeback') val = '$' + (val || 0).toLocaleString();
-                              if (c === 'cause') return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded-full font-mono" style={{ background: (CAUSE_COLORS[val] || '#8a95a3') + '20', color: CAUSE_COLORS[val] || '#8a95a3' }}>{CAUSE_LABELS[val] || val || '—'}</span></td>;
-                              if (c === 'status') return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded-full font-mono font-semibold" style={{ background: val === 'On Time' ? '#2ECC7120' : val === 'Late' ? '#E74C6F20' : '#f5a62320', color: val === 'On Time' ? '#2ECC71' : val === 'Late' ? '#E74C6F' : '#f5a623' }}>{val}</span></td>;
-                              if (c === 'channel') { const g = getChannelGroup(val || ''); return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded font-mono" style={{ background: (CHANNEL_GROUP_COLORS[g]||'#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[g]||'#8a95a3' }}>{val}</span></td>; }
-                              return <td key={c} className="py-2 pr-4 font-mono" style={{ color: 'var(--text-primary)' }}>{val ?? '—'}</td>;
-                            })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    {rows.length === 0 && <div className="text-center py-10 text-[14px]" style={{ color: 'var(--text-muted)' }}>No matching records for this metric</div>}
-                  </div>
-                </SectionCard>
-              );
-            })()}
-
-            {/* Channel performance strip */}
-            <SectionCard title="Performance by Distribution Channel" subtitle={selectedChannels.length > 0 ? `Showing ${selectedChannels.length} selected channel(s)` : 'All 11 channels · click pills in filter bar to drill'} tag="CHANNEL MIX" className="mb-4">
-              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-11 gap-2">
-                {CHANNELS.map(ch => {
-                  const chRows = data.filter(r => r.channel === ch);
-                  const chFiltered = filtered.filter(r => r.channel === ch);
-                  const total = chRows.length;
-                  const delayed = chRows.filter(r => r.cause).length;
-                  const delayRate = total ? delayed/total : 0;
-                  const isSelected = selectedChannels.length === 0 || selectedChannels.includes(ch);
-                  const group = getChannelGroup(ch);
-                  const color = CHANNEL_GROUP_COLORS[group] || '#8a95a3';
-                  return (
-                    <div key={ch}
-                      onClick={() => setSelectedChannels(prev =>
-                        prev.includes(ch) ? prev.filter(c => c !== ch) : [...prev, ch]
-                      )}
-                      className={`bg-[#1a2129] rounded border p-2 cursor-pointer transition-all ${isSelected ? '' : 'opacity-40'}`}
-                      style={{ borderColor: selectedChannels.includes(ch) ? color : '#2d3744' }}>
-                      <div className="flex items-center gap-1 mb-1">
-                        <div className="w-1.5 h-1.5 rounded-sm" style={{ background: color }}/>
-                        <div className="text-[10px] font-mono uppercase tracking-wider text-[#8a95a3] truncate">{ch}</div>
-                      </div>
-                      <div className="font-mono text-sm font-semibold">{total}</div>
-                      <div className={`font-mono text-[11px] ${delayRate > 0.4 ? 'text-[#E74C6F]' : delayRate > 0.25 ? 'text-[#f5a623]' : 'text-[#2ECC71]'}`}>
-                        {fmtPct(delayRate)}
-                      </div>
-                      <div className="mt-1 h-0.5 bg-[#0f1419] rounded overflow-hidden">
-                        <div className="h-full" style={{ width: `${Math.min(delayRate*100*2.5, 100)}%`, background: delayRate > 0.4 ? '#E74C6F' : delayRate > 0.25 ? '#f5a623' : '#2ECC71' }}/>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </SectionCard>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mb-4">
-              <SectionCard title="Delay Root Cause Mix" subtitle={`${metrics.delayed} delayed shipments`} tag="DONUT">
-                <div className="flex items-center gap-4">
-                  <ResponsiveContainer width={180} height={180}>
-                    <PieChart>
-                      <Pie data={causeBreakdown} dataKey="value" innerRadius={40} outerRadius={75} paddingAngle={2}>
-                        {causeBreakdown.map((e, i) => <Cell key={i} fill={CAUSE_GRADIENTS[e.raw] || CAUSE_COLORS[e.raw]}/>)}
-                      </Pie>
-                      <Tooltip contentStyle={{ background: '#1a2129', border: '1px solid #2d3744', fontSize: 11 }}/>
-                    </PieChart>
-                  </ResponsiveContainer>
-                  <div className="flex-1 space-y-1.5">
-                    {causeBreakdown.sort((a,b)=>b.value-a.value).map(c => (
-                      <div key={c.raw} className="flex items-center justify-between text-[12px]">
-                        <div className="flex items-center gap-2">
-                          <div className="w-2 h-2 rounded-sm" style={{ background: CAUSE_COLORS[c.raw] }}/>
-                          <span className="text-[#8a95a3]">{c.name}</span>
-                        </div>
-                        <span className="font-mono text-[#e8ecef]">{c.value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </SectionCard>
-
-              <SectionCard title="Bottleneck Alert" subtitle="Worst performing stage" tag="INSIGHT" className="col-span-2">
-                {bottleneck && (
-                  <div className="flex gap-4">
-                    <div className="flex-1 bg-[#1a2129] rounded border border-[#E74C6F]/30 p-4">
-                      <div className="text-[11px] uppercase tracking-wider text-[#E74C6F] font-mono mb-1">Bottleneck Detected</div>
-                      <div className="text-xl font-semibold mb-2">{bottleneck.name}</div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 mt-3">
-                        <div>
-                          <div className="text-[10px] uppercase text-[#5d6b7a] font-mono">SLA Target</div>
-                          <div className="font-mono text-sm mt-0.5">{bottleneck.target}m</div>
-                        </div>
-                        <div>
-                          <div className="text-[10px] uppercase text-[#5d6b7a] font-mono">Actual Avg</div>
-                          <div className="font-mono text-sm mt-0.5 text-[#E74C6F]">{bottleneck.avg}m</div>
-                        </div>
-                        <div>
-                          <div className="text-[10px] uppercase text-[#5d6b7a] font-mono">Breach %</div>
-                          <div className="font-mono text-sm mt-0.5 text-[#E74C6F]">{fmtPct(bottleneck.breachPct)}</div>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex-1 bg-[#1a2129] rounded border border-[#2d3744] p-4">
-                      <div className="text-[11px] uppercase tracking-wider text-[#1ABC9C] font-mono mb-2">Recommended Action</div>
-                      <div className="text-[13px] leading-relaxed text-[#c5ccd4]">
-                        {bottleneck.name.includes('Wave') && 'Audit wave release logic. Likely causes: SAP-SCALE sync lag or allocation hold. Review TPA confirmation queue.'}
-                        {bottleneck.name.includes('Pick') && 'Pick productivity below target. Check picker staffing by shift, empty-location rate, and zone congestion on top-velocity SKUs.'}
-                        {bottleneck.name.includes('Carrier') && 'UPS dwell time elevated. Verify daily pickup cutoff, trailer utilization, and whether load planning is fragmenting trailers.'}
-                        {bottleneck.name.includes('Dock') && 'Dock consolidation delay. Review trailer staging sequence and load-splitting rules in SCALE.'}
-                        {bottleneck.name.includes('Pack') && 'Pack station backlog. Check labor balance vs pick output and SSRS pack list generation time.'}
-                        {bottleneck.name.includes('Order') && 'Order confirmation delay in SAP. Check credit holds and master data completeness.'}
-                        {bottleneck.name.includes('Confirm') && 'Delivery document creation lag. Review SAP batch job schedule and delivery type config.'}
-                        {bottleneck.name.includes('SAP→SCALE') && 'Interface lag between SAP and SCALE. Check middleware queue and outbound delivery IDoc processing.'}
-                      </div>
-                      <div className="mt-3 text-[11px] text-[#5d6b7a] font-mono">Est. impact of fixing: −{Math.round(bottleneck.avg-bottleneck.target)}m per shipment</div>
-                    </div>
-                  </div>
-                )}
-              </SectionCard>
-            </div>
-
-            <SectionCard title="Delay Trend by Root Cause" subtitle="Daily counts · stacked" tag="STACKED BAR">
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={trendData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#2d3744"/>
-                  <XAxis dataKey="date" stroke="#5d6b7a" style={{ fontSize: 10, fontFamily: 'IBM Plex Mono' }}/>
-                  <YAxis stroke="#5d6b7a" style={{ fontSize: 10, fontFamily: 'IBM Plex Mono' }}/>
-                  <Tooltip contentStyle={{ background: '#1a2129', border: '1px solid #2d3744', fontSize: 11 }}/>
-                  <Bar dataKey="UPS" stackId="a" fill="url(#gradCerise)"/>
-                  <Bar dataKey="DC" stackId="a" fill="url(#gradSkyBlue)"/>
-                  <Bar dataKey="Missing" stackId="a" fill="url(#gradPurple)"/>
-                  <Bar dataKey="Damage" stackId="a" fill="url(#gradTurquoise)"/>
-                  <Bar dataKey="Other" stackId="a" fill="url(#gradGray)"/>
-                </BarChart>
-              </ResponsiveContainer>
-            </SectionCard>
-          </>
+          <OverviewPage
+            filtered={filtered}
+            data={data}
+            metrics={metrics}
+            causeBreakdown={causeBreakdown}
+            trendData={trendData}
+            bottleneck={bottleneck}
+            selectedChannels={selectedChannels}
+            setSelectedChannels={setSelectedChannels}
+            sampleOrderFilter={sampleOrderFilter}
+            dateRange={dateRange}
+            customRange={customRange}
+            selectedMetric={selectedMetric}
+            setSelectedMetric={setSelectedMetric}
+            setActivePage={setActivePage}
+            onMetaChange={setOverviewMeta}
+          />
         )}
 
         {/* ======================================================

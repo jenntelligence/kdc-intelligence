@@ -372,49 +372,6 @@ function toFactShape(row) {
   };
 }
 
-// ── Overview KPIs (Executive Overview page) ─────────────────────────────────
-
-app.get('/api/scale/overview-kpis', async (_req, res) => {
-  try {
-    // Current period (last 90 days) and same period last year for YoY
-    const rows = await executeQuery(`
-      WITH current_period AS (
-        SELECT
-          COUNT(DISTINCT sh.SHIPMENT_ID) AS TOTAL_ORDERS,
-          COUNT(DISTINCT CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL AND sh.ACTUAL_SHIP_DATE_TIME::DATE <= sh.REQUESTED_DELIVERY_DATE::DATE THEN sh.SHIPMENT_ID END) AS ON_TIME_SHIP,
-          COUNT(DISTINCT CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL THEN sh.SHIPMENT_ID END) AS SHIPPED,
-          COUNT(DISTINCT CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL AND sh.ACTUAL_SHIP_DATE_TIME::DATE > sh.REQUESTED_DELIVERY_DATE::DATE THEN sh.SHIPMENT_ID END) AS DELAYED,
-          COUNT(DISTINCT CASE WHEN sh.TRAILING_STS BETWEEN 100 AND 899 AND sh.ACTUAL_SHIP_DATE_TIME IS NULL AND sh.REQUESTED_DELIVERY_DATE::DATE < CURRENT_DATE() THEN sh.SHIPMENT_ID END) AS BACKORDERS,
-          ROUND(100.0 * COUNT(DISTINCT CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL AND sh.ACTUAL_SHIP_DATE_TIME::DATE <= sh.REQUESTED_DELIVERY_DATE::DATE THEN sh.SHIPMENT_ID END) / NULLIF(COUNT(DISTINCT CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL THEN sh.SHIPMENT_ID END), 0), 1) AS ON_TIME_SHIP_PCT,
-          ROUND(AVG(CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL THEN DATEDIFF('HOUR', sh.CREATION_DATE_TIME_STAMP, sh.ACTUAL_SHIP_DATE_TIME) END), 1) AS AVG_CYCLE_HRS
-        FROM SCI.PUBLIC.SHIPMENT_HEADER sh
-        WHERE sh.WAREHOUSE = 'KDCGA1' AND sh.IN_DELETION = 'N'
-          AND sh.REQUESTED_DELIVERY_DATE IS NOT NULL
-          AND sh.CREATION_DATE_TIME_STAMP >= DATEADD('day', -90, CURRENT_DATE())
-      ),
-      prior_year AS (
-        SELECT
-          COUNT(DISTINCT sh.SHIPMENT_ID) AS PY_TOTAL_ORDERS,
-          COUNT(DISTINCT CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL AND sh.ACTUAL_SHIP_DATE_TIME::DATE <= sh.REQUESTED_DELIVERY_DATE::DATE THEN sh.SHIPMENT_ID END) AS PY_ON_TIME_SHIP,
-          COUNT(DISTINCT CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL THEN sh.SHIPMENT_ID END) AS PY_SHIPPED,
-          COUNT(DISTINCT CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL AND sh.ACTUAL_SHIP_DATE_TIME::DATE > sh.REQUESTED_DELIVERY_DATE::DATE THEN sh.SHIPMENT_ID END) AS PY_DELAYED,
-          ROUND(100.0 * COUNT(DISTINCT CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL AND sh.ACTUAL_SHIP_DATE_TIME::DATE <= sh.REQUESTED_DELIVERY_DATE::DATE THEN sh.SHIPMENT_ID END) / NULLIF(COUNT(DISTINCT CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL THEN sh.SHIPMENT_ID END), 0), 1) AS PY_ON_TIME_SHIP_PCT,
-          ROUND(AVG(CASE WHEN sh.ACTUAL_SHIP_DATE_TIME IS NOT NULL THEN DATEDIFF('HOUR', sh.CREATION_DATE_TIME_STAMP, sh.ACTUAL_SHIP_DATE_TIME) END), 1) AS PY_AVG_CYCLE_HRS
-        FROM SCI.PUBLIC.SHIPMENT_HEADER sh
-        WHERE sh.WAREHOUSE = 'KDCGA1' AND sh.IN_DELETION = 'N'
-          AND sh.REQUESTED_DELIVERY_DATE IS NOT NULL
-          AND sh.CREATION_DATE_TIME_STAMP >= DATEADD('day', -90, DATEADD('year', -1, CURRENT_DATE()))
-          AND sh.CREATION_DATE_TIME_STAMP < DATEADD('year', -1, CURRENT_DATE())
-      )
-      SELECT c.*, p.*
-      FROM current_period c, prior_year p
-    `);
-    res.json({ success: true, data: rows[0] || {}, source: 'snowflake', table: 'SCI.PUBLIC.SHIPMENT_HEADER' });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 // ── Operational State ───────────────────────────────────────────────────────
 
 // Lifecycle heatmap — shipment count by stage × company
@@ -1429,6 +1386,264 @@ function getMockInsight() {
   };
 }
 
+// ── Smartsheet Issue Types (PR Geo-5) ───────────────────────────────────────
+// Smartsheet integration to overlay issue types (raid types) onto delivered
+// shipments on the Geographic page. Data flow:
+//   1. Fetch raw issues from Smartsheet API (sheet 6603206110275460)
+//   2. Extract Order# + Raid Type, normalize both
+//   3. Join with kdb.pbi_sf.zsdrordr (SO doctypes ZOR/ZNEW/ZSO/ZREN/ZFD)
+//      to map SO → DO. Snowflake read-only, no view-creation permission, so
+//      mapping is done via inline SELECT.
+//   4. Return DO-keyed issue records to frontend.
+//
+// Smartsheet contains ALL issues (historical + current), but only the recent
+// ones map to ZSDRORDR. Typical match rate ~8.5% — that's expected, NOT a bug:
+// most Smartsheet rows are old issues outside ZSDRORDR retention. Frontend
+// uses the matched subset only.
+//
+// Cache TTL: 1 hour. Smartsheet API rate limit is 300 req/min; with 1h cache
+// the per-user load is negligible.
+
+const SMARTSHEET_API_TOKEN = process.env.SMARTSHEET_API_TOKEN;
+const SMARTSHEET_SHEET_ID  = process.env.SMARTSHEET_SHEET_ID || '6603206110275460';
+const SMARTSHEET_CACHE_TTL_MS = 60 * 60 * 1000;  // 1 hour
+
+let _smartsheetCache = null;       // { fetchedAt, data }
+let _smartsheetFetching = null;    // dedupe concurrent fetches
+
+// Parse a raid type string into { code, label, canonical }.
+// Smartsheet has inconsistent casing — "1.1 Lost Shipment" / "1.1 LOST SHIPMENT"
+// both occur. We extract the numeric code (1.1, 2.1, ...) and uppercase the
+// label so all variants collapse to one canonical form.
+//
+// Example: "  2.1  Lost Shipment  "  →
+//   { code: '2.1', label: 'LOST SHIPMENT', canonical: '2.1 LOST SHIPMENT' }
+function parseRaidType(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const cleaned = raw.trim().replace(/\s+/g, ' ').toUpperCase();
+  const m = cleaned.match(/^(\d+\.\d+)\s+(.+)$/);
+  if (!m) return null;
+  return { code: m[1], label: m[2], canonical: `${m[1]} ${m[2]}` };
+}
+
+// Normalize order numbers. Smartsheet stores raw integers ("2115371"), but
+// ZSDRORDR uses zero-padded VARCHAR(10) ("0001647548"). Stripping leading
+// zeros on both sides gives a consistent join key.
+//
+// Excludes obviously invalid values: "None", empty, non-numeric.
+function normalizeOrderNum(raw) {
+  if (!raw) return null;
+  const s = String(raw).trim();
+  if (!s || s === 'None' || !/^\d+$/.test(s)) return null;
+  return s.replace(/^0+/, '') || '0';  // "0" if all zeros
+}
+
+// Fetch + parse Smartsheet rows. Returns { orders, raidTypes, fetchedAt }
+// where `orders` is a Map<normalized_so, [raidType, ...]> and `raidTypes`
+// is the deduplicated list of all canonical raid types seen.
+async function fetchSmartsheetIssues() {
+  if (!SMARTSHEET_API_TOKEN) {
+    throw new Error('Missing SMARTSHEET_API_TOKEN — set in .env');
+  }
+
+  // Paginate: fetch page=1, 2, ... until we have all rows.
+  // Smartsheet pageSize cap is 10000 but we use 5000 to stay conservative.
+  // Sheet metadata (columns) is returned with every page.
+  const PAGE_SIZE = 5000;
+  let sheet = null;
+  const allRows = [];
+  let pageNum = 1;
+
+  while (true) {
+    const url = `https://api.smartsheet.com/2.0/sheets/${SMARTSHEET_SHEET_ID}`
+      + `?include=columnType&pageSize=${PAGE_SIZE}&page=${pageNum}`;
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${SMARTSHEET_API_TOKEN}` },
+    });
+    if (!resp.ok) {
+      throw new Error(`Smartsheet API ${resp.status}: ${await resp.text()}`);
+    }
+    const pageData = await resp.json();
+
+    // Keep columns from the first page (Smartsheet returns them on every page,
+    // but values are identical). Subsequent pages only contribute rows.
+    if (pageNum === 1) sheet = pageData;
+    const pageRows = pageData.rows || [];
+    for (const row of pageRows) allRows.push(row);
+
+    // Smartsheet doesn't return totalPages with this query shape — only
+    // totalRowCount. Stop once we've collected everything, or when a page
+    // comes back short (defensive guard for the rare case where totalRowCount
+    // is missing).
+    const totalRowCount = pageData.totalRowCount;
+    const done = (typeof totalRowCount === 'number' && allRows.length >= totalRowCount)
+      || pageRows.length < PAGE_SIZE;
+    if (done) break;
+    pageNum += 1;
+
+    // Safety net: cap at 20 pages (= 100k rows) to prevent runaway loops
+    // if Smartsheet API changes behavior unexpectedly.
+    if (pageNum > 20) {
+      throw new Error(`Smartsheet pagination exceeded 20 pages — investigate`);
+    }
+  }
+
+  // Replace sheet.rows with the full aggregated list before downstream parse
+  sheet.rows = allRows;
+
+  // Build columnId → title map so we can look up cells by column title.
+  // Smartsheet returns columnId in each cell, not the title.
+  const colTitleById = new Map();
+  for (const c of sheet.columns || []) {
+    colTitleById.set(c.id, (c.title || '').trim());
+  }
+
+  const ordersMap = new Map();   // normalizedSO → [parsedRaid, parsedRaid, ...]
+  const raidTypesSet = new Map(); // canonical → { code, label, canonical, count }
+
+  for (const row of sheet.rows || []) {
+    let orderRaw = null;
+    let raidRaw  = null;
+    for (const cell of row.cells || []) {
+      const title = colTitleById.get(cell.columnId);
+      if (!title) continue;
+      // Column titles per user: 'Order#' and 'Raid Type'. Smartsheet sometimes
+      // returns values in .value (typed) or .displayValue (string repr).
+      const val = cell.value ?? cell.displayValue;
+      if (title.toLowerCase() === 'order#') orderRaw = val;
+      else if (title.toLowerCase() === 'raid type') raidRaw = val;
+    }
+    const so = normalizeOrderNum(orderRaw);
+    const raid = parseRaidType(raidRaw);
+    if (!so || !raid) continue;
+
+    if (!ordersMap.has(so)) ordersMap.set(so, []);
+    ordersMap.get(so).push(raid);
+
+    if (!raidTypesSet.has(raid.canonical)) {
+      raidTypesSet.set(raid.canonical, { ...raid, count: 0 });
+    }
+    raidTypesSet.get(raid.canonical).count += 1;
+  }
+
+  return {
+    orders: ordersMap,
+    raidTypes: Array.from(raidTypesSet.values()),
+    fetchedAt: Date.now(),
+    totalRows: (sheet.rows || []).length,
+  };
+}
+
+// Join Smartsheet orders with ZSDRORDR to get DO numbers. Returns a list of
+// { do_num, so_num, raid_code, raid_label } records — one row per (DO, raid).
+// Inline mapping query because Snowflake is read-only (no view creation).
+async function enrichWithDoMapping(ordersMap) {
+  const soList = Array.from(ordersMap.keys());
+  if (soList.length === 0) return [];
+
+  // ZSDRORDR salesdocnumber is zero-padded VARCHAR(10). Strip zeros on the
+  // Snowflake side so the comparison matches our normalized Smartsheet keys.
+  // Snowflake's bind array limit is ~16k for VARCHAR; 4,500 SOs is well within.
+  const placeholders = soList.map(() => '?').join(',');
+  const rows = await executeQuery(
+    `
+    SELECT DISTINCT
+      LTRIM(salesdocnumber, '0') AS so_num,
+      deliverynumber              AS do_num
+    FROM kdb.pbi_sf.zsdrordr
+    WHERE salesdoctype IN ('ZOR', 'ZNEW', 'ZSO', 'ZREN', 'ZFD')
+      AND deliverynumber IS NOT NULL
+      AND LTRIM(salesdocnumber, '0') IN (${placeholders})
+    `,
+    soList
+  );
+
+  // Each (SO, DO) row → emit one record per raid type associated with the SO.
+  const results = [];
+  for (const r of rows) {
+    const soNum = r.SO_NUM || r.so_num;
+    const doNum = r.DO_NUM || r.do_num;
+    if (!soNum || !doNum) continue;
+    const raids = ordersMap.get(soNum) || [];
+    for (const raid of raids) {
+      results.push({
+        do_num: doNum,
+        so_num: soNum,
+        raid_code: raid.code,
+        raid_label: raid.label,
+      });
+    }
+  }
+  return results;
+}
+
+// GET /api/smartsheet/issues — returns issue overlay for the Geographic page.
+// Response shape:
+//   {
+//     success: true,
+//     data: {
+//       issues: [{ do_num, so_num, raid_code, raid_label }, ...],
+//       raidTypes: [{ code, label, canonical, count }, ...],
+//     },
+//     cached: boolean,
+//     fetchedAt: ISO string,
+//     source: 'smartsheet+snowflake',
+//     stats: { smartsheetRows, matchedDOs, raidTypeCount }
+//   }
+//
+// Query string: ?refresh=true bypasses cache (manual force-refresh).
+app.get('/api/smartsheet/issues', async (req, res) => {
+  try {
+    const now = Date.now();
+    const forceRefresh = req.query.refresh === 'true';
+    const cacheValid = _smartsheetCache
+      && !forceRefresh
+      && (now - _smartsheetCache.fetchedAt) < SMARTSHEET_CACHE_TTL_MS;
+
+    if (cacheValid) {
+      return res.json({
+        success: true,
+        data: _smartsheetCache.data,
+        cached: true,
+        fetchedAt: new Date(_smartsheetCache.fetchedAt).toISOString(),
+        source: 'smartsheet+snowflake',
+        stats: _smartsheetCache.stats,
+      });
+    }
+
+    // Dedupe concurrent first-fetches so we don't hammer Smartsheet on
+    // server startup when multiple users hit the page simultaneously.
+    if (!_smartsheetFetching) {
+      _smartsheetFetching = (async () => {
+        const ss = await fetchSmartsheetIssues();
+        const issues = await enrichWithDoMapping(ss.orders);
+        const data = { issues, raidTypes: ss.raidTypes };
+        const stats = {
+          smartsheetRows: ss.totalRows,
+          smartsheetOrders: ss.orders.size,
+          matchedDOs: new Set(issues.map(i => i.do_num)).size,
+          totalIssueRows: issues.length,
+          raidTypeCount: ss.raidTypes.length,
+        };
+        _smartsheetCache = { fetchedAt: ss.fetchedAt, data, stats };
+        return _smartsheetCache;
+      })().finally(() => { _smartsheetFetching = null; });
+    }
+    const fresh = await _smartsheetFetching;
+
+    res.json({
+      success: true,
+      data: fresh.data,
+      cached: false,
+      fetchedAt: new Date(fresh.fetchedAt).toISOString(),
+      source: 'smartsheet+snowflake',
+      stats: fresh.stats,
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Start server ────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n  KDC Operations Intelligence — API Server`);
@@ -1439,7 +1654,6 @@ app.listen(PORT, () => {
   console.log(`  Auth:      SNOWFLAKE_JWT (RSA key-pair)`);
   console.log(`  Warehouse: KDCGA1 (KISS Savannah, GA)`);
   console.log(`\n  ── SCALE Raw Table Endpoints ──`);
-  console.log(`  GET  /api/scale/overview-kpis        SHIPMENT_HEADER (90d KPIs)`);
   console.log(`  GET  /api/scale/lifecycle-heatmap    SHIPMENT_HEADER (active stages)`);
   console.log(`  GET  /api/scale/active-waves         LAUNCH_STATISTICS (last 2d)`);
   console.log(`  GET  /api/scale/otd                  SHIPMENT_HEADER (last 30d)`);
@@ -1474,6 +1688,8 @@ app.listen(PORT, () => {
   console.log(`  GET  /api/scale/explore-ups-tracking        UPS_TRACKING schema (PR2.5, §7c #18 last-scan)`);
   console.log(`\n  ── Phase 1 Live Endpoints (sub-plan 002 → 004) ──`);
   console.log(`  GET  /api/scale/split-shipments             Phase A: detection (BS-IVY/RED/VIVACE via UPS)`);
+  console.log(`\n  ── Smartsheet Integration (PR Geo-5) ──`);
+  console.log(`  GET  /api/smartsheet/issues          Issue types overlay (1h cache; ?refresh=true to force)`);
   console.log(`\n  ── Utility ──`);
   console.log(`  GET  /api/health                     Health check`);
   console.log(`  POST /api/snowflake/test             Test connection`);
