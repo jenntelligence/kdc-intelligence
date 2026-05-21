@@ -1279,7 +1279,11 @@ app.post('/api/kdc/query', async (req, res) => {
 // Falls back to mock responses when API key is not configured
 // ════════════════════════════════════════════════════════════════════════════
 
-const GEMINI_KEY = process.env.GOOGLE_GENERATIVE_AI_API_KEY;
+// PR AI-Phase1: accept either env var name. GOOGLE_GENERATIVE_AI_API_KEY
+// is the @google/genai SDK convention (used by /api/ai/chat + /api/ai/insight
+// historically), GEMINI_API_KEY is the shorter form. Either works; no .env
+// migration needed.
+const GEMINI_KEY = process.env.GOOGLE_GENERATIVE_AI_API_KEY || process.env.GEMINI_API_KEY;
 const genai = GEMINI_KEY ? new GoogleGenAI({ apiKey: GEMINI_KEY }) : null;
 
 const DC_SYSTEM_PROMPT = `You are KDC Intelligence AI, an operations analyst for Kiss Distribution Center (KDCGA1) in Savannah, GA.
@@ -1353,6 +1357,160 @@ app.post('/api/ai/insight', async (req, res) => {
     }
   } catch (err) {
     res.json({ success: true, data: getMockInsight(), source: 'mock-fallback', error: err.message });
+  }
+});
+
+// AI Risk Analyze (batch) — PR AI-Phase1
+//
+// Phase 1 test integration. Accepts a batch of normalized at-risk orders +
+// page-level context, asks Gemini 2.5 Flash to score and explain each one,
+// and returns structured analyses (one per do_num). Caller (AIRiskPage)
+// keeps a Map keyed by do_num and renders an "AI" column / Detail modal
+// section on top of the existing rule-based risk view.
+//
+// Configuration:
+//   GOOGLE_GENERATIVE_AI_API_KEY must be set in .env. The same key drives
+//   /api/ai/chat and /api/ai/insight; this endpoint reuses the genai client
+//   instantiated at line 1283.
+//
+// Response shape (per user spec):
+//   Success: { success: true, analyses: [...], latency_ms: N, model: '...' }
+//   Failure: { success: false, error: '...', fallback_available: true }
+//   No key:  HTTP 503 + same failure shape.
+//
+// Payload hygiene:
+//   invoice_amount / orderValue / chargeback are stripped defensively
+//   before sending to Gemini. The caller already excludes them, but a second
+//   pass here prevents accidental dollar-bias if a future caller forgets.
+app.post('/api/ai/risk-analyze-batch', async (req, res) => {
+  const startTime = Date.now();
+
+  if (!genai) {
+    return res.status(503).json({
+      success: false,
+      error: 'Set GOOGLE_GENERATIVE_AI_API_KEY or GEMINI_API_KEY in .env',
+      fallback_available: true,
+    });
+  }
+
+  const { orders, context } = req.body || {};
+  if (!Array.isArray(orders) || orders.length === 0) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing or empty `orders` array',
+      fallback_available: false,
+    });
+  }
+  if (orders.length > 50) {
+    return res.status(400).json({
+      success: false,
+      error: 'Batch limited to 50 orders per request',
+      fallback_available: false,
+    });
+  }
+
+  // Defensive dollar-field strip — see header comment.
+  const sanitizedOrders = orders.map(o => {
+    const { invoice_amount, orderValue, chargeback, ...rest } = o;
+    return rest;
+  });
+
+  const prompt = `You are a warehouse operations risk analyst at KDC Savannah, GA.
+Analyze the following batch of ${sanitizedOrders.length} at-risk open orders and produce one structured assessment per order.
+
+Context:
+- Window: ${context?.window || 'recent'}
+- Total open orders in scope: ${context?.total_orders ?? 'unknown'}
+- KDC target: D+1 ship confirm.
+- SCALE trailing_status codes: 700 = Ship Confirm Pending, 800 = Load Confirm Pending, 900 = Closed.
+- Carriers: UPS (parcel, calendar-day lead time by zone), TRUCK (LTL, business-day lead time).
+- Each order carries a rule-based score (rule_based_score / rule_based_level / rule_based_reasons) you can corroborate or contradict — explain disagreements explicitly.
+- Dollar amounts are intentionally absent to prevent dollar-bias; assess on operational fundamentals only.
+
+For each order produce:
+- risk_score (0-100, your own assessment)
+- risk_level: Low (0-30), Medium (31-65), High (66-100)
+- predicted_delay_hours: integer hours past SLA (0 if on-track)
+- confidence_pct: 0-100, your confidence
+- key_factors: 2-4 concrete reasons citing the order's actual data (state, carrier, cycle hours, manifest count, etc.)
+- recommended_action: one concrete operational step Ops can take in the next shift
+
+Orders (JSON):
+${JSON.stringify(sanitizedOrders, null, 2)}
+
+Return a JSON array, one object per do_num, in the same order as input.`;
+
+  // 30s timeout via Promise.race — @google/genai SDK doesn't expose
+  // a per-call timeout, so wrap the call and reject on the deadline.
+  const callGemini = genai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: prompt,
+    config: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            do_num: { type: 'string' },
+            risk_score: { type: 'integer', minimum: 0, maximum: 100 },
+            risk_level: { type: 'string', enum: ['Low', 'Medium', 'High'] },
+            predicted_delay_hours: { type: 'integer' },
+            confidence_pct: { type: 'integer', minimum: 0, maximum: 100 },
+            key_factors: { type: 'array', items: { type: 'string' } },
+            recommended_action: { type: 'string' },
+          },
+          required: ['do_num', 'risk_score', 'risk_level', 'confidence_pct', 'key_factors', 'recommended_action'],
+        },
+      },
+    },
+  });
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('Gemini API timeout after 30s')), 30000)
+  );
+
+  try {
+    const response = await Promise.race([callGemini, timeout]);
+    const latency_ms = Date.now() - startTime;
+    const text = response.text || '';
+
+    let analyses;
+    try {
+      analyses = JSON.parse(text);
+    } catch (parseErr) {
+      return res.json({
+        success: false,
+        error: `Gemini response was not valid JSON: ${parseErr.message}`,
+        fallback_available: true,
+        latency_ms,
+        raw_response_excerpt: text.slice(0, 500),
+      });
+    }
+
+    if (!Array.isArray(analyses)) {
+      return res.json({
+        success: false,
+        error: 'Gemini response was not a JSON array',
+        fallback_available: true,
+        latency_ms,
+      });
+    }
+
+    res.json({
+      success: true,
+      analyses,
+      latency_ms,
+      model: 'gemini-2.5-flash',
+    });
+  } catch (err) {
+    const latency_ms = Date.now() - startTime;
+    console.error('risk-analyze-batch failed:', err.message);
+    res.json({
+      success: false,
+      error: err.message || 'Gemini API call failed',
+      fallback_available: true,
+      latency_ms,
+    });
   }
 });
 
@@ -1696,6 +1854,11 @@ app.listen(PORT, () => {
   console.log(`  GET  /api/scale/explore-ups-tracking        UPS_TRACKING schema (PR2.5, §7c #18 last-scan)`);
   console.log(`\n  ── Phase 1 Live Endpoints (sub-plan 002 → 004) ──`);
   console.log(`  GET  /api/scale/split-shipments             Phase A: detection (BS-IVY/RED/VIVACE via UPS)`);
+  console.log('');
+  console.log('  ── AI (Gemini 2.5 Flash) ──');
+  console.log('  POST /api/ai/chat                    Conversational ops Q&A');
+  console.log('  POST /api/ai/insight                 Structured KPI insight');
+  console.log('  POST /api/ai/risk-analyze-batch      Batch risk analysis (top-N at-risk orders)');
   console.log(`\n  ── Smartsheet Integration (PR Geo-5) ──`);
   console.log(`  GET  /api/smartsheet/issues          Issue types overlay (1h cache; ?refresh=true to force)`);
   console.log(`\n  ── Utility ──`);

@@ -2307,6 +2307,15 @@ const AIRiskPage = ({ filtered, data }) => {
   const [filterRisk, setFilterRisk] = useState('all');
   const [selectedOrder, setSelectedOrder] = useState(null);
 
+  // PR AI-Phase1: Gemini batch risk analysis. aiAnalysesMap keyed by do_num
+  // (falls back to id for mock orders). Map mutation creates a new Map for
+  // React re-render. aiBatchMeta tracks the most recent successful run for
+  // UI status display.
+  const [aiAnalysesMap, setAiAnalysesMap] = useState(new Map());
+  const [aiBatchLoading, setAiBatchLoading] = useState(false);
+  const [aiBatchError, setAiBatchError] = useState(null);
+  const [aiBatchMeta, setAiBatchMeta] = useState(null);
+
   const scoredOrders = useMemo(() => {
     return filtered
       .filter(o => o.isOpen)
@@ -2327,6 +2336,93 @@ const AIRiskPage = ({ filtered, data }) => {
 
   const riskColor = (level) => level === 'High' ? '#E74C6F' : level === 'Medium' ? '#f5a623' : '#2ECC71';
 
+  // PR AI-Phase1: build the normalized payload for /api/ai/risk-analyze-batch.
+  // Strips dollar fields (invoice_amount / orderValue / chargeback) so the
+  // model assesses on operational fundamentals only — server.js also strips
+  // defensively. Computes container-level cycle hours range from
+  // order_received_at + manifest_date_time (same math as Overview Cycle
+  // Detail Table, line ~1244-1283).
+  const handleBatchAnalyze = async () => {
+    setAiBatchLoading(true);
+    setAiBatchError(null);
+
+    const computeCycleHours = (o) => {
+      if (!o.order_received_at) return { min: null, max: null };
+      const received = new Date(o.order_received_at);
+      if (Number.isNaN(received.getTime())) return { min: null, max: null };
+      const hrs = (Array.isArray(o.containers) ? o.containers : [])
+        .filter(c => c.manifest_date_time)
+        .map(c => {
+          const m = new Date(c.manifest_date_time);
+          return Number.isNaN(m.getTime()) ? null : (m.getTime() - received.getTime()) / 3600000;
+        })
+        .filter(v => v !== null);
+      if (hrs.length === 0) return { min: null, max: null };
+      return { min: Math.round(Math.min(...hrs) * 10) / 10, max: Math.round(Math.max(...hrs) * 10) / 10 };
+    };
+
+    const top10 = scoredOrders.slice(0, 10);
+    const normalizedOrders = top10.map(o => {
+      const cyc = computeCycleHours(o);
+      return {
+        do_num: o.do_num || o.id,
+        customer: o.customer,
+        channel: o.channel,
+        state: o.state,
+        city: o.city,
+        zipcode: o.zipcode,
+        zone: o.zone,
+        carrier: o.carrier,
+        tier: o.tier,
+        trailing_status: o.trailing_status,
+        trailing_status_date: o.trailing_status_date,
+        so_created_date: o.so_created_date,
+        order_received_at: o.order_received_at,
+        containers_total: Array.isArray(o.containers) ? o.containers.length : null,
+        containers_manifested: Array.isArray(o.containers)
+          ? o.containers.filter(c => c.manifest_date_time).length
+          : null,
+        cycle_hours_min: cyc.min,
+        cycle_hours_max: cyc.max,
+        rule_based_score: o.risk?.score,
+        rule_based_level: o.risk?.riskLevel,
+        rule_based_reasons: o.risk?.reasons,
+      };
+    });
+
+    const context = {
+      window: 'recent',
+      total_orders: data.length,
+    };
+
+    try {
+      const r = await fetch('http://localhost:3001/api/ai/risk-analyze-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orders: normalizedOrders, context }),
+      });
+      const j = await r.json();
+      if (!j.success) {
+        setAiBatchError(j.error || 'Unknown error');
+        return;
+      }
+      const newMap = new Map(aiAnalysesMap);
+      for (const a of j.analyses) {
+        newMap.set(a.do_num, a);
+      }
+      setAiAnalysesMap(newMap);
+      setAiBatchMeta({
+        count: j.analyses.length,
+        latency_ms: j.latency_ms,
+        timestamp: new Date(),
+      });
+    } catch (err) {
+      setAiBatchError(err.message || 'Network error');
+    } finally {
+      setAiBatchLoading(false);
+    }
+  };
+
   return (
     <>
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
@@ -2336,6 +2432,51 @@ const AIRiskPage = ({ filtered, data }) => {
         <KPI label="Key Account High" value={summary.keyAccountHigh} delta="Immediate escalation" deltaType="bad" icon={Users}/>
         <KPI label="Model Confidence" value="87" unit="%" delta="Avg across predictions" deltaType="good" icon={CheckCircle2}/>
       </div>
+
+      {/* PR AI-Phase1: page-level Gemini batch analysis trigger. Rule-based
+          scoring (above + below) remains the primary signal; AI provides
+          deeper context + recommended actions in a complementary view. */}
+      <SectionCard
+        title="AI-Powered Analysis"
+        subtitle="Gemini 2.5 Flash · top 10 high-risk orders"
+        tag="AI"
+        className="mb-4"
+      >
+        <div className="flex items-center justify-between gap-4">
+          <div className="text-[12px] flex-1" style={{ color: 'var(--text-muted)' }}>
+            {!aiBatchMeta && !aiBatchLoading && !aiBatchError && (
+              <span>
+                Run AI analysis on the top 10 high-risk orders for deeper context and recommended actions.
+                Rule-based scoring remains the primary signal.
+              </span>
+            )}
+            {aiBatchLoading && (
+              <span className="text-[#1ABC9C]">Analyzing 10 orders with Gemini… (~5–10s)</span>
+            )}
+            {aiBatchError && (
+              <span className="text-[#f5a623]">
+                AI unavailable: {aiBatchError}. Rule-based reasons still available in detail modal.
+              </span>
+            )}
+            {aiBatchMeta && !aiBatchLoading && (
+              <span>
+                Analyzed <span className="font-mono">{aiBatchMeta.count}</span> orders in <span className="font-mono">{(aiBatchMeta.latency_ms / 1000).toFixed(1)}s</span>
+                {' · '}
+                <span className="font-mono">{aiBatchMeta.timestamp.toLocaleTimeString()}</span>
+                <span className="ml-2 text-[10px] text-[#5d6b7a]">Click any row below to see AI analysis in detail.</span>
+              </span>
+            )}
+          </div>
+          <button
+            onClick={handleBatchAnalyze}
+            disabled={aiBatchLoading || scoredOrders.length === 0}
+            className="px-3 py-1.5 rounded bg-[#1ABC9C] text-[#0a0e12] text-[12px] font-semibold hover:bg-[#3d8de6] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 shrink-0"
+          >
+            <Brain size={12}/>
+            {aiBatchMeta ? 'Re-analyze' : 'Analyze Top 10 with AI'}
+          </button>
+        </div>
+      </SectionCard>
 
       <SectionCard title="At-Risk Orders Feed" subtitle="Predicted to miss delivery promise · click row for CS handoff" tag="LIVE PREDICTIONS">
         <div className="flex gap-2 mb-3">
@@ -2352,6 +2493,7 @@ const AIRiskPage = ({ filtered, data }) => {
               <tr className="text-left text-[#5d6b7a] border-b border-[#2d3744] font-mono uppercase text-[11px] tracking-wider">
                 <th className="py-2">Risk</th>
                 <th className="py-2">Score</th>
+                <th className="py-2 text-center" title="AI analyzed">AI</th>
                 <th className="py-2">Shipment</th>
                 <th className="py-2">Customer</th>
                 <th className="py-2">Channel</th>
@@ -2370,6 +2512,11 @@ const AIRiskPage = ({ filtered, data }) => {
                     </span>
                   </td>
                   <td className="py-2 font-mono" style={{ color: riskColor(o.risk.riskLevel) }}>{o.risk.score}</td>
+                  <td className="py-2 text-center">
+                    {aiAnalysesMap.has(o.do_num || o.id) && (
+                      <span className="text-[12px] text-[#1ABC9C]" title="AI analyzed">✓</span>
+                    )}
+                  </td>
                   <td className="py-2 font-mono">{o.id}</td>
                   <td className="py-2">
                     <div className="flex items-center gap-1.5">
@@ -2400,7 +2547,7 @@ const AIRiskPage = ({ filtered, data }) => {
                 </tr>
               ))}
               {displayed.length === 0 && (
-                <tr><td colSpan="9" className="py-6 text-center text-[#5d6b7a]">No orders match this risk level</td></tr>
+                <tr><td colSpan="10" className="py-6 text-center text-[#5d6b7a]">No orders match this risk level</td></tr>
               )}
             </tbody>
           </table>
@@ -2440,6 +2587,70 @@ const AIRiskPage = ({ filtered, data }) => {
                   New ETA: {new Date(selectedOrder.promiseDeliver.getTime() + selectedOrder.risk.predictedHoursLate*3600000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                 </div>
               </div>
+            </div>
+
+            {/* PR AI-Phase1: AI analysis section. Renders only when the
+                order is in aiAnalysesMap (populated by handleBatchAnalyze).
+                Placed above the rule-based "Why this order is at risk"
+                section so reviewers can compare AI vs rule-based side by
+                side during the test phase. */}
+            <div className="bg-[#232c37] rounded p-4 border border-[#1ABC9C]/30 mb-4">
+              <div className="text-[11px] uppercase tracking-wider text-[#1ABC9C] font-mono mb-3 flex items-center gap-2">
+                <Brain size={11}/> AI Analysis (Gemini 2.5 Flash)
+              </div>
+              {(() => {
+                const aiResult = aiAnalysesMap.get(selectedOrder.do_num || selectedOrder.id);
+                if (!aiResult) {
+                  return (
+                    <div className="text-[12px]" style={{ color: 'var(--text-muted)' }}>
+                      This order has not been analyzed yet. Click <span className="text-[#1ABC9C]">Analyze Top 10 with AI</span> at the top of this page to include it.
+                    </div>
+                  );
+                }
+                return (
+                  <div className="space-y-3">
+                    <div className="flex items-center gap-4 text-[12px] flex-wrap">
+                      <div>
+                        <span className="text-[#5d6b7a] font-mono uppercase text-[10px]">AI Risk: </span>
+                        <span className="font-semibold" style={{ color: riskColor(aiResult.risk_level) }}>
+                          {aiResult.risk_level} ({aiResult.risk_score}/100)
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-[#5d6b7a] font-mono uppercase text-[10px]">Confidence: </span>
+                        <span className="font-mono">{aiResult.confidence_pct}%</span>
+                      </div>
+                      {aiResult.predicted_delay_hours > 0 && (
+                        <div>
+                          <span className="text-[#5d6b7a] font-mono uppercase text-[10px]">Predicted: </span>
+                          <span className="font-mono text-[#E74C6F]">{aiResult.predicted_delay_hours}h late</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {Array.isArray(aiResult.key_factors) && aiResult.key_factors.length > 0 && (
+                      <div>
+                        <div className="text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono mb-1.5">Key Factors</div>
+                        <div className="space-y-1">
+                          {aiResult.key_factors.map((f, i) => (
+                            <div key={i} className="flex items-start gap-2 text-[13px]">
+                              <div className="w-1 h-1 rounded-full mt-1.5 bg-[#1ABC9C]"/>
+                              <div>{f}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {aiResult.recommended_action && (
+                      <div className="bg-[#0f1419] rounded p-2.5 border-l-2 border-[#1ABC9C]">
+                        <div className="text-[10px] uppercase tracking-wider text-[#1ABC9C] font-mono mb-1">Recommended Action</div>
+                        <div className="text-[12px] text-[#c5ccd4]">{aiResult.recommended_action}</div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="mb-4">
