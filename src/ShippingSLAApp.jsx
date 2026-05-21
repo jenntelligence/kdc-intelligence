@@ -974,6 +974,34 @@ const OverviewPage = ({
     return hookData.filter(r => selectedChannels.includes(r.channel));
   }, [hookData, selectedChannels]);
 
+  // PR Overview-B: lift the strict per-DO delivered aggregation out of
+  // liveMetrics so the Detail Table can reuse the same _is_fully_delivered +
+  // MAX(delivered_date) values without recomputing. Verbatim port of the
+  // GeoPage `deliveredAggregated` useMemo (line ~1452-1479) with one
+  // difference: Overview computes this unconditionally (Geo only computes it
+  // when delayedMode === 'delivered'). The Detail Table needs the aggregated
+  // rows for every metric so we always pay the O(n) cost here.
+  const aggregatedPageData = useMemo(() => {
+    return pageData.map(r => {
+      const cs = Array.isArray(r.containers) ? r.containers : null;
+      if (!cs || cs.length === 0) {
+        const fully = r.delivered_date != null;
+        return { ...r, _is_fully_delivered: fully, delivered_date: fully ? r.delivered_date : null };
+      }
+      let allDelivered = true;
+      let maxDelivered = null;
+      for (const c of cs) {
+        if (!c.delivered_date) { allDelivered = false; break; }
+        if (!maxDelivered || c.delivered_date > maxDelivered) maxDelivered = c.delivered_date;
+      }
+      return {
+        ...r,
+        _is_fully_delivered: allDelivered,
+        delivered_date: allDelivered ? maxDelivered : null,
+      };
+    });
+  }, [pageData]);
+
   // PR Overview-A hotfix: live aggregates derived from the master query.
   //   - Ship-confirm cohort (trailing_status ≥ 700) still drives Order→Dock
   //     Cycle and On-Time Ship — those are KDC-side handoff metrics.
@@ -1018,29 +1046,11 @@ const OverviewPage = ({
     );
     const shippedOnTime  = shipped.filter(r => !isShipConfirmDelayed(r));
 
-    // Strict per-DO delivered aggregation — verbatim from GeoPage
-    // deliveredAggregated useMemo (line ~1030-1057). Fully delivered iff every
-    // container has a delivered_date; DO delivered_date = MAX(container).
-    // Mock-fallback path (no containers[]) treats the row's own delivered_date
-    // as a single-shipment proxy.
-    const aggregated = pageData.map(r => {
-      const cs = Array.isArray(r.containers) ? r.containers : null;
-      if (!cs || cs.length === 0) {
-        const fully = r.delivered_date != null;
-        return { ...r, _is_fully_delivered: fully, delivered_date: fully ? r.delivered_date : null };
-      }
-      let allDelivered = true;
-      let maxDelivered = null;
-      for (const c of cs) {
-        if (!c.delivered_date) { allDelivered = false; break; }
-        if (!maxDelivered || c.delivered_date > maxDelivered) maxDelivered = c.delivered_date;
-      }
-      return {
-        ...r,
-        _is_fully_delivered: allDelivered,
-        delivered_date: allDelivered ? maxDelivered : null,
-      };
-    });
+    // Strict per-DO delivered aggregation lives in `aggregatedPageData` above
+    // (PR Overview-B lift). Same MAX(delivered_date) + _is_fully_delivered
+    // semantics — pulled out so the Detail Table reuses the same rows without
+    // recomputing.
+    const aggregated = aggregatedPageData;
     // Cohort filter mirrors GeoPage cohort useMemo (line ~1063-1072): fully
     // delivered AND state×carrier has a defined lead time.
     const delivered        = aggregated.filter(r => r._is_fully_delivered && getDeliveryLeadDays(r.state, r.carrier) !== null);
@@ -1096,7 +1106,7 @@ const OverviewPage = ({
       delayedDollars:      sumValue(deliveredDelayed),
       splitDollars:        sumValue(splitRows),
     };
-  }, [pageData]);
+  }, [pageData, aggregatedPageData]);
 
   if (hookLoading) {
     return (
@@ -1179,22 +1189,163 @@ const OverviewPage = ({
         );
       })()}
 
-      {/* Metric Detail Table — still backed by mock `filtered`. Phase B wires
-          this to live DO rows (per-metric filter against pageData). */}
+      {/* PR Overview-B: Detail Table wired to live DO rows. Per-metric filter
+          + format + sort against aggregatedPageData (strict-delivered cohort
+          available via _is_fully_delivered). Damage / Backorders render a
+          "Coming in Phase C" placeholder until cause / raid type wiring lands. */}
       {selectedMetric && (() => {
-        const metricConfig = {
-          'ontime-ship': { title: 'On-Time Ship — All Shipments', filter: () => true, cols: ['id','customer','channel','carrier','state','promiseShip','shipConfirm','status'], formatRow: r => ({ ...r, status: r.onTimeShip ? 'On Time' : 'Late' }) },
-          'ontime-deliv': { title: 'On-Time Delivery — All Deliveries', filter: r => r.delivered !== null, cols: ['id','customer','channel','carrier','state','promiseDeliver','delivered','status'], formatRow: r => ({ ...r, status: r.onTimeDelivery ? 'On Time' : r.onTimeDelivery === false ? 'Late' : 'In Transit' }) },
-          'cycle': { title: 'Order-to-Dock Cycle Time', filter: () => true, cols: ['id','customer','channel','carrier','orderCreate','shipConfirm','cycleHrs'], formatRow: r => ({ ...r, cycleHrs: (diffMin(r.orderCreate, r.shipConfirm)/60).toFixed(1) + 'h' }) },
-          'delayed': { title: 'Delayed Orders', filter: r => r.cause !== '', cols: ['id','customer','channel','carrier','state','cause','orderValue','chargeback'], formatRow: r => r },
-          'split': { title: 'Split Shipments', filter: r => r.isSplit, cols: ['id','customer','channel','carrier','splitCartons','splitGapDays','splitReason','orderValue'], formatRow: r => r },
-          'damage': { title: 'Damage / Problem Shipments', filter: r => r.cause === 'Damage', cols: ['id','customer','channel','carrier','state','orderValue','chargeback'], formatRow: r => r },
-          'backorder': { title: 'In-Stock Backorders (Past Due)', filter: r => r.isOpen && r.promiseDeliver && r.promiseDeliver < new Date(), cols: ['id','customer','channel','primarySku','primarySkuName','carrier','state','promiseDeliver','orderValue','daysPastDue'], formatRow: r => ({ ...r, daysPastDue: Math.round((new Date() - r.promiseDeliver) / 86400000) + 'd' }) },
+        // Days-late helper for the Delayed metric. Mirrors the expected-date
+        // logic in module-level `isDeliveredDelayed` (line ~221) so the
+        // displayed days agree with the delayed-cohort filter:
+        //   UPS   — so_created + leadTime CD
+        //   TRUCK — (so_created + 1 CD KDC) + leadTime BD
+        // Simple calendar-day subtraction would under-count for TRUCK rows
+        // because it omits the BD weekend skip + the +1 CD KDC outbound.
+        const computeDaysLate = (r) => {
+          const lead = getDeliveryLeadDays(r.state, r.carrier);
+          if (lead === null || !r.delivered_date || !r.so_created_date) return 0;
+          const soCreated = new Date(r.so_created_date);
+          soCreated.setUTCHours(0, 0, 0, 0);
+          const delivered = new Date(r.delivered_date);
+          delivered.setUTCHours(0, 0, 0, 0);
+          if (Number.isNaN(soCreated.getTime()) || Number.isNaN(delivered.getTime())) return 0;
+          let expected;
+          if (r.carrier === 'UPS') {
+            expected = new Date(soCreated);
+            expected.setUTCDate(expected.getUTCDate() + lead);
+          } else if (r.carrier === 'TRUCK') {
+            const shipEstimated = new Date(soCreated);
+            shipEstimated.setUTCDate(shipEstimated.getUTCDate() + 1); // KDC 1 CD
+            expected = addBusinessDays(shipEstimated, lead);
+          } else {
+            return 0;
+          }
+          return Math.round((delivered.getTime() - expected.getTime()) / 86400000);
         };
+
+        const metricConfig = {
+          // CYCLE — Order→Dock cycle hours per DO, longest first. Cohort =
+          // ship-confirm-or-beyond (trailing_status ≥ 700), same as the KPI.
+          'cycle': {
+            title: 'Order→Dock Cycle Time',
+            filter: (r) => r.trailing_status != null && Number(r.trailing_status) >= 700,
+            cols: ['do_num', 'customer', 'channel', 'carrier', 'so_created_date', 'trailing_status_date', '_cycleHrs'],
+            formatRow: (r) => {
+              const startStr = (typeof r.so_created_date === 'string')
+                ? r.so_created_date.slice(0, 10) + 'T00:00:00Z'
+                : r.so_created_date;
+              const start = new Date(startStr);
+              const end   = new Date(r.trailing_status_date);
+              const hrs   = (end.getTime() - start.getTime()) / 3_600_000;
+              return { ...r, _cycleHrs: Number.isFinite(hrs) ? hrs.toFixed(1) + 'h' : '—' };
+            },
+            sort: (a, b) => parseFloat(b._cycleHrs) - parseFloat(a._cycleHrs),
+          },
+
+          // ON-TIME SHIP — ship-confirm cohort + status badge. Inline delay
+          // check mirrors `isShipConfirmDelayed` inside liveMetrics (line
+          // ~1001-1011): date-only UTC subtraction > 1 day.
+          'ontime-ship': {
+            title: 'On-Time Ship — All Ship-Confirmed',
+            filter: (r) => r.trailing_status != null && Number(r.trailing_status) >= 700,
+            cols: ['do_num', 'customer', 'channel', 'carrier', 'state', 'so_created_date', 'trailing_status_date', '_status'],
+            formatRow: (r) => {
+              const soDate  = (typeof r.so_created_date     === 'string') ? r.so_created_date.slice(0, 10)     : null;
+              const stsDate = (typeof r.trailing_status_date === 'string') ? r.trailing_status_date.slice(0, 10) : null;
+              let delayed = false;
+              if (soDate && stsDate) {
+                const so  = new Date(soDate  + 'T00:00:00Z');
+                const sts = new Date(stsDate + 'T00:00:00Z');
+                delayed = (sts.getTime() - so.getTime()) > 86400000;
+              }
+              return { ...r, _status: delayed ? 'Late' : 'On Time' };
+            },
+            sort: (a, b) => (a._status === 'Late' ? -1 : 1) - (b._status === 'Late' ? -1 : 1),
+          },
+
+          // ON-TIME DELIVERY — strict delivered cohort + status badge.
+          'ontime-deliv': {
+            title: 'On-Time Delivery — Fully Delivered DOs',
+            filter: (r) => r._is_fully_delivered && getDeliveryLeadDays(r.state, r.carrier) !== null,
+            cols: ['do_num', 'customer', 'channel', 'carrier', 'state', 'so_created_date', 'delivered_date', '_status'],
+            formatRow: (r) => ({ ...r, _status: isDeliveredDelayed(r) ? 'Late' : 'On Time' }),
+            sort: (a, b) => (a._status === 'Late' ? -1 : 1) - (b._status === 'Late' ? -1 : 1),
+          },
+
+          // DELAYED — delayed delivered DOs, sorted by days late descending.
+          'delayed': {
+            title: 'Delayed Deliveries (Strict Cohort)',
+            filter: (r) => r._is_fully_delivered && getDeliveryLeadDays(r.state, r.carrier) !== null && isDeliveredDelayed(r),
+            cols: ['do_num', 'customer', 'channel', 'carrier', 'state', 'so_created_date', 'delivered_date', '_daysLate', 'orderValue'],
+            formatRow: (r) => ({ ...r, _daysLate: computeDaysLate(r) + 'd' }),
+            sort: (a, b) => parseInt(b._daysLate, 10) - parseInt(a._daysLate, 10),
+          },
+
+          // SPLIT — settled UPS only + is_split_shipment, sorted by container
+          // count desc. splitReason is the adapter's alias for raw
+          // split_root_cause (serverRowsToShipments line ~2508); container_cnt
+          // falls back to containers.length (same pattern as line ~3095).
+          'split': {
+            title: 'Split Shipments (Settled UPS)',
+            filter: (r) => r.carrier !== 'TRUCK'
+                       && (r.split_status === 'SPLIT' || r.split_status === 'NOT_SPLIT')
+                       && r.is_split_shipment,
+            cols: ['do_num', 'customer', 'channel', 'carrier', 'state', '_containerCount', 'splitReason', 'orderValue'],
+            formatRow: (r) => ({
+              ...r,
+              _containerCount: r.container_cnt != null
+                ? Number(r.container_cnt)
+                : (Array.isArray(r.containers) ? r.containers.length : 1),
+            }),
+            sort: (a, b) => b._containerCount - a._containerCount,
+          },
+
+          // PHASE C placeholders — cause / raid type wiring pending Smartsheet Phase 2.
+          'damage': {
+            title: 'Damage / Problem Shipments',
+            placeholder: 'Damage tracking requires raid type mapping from Smartsheet — coming in Phase C.',
+          },
+          'backorder': {
+            title: 'In-Stock Backorders (Past Due)',
+            placeholder: 'Backorder detection requires separate logic — coming in Phase C.',
+          },
+        };
+
         const cfg = metricConfig[selectedMetric];
         if (!cfg) return null;
-        const rows = filtered.filter(cfg.filter).slice(0, 50).map(cfg.formatRow);
-        const colLabels = { id: 'Shipment', customer: 'Customer', channel: 'Channel', carrier: 'Carrier', state: 'State', cause: 'Root Cause', promiseShip: 'Promise Ship', shipConfirm: 'Ship Confirm', promiseDeliver: 'Promise Deliver', delivered: 'Delivered', orderCreate: 'Order Created', splitCartons: 'Cartons', splitGapDays: 'Gap Days', splitReason: 'Split Reason', orderValue: 'Value', chargeback: 'Chargeback', status: 'Status', cycleHrs: 'Cycle Time', daysPastDue: 'Days Past Due', primarySku: 'SKU', primarySkuName: 'SKU Name' };
+
+        if (cfg.placeholder) {
+          return (
+            <SectionCard title={cfg.title} tag="DETAIL VIEW" className="mb-4">
+              <div className="text-center py-10 text-[14px]" style={{ color: 'var(--text-muted)' }}>
+                {cfg.placeholder}
+              </div>
+            </SectionCard>
+          );
+        }
+
+        const rows = aggregatedPageData
+          .filter(cfg.filter)
+          .map(cfg.formatRow)
+          .sort(cfg.sort || (() => 0))
+          .slice(0, 50);
+
+        const colLabels = {
+          do_num: 'DO #',
+          customer: 'Customer',
+          channel: 'Channel',
+          carrier: 'Carrier',
+          state: 'State',
+          so_created_date: 'Order Created',
+          trailing_status_date: 'Ship Confirm',
+          delivered_date: 'Delivered',
+          orderValue: 'Value',
+          splitReason: 'Split Reason',
+          _cycleHrs: 'Cycle Time',
+          _status: 'Status',
+          _daysLate: 'Days Late',
+          _containerCount: 'Containers',
+        };
 
         return (
           <SectionCard title={cfg.title} subtitle={`${rows.length} records (top 50) · click a KPI to switch · click again to close`} tag="DETAIL VIEW" className="mb-4">
@@ -1207,14 +1358,33 @@ const OverviewPage = ({
                 </thead>
                 <tbody>
                   {rows.map((r, i) => (
-                    <tr key={r.id + '-' + i} style={{ borderTop: '1px solid var(--border)' }}>
+                    <tr key={r.do_num + '-' + i} style={{ borderTop: '1px solid var(--border)' }}>
                       {cfg.cols.map(c => {
                         let val = r[c];
-                        if (val instanceof Date) val = val.toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                        if (c === 'orderValue' || c === 'chargeback') val = '$' + (val || 0).toLocaleString();
-                        if (c === 'cause') return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded-full font-mono" style={{ background: (CAUSE_COLORS[val] || '#8a95a3') + '20', color: CAUSE_COLORS[val] || '#8a95a3' }}>{CAUSE_LABELS[val] || val || '—'}</span></td>;
-                        if (c === 'status') return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded-full font-mono font-semibold" style={{ background: val === 'On Time' ? '#2ECC7120' : val === 'Late' ? '#E74C6F20' : '#f5a62320', color: val === 'On Time' ? '#2ECC71' : val === 'Late' ? '#E74C6F' : '#f5a623' }}>{val}</span></td>;
-                        if (c === 'channel') { const g = getChannelGroup(val || ''); return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded font-mono" style={{ background: (CHANNEL_GROUP_COLORS[g]||'#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[g]||'#8a95a3' }}>{val}</span></td>; }
+                        // ISO 8601 date strings ("2026-05-14" or "2026-05-14 10:30:00.000")
+                        // → UTC-stable "May 14" display.
+                        if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}/.test(val)) {
+                          const d = new Date(val.slice(0, 10) + 'T00:00:00Z');
+                          if (!Number.isNaN(d.getTime())) {
+                            val = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+                          }
+                        }
+                        if (c === 'orderValue') val = (val == null) ? '—' : '$' + Math.round(Number(val) || 0).toLocaleString();
+                        if (c === 'splitReason') val = val ? (ROOT_CAUSE_LABELS[val] || val) : '—';
+                        if (c === '_status') return (
+                          <td key={c} className="py-2 pr-4">
+                            <span className="text-[11px] px-2 py-0.5 rounded-full font-mono font-semibold"
+                              style={{ background: val === 'On Time' ? '#2ECC7120' : val === 'Late' ? '#E74C6F20' : '#f5a62320',
+                                       color:      val === 'On Time' ? '#2ECC71'   : val === 'Late' ? '#E74C6F'   : '#f5a623' }}>
+                              {val}
+                            </span>
+                          </td>
+                        );
+                        if (c === 'channel') {
+                          const g = getChannelGroup(val || '');
+                          return <td key={c} className="py-2 pr-4"><span className="text-[11px] px-2 py-0.5 rounded font-mono"
+                            style={{ background: (CHANNEL_GROUP_COLORS[g]||'#8a95a3')+'20', color: CHANNEL_GROUP_COLORS[g]||'#8a95a3' }}>{val}</span></td>;
+                        }
                         return <td key={c} className="py-2 pr-4 font-mono" style={{ color: 'var(--text-primary)' }}>{val ?? '—'}</td>;
                       })}
                     </tr>
