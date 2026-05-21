@@ -1376,7 +1376,7 @@ const OverviewPage = ({
                         if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}/.test(val)) {
                           const d = new Date(val.slice(0, 10) + 'T00:00:00Z');
                           if (!Number.isNaN(d.getTime())) {
-                            val = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+                            val = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
                           }
                         }
                         if (c === 'orderValue') val = (val == null) ? '—' : '$' + Math.round(Number(val) || 0).toLocaleString();
@@ -2391,9 +2391,9 @@ const AIRiskPage = ({ filtered, data }) => {
               </div>
               <div className="bg-[#232c37] rounded p-3">
                 <div className="text-[10px] uppercase tracking-wider font-mono text-[#5d6b7a]">Original Promise</div>
-                <div className="text-sm font-semibold mt-1">{selectedOrder.promiseDeliver.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+                <div className="text-sm font-semibold mt-1">{selectedOrder.promiseDeliver.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</div>
                 <div className="font-mono text-[12px] text-[#E74C6F] mt-0.5">
-                  New ETA: {new Date(selectedOrder.promiseDeliver.getTime() + selectedOrder.risk.predictedHoursLate*3600000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  New ETA: {new Date(selectedOrder.promiseDeliver.getTime() + selectedOrder.risk.predictedHoursLate*3600000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                 </div>
               </div>
             </div>
@@ -2419,8 +2419,8 @@ const AIRiskPage = ({ filtered, data }) => {
                 <div className="text-[#5d6b7a]">Subject: Update on Order {selectedOrder.orderId}</div>
                 <div className="border-t border-[#2d3744] my-2"/>
                 Hi {selectedOrder.customer} team,<br/><br/>
-                We wanted to proactively notify you that Order <span className="text-[#e8ecef]">{selectedOrder.orderId}</span> (${fmtNum(selectedOrder.orderValue.toFixed(0))}, {selectedOrder.cartons} cartons) is currently tracking approximately <span className="text-[#E74C6F]">{selectedOrder.risk.predictedHoursLate} hours behind</span> the original delivery promise of {selectedOrder.promiseDeliver.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}.<br/><br/>
-                Revised ETA: <span className="text-[#f5a623]">{new Date(selectedOrder.promiseDeliver.getTime() + selectedOrder.risk.predictedHoursLate*3600000).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span><br/><br/>
+                We wanted to proactively notify you that Order <span className="text-[#e8ecef]">{selectedOrder.orderId}</span> (${fmtNum(selectedOrder.orderValue.toFixed(0))}, {selectedOrder.cartons} cartons) is currently tracking approximately <span className="text-[#E74C6F]">{selectedOrder.risk.predictedHoursLate} hours behind</span> the original delivery promise of {selectedOrder.promiseDeliver.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}.<br/><br/>
+                Revised ETA: <span className="text-[#f5a623]">{new Date(selectedOrder.promiseDeliver.getTime() + selectedOrder.risk.predictedHoursLate*3600000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span><br/><br/>
                 We're working actively to minimize the delay. If you need to adjust receiving plans or have questions, please reply directly.<br/><br/>
                 — KDC Customer Service
               </div>
@@ -3736,11 +3736,11 @@ const SplitShipmentPage = ({ filtered, dateRange = '7d', customRange = {}, selec
                           </td>
                           <td className="py-2 pr-3 text-center font-mono text-[11px]" style={{ color: 'var(--text-secondary)' }}>
                             {/* PR7b: was c.shipDate (KDC outbound) — now actualDelivery (UPS delivered_date). */}
-                            {c.actualDelivery ? c.actualDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric'}) : '—'}
+                            {c.actualDelivery ? c.actualDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'}) : '—'}
                           </td>
                           <td className="py-2 pr-3 text-[11px]" style={{ color: 'var(--text-secondary)' }}>
                             {c.expectedDelivery
-                              ? `Exp: ${c.expectedDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric'})}`
+                              ? `Exp: ${c.expectedDelivery.toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'})}`
                               : <span style={{ color: 'var(--text-muted)' }}>Exp: —</span>}
                             {/* PR7b: removed inline-arrow \u2192 delivered date \u2014 the
                                 Date column above now shows actualDelivery directly. */}
@@ -6241,7 +6241,7 @@ const FlightBoardPage = ({ data: allData }) => {
                   </td>
                   <td className="py-2 text-[#8a95a3]">{o.carrier}</td>
                   <td className="py-2 font-mono text-right">${fmtNum(o.orderValue.toFixed(0))}</td>
-                  <td className="py-2 font-mono text-[11px] text-[#8a95a3]">{o.promiseDeliver.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</td>
+                  <td className="py-2 font-mono text-[11px] text-[#8a95a3]">{o.promiseDeliver.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
                   <td className="py-2">
                     <span className="text-[10px] px-1.5 py-0.5 rounded-full uppercase font-mono tracking-wider" style={{ background: statusColors[o.flightStatus]+'20', color: statusColors[o.flightStatus] }}>{o.flightStatus.replace('_',' ')}</span>
                   </td>
@@ -7245,7 +7245,7 @@ const EventCalendarPage = ({ currentUser }) => {
                   )}
                   <div className="text-[11px] font-mono font-semibold" style={{ color: ev.volumeImpact.startsWith('+') ? '#2ECC71' : '#E74C6F' }}>{ev.volumeImpact} volume</div>
                   <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>
-                    {ev.startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} — {ev.endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                    {ev.startDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} — {ev.endDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                   </div>
                   <div className="text-[11px]" style={{ color: 'var(--text-secondary)' }}>{ev.notes}</div>
                   {ev.sourceDoc && (
@@ -7253,7 +7253,7 @@ const EventCalendarPage = ({ currentUser }) => {
                       <FileText size={10}/> {ev.sourceDoc}
                     </div>
                   )}
-                  <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{ev.contributor} · {ev.contributedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</div>
+                  <div className="text-[10px]" style={{ color: 'var(--text-muted)' }}>{ev.contributor} · {ev.contributedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</div>
                 </div>
               ))}
             </div>
@@ -7449,7 +7449,7 @@ const EventCalendarPage = ({ currentUser }) => {
                     }}>{doc.type}</span>
                   </td>
                   <td className="py-2 px-2" style={{ color: 'var(--text-secondary)' }}>{doc.uploadedBy}</td>
-                  <td className="py-2 px-2 font-mono" style={{ color: 'var(--text-secondary)' }}>{doc.uploadedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</td>
+                  <td className="py-2 px-2 font-mono" style={{ color: 'var(--text-secondary)' }}>{doc.uploadedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</td>
                   <td className="py-2 px-2" style={{ color: 'var(--text-secondary)' }}>{doc.linkedEvent}</td>
                   <td className="py-2 px-2">
                     <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded" style={{
