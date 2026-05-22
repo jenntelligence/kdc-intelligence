@@ -2303,26 +2303,55 @@ const computeRiskScore = (order, allData) => {
 // ============================================================
 // AI RISK PAGE
 // ============================================================
-const AIRiskPage = ({ filtered, data }) => {
+const AIRiskPage = ({ filtered: _mockFiltered, data: _mockData }) => {
+  // PR AI-Phase1B: live data via useSplitShipments. App-level mockFiltered /
+  // mockData props (from generateMockShipments) are intentionally ignored —
+  // the AI batch analysis is only meaningful on live operational data. 7-day
+  // window matches other live pages (Overview / Geo / Split). The master
+  // query is already scoped to BS-IVY / BS-RED / VIVACE (server.js base CTE),
+  // so no additional channel filter is needed here.
+  const { data: liveData, loading: liveLoading, error: liveError } = useSplitShipments('7d');
+
   const [filterRisk, setFilterRisk] = useState('all');
   const [selectedOrder, setSelectedOrder] = useState(null);
 
-  // PR AI-Phase1: Gemini batch risk analysis. aiAnalysesMap keyed by do_num
-  // (falls back to id for mock orders). Map mutation creates a new Map for
-  // React re-render. aiBatchMeta tracks the most recent successful run for
-  // UI status display.
+  // PR AI-Phase1: Gemini batch risk analysis. aiAnalysesMap keyed by do_num.
+  // Map mutation creates a new Map for React re-render. aiBatchMeta tracks
+  // the most recent successful run for UI status display.
   const [aiAnalysesMap, setAiAnalysesMap] = useState(new Map());
   const [aiBatchLoading, setAiBatchLoading] = useState(false);
   const [aiBatchError, setAiBatchError] = useState(null);
   const [aiBatchMeta, setAiBatchMeta] = useState(null);
 
+  // PR AI-Phase1B: cohort = trailing_status < 900 (any non-Closed order),
+  // sorted by so_created_date ASC (oldest first — most stuck wins), top 10
+  // as the Phase 1B sample size. computeRiskScore depends on mock-only
+  // fields (cause, isOpen, primarySku, tier) so it will return low/null
+  // scores on live data — that's the intentional rule-vs-AI contrast signal
+  // during the test phase. The fallback risk object keeps rendering safe
+  // when computeRiskScore returns null.
   const scoredOrders = useMemo(() => {
-    return filtered
-      .filter(o => o.isOpen)
-      .map(o => ({ ...o, risk: computeRiskScore(o, data) }))
-      .filter(o => o.risk)
-      .sort((a, b) => b.risk.score - a.risk.score);
-  }, [filtered, data]);
+    if (!liveData || liveData.length === 0) return [];
+    return liveData
+      .filter(o => o.trailing_status != null && Number(o.trailing_status) < 900)
+      .sort((a, b) => {
+        const aDate = new Date(a.so_created_date || 0).getTime();
+        const bDate = new Date(b.so_created_date || 0).getTime();
+        return aDate - bDate; // oldest first
+      })
+      .slice(0, 10)
+      .map(o => ({
+        ...o,
+        risk: computeRiskScore(o, liveData) || {
+          score: 0,
+          riskLevel: 'Low',
+          confidence: 0,
+          reasons: [],
+          predictedLate: false,
+          predictedHoursLate: 0,
+        },
+      }));
+  }, [liveData]);
 
   const summary = useMemo(() => ({
     high: scoredOrders.filter(o => o.risk.riskLevel === 'High').length,
@@ -2390,9 +2419,100 @@ const AIRiskPage = ({ filtered, data }) => {
       };
     });
 
+    // PR AI-Phase1C: enriched context for deeper pattern analysis. AI uses
+    // these stats to identify trends, compare orders, and flag systemic
+    // issues vs isolated incidents. All distributions are 7-day window
+    // (matches useLiveOpsData fetch window) over open orders only
+    // (trailing_status < 900). OTD% is computed off the delivered subset
+    // using the same isDeliveredDelayed lead-time logic as Overview.
+    const allOpen = (liveData || []).filter(
+      o => o.trailing_status != null && Number(o.trailing_status) < 900
+    );
+
+    const byState = {};
+    const byChannel = {};
+    const byCarrier = { UPS: 0, TRUCK: 0 };
+    const byStatus = {};
+    let oldestSoDate = null;
+    let totalCycleHrs = 0;
+    let cycleHrsN = 0;
+
+    for (const o of allOpen) {
+      if (o.state) byState[o.state] = (byState[o.state] || 0) + 1;
+      if (o.channel) byChannel[o.channel] = (byChannel[o.channel] || 0) + 1;
+      if (o.carrier === 'UPS' || o.carrier === 'TRUCK') {
+        byCarrier[o.carrier]++;
+      }
+      if (o.trailing_status != null) {
+        const key = String(o.trailing_status);
+        byStatus[key] = (byStatus[key] || 0) + 1;
+      }
+
+      if (o.so_created_date) {
+        const d = new Date(o.so_created_date);
+        if (!Number.isNaN(d.getTime())) {
+          if (!oldestSoDate || d < oldestSoDate) oldestSoDate = d;
+        }
+      }
+
+      if (o.order_received_at && Array.isArray(o.containers)) {
+        const received = new Date(o.order_received_at);
+        if (!Number.isNaN(received.getTime())) {
+          for (const c of o.containers) {
+            if (c.manifest_date_time) {
+              const m = new Date(c.manifest_date_time);
+              if (!Number.isNaN(m.getTime())) {
+                totalCycleHrs += (m.getTime() - received.getTime()) / 3600000;
+                cycleHrsN++;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const delivered = (liveData || []).filter(o => o.delivered_date);
+    const deliveredOnTime = delivered.filter(o => !isDeliveredDelayed(o));
+    const otdPct = delivered.length
+      ? Math.round((deliveredOnTime.length / delivered.length) * 100)
+      : null;
+
     const context = {
-      window: 'recent',
-      total_orders: data.length,
+      window: 'last 7 days',
+      current_time_et: new Date().toLocaleString('en-US', {
+        timeZone: 'America/New_York',
+      }),
+
+      // Cohort scope
+      total_orders_in_window: liveData ? liveData.length : 0,
+      total_open_orders: allOpen.length,
+      cohort_being_analyzed: 'Top 10 oldest open orders (trailing_status < 900)',
+
+      // KDC baseline performance
+      recent_otd_pct: otdPct,
+      avg_cycle_hours_manifested:
+        cycleHrsN > 0 ? Math.round((totalCycleHrs / cycleHrsN) * 10) / 10 : null,
+
+      // Distribution patterns
+      open_orders_by_state: byState,
+      open_orders_by_channel: byChannel,
+      open_orders_by_carrier: byCarrier,
+      open_orders_by_trailing_status: byStatus,
+
+      // Time signal
+      oldest_open_order_so_date: oldestSoDate
+        ? oldestSoDate.toISOString().slice(0, 10)
+        : null,
+
+      // SLA reference
+      kdc_target_ship_confirm: 'D+1 from order received',
+      scale_trailing_status_legend: {
+        '<500': 'Order received, planning',
+        '500-699': 'Picking / packing in progress',
+        '700': 'Ship Confirm Pending (manifested, awaiting confirm)',
+        '800': 'Load Confirm Pending (in transit to carrier)',
+        '900': 'Closed (delivered or finalized)',
+      },
     };
 
     try {
@@ -2423,6 +2543,24 @@ const AIRiskPage = ({ filtered, data }) => {
     }
   };
 
+  // PR AI-Phase1B: loading / error guards before main render. liveData is
+  // null while the hook is fetching; downstream useMemo/render assume the
+  // array shape so an early-return here keeps the JSX simple.
+  if (liveLoading) {
+    return (
+      <div className="text-[14px] py-10 text-center font-mono" style={{ color: 'var(--text-muted)' }}>
+        Loading live shipment data for AI analysis…
+      </div>
+    );
+  }
+  if (liveError) {
+    return (
+      <div className="text-[14px] py-10 text-center font-mono text-[#E74C6F]">
+        Failed to load live data: {String(liveError)}
+      </div>
+    );
+  }
+
   return (
     <>
       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
@@ -2438,7 +2576,7 @@ const AIRiskPage = ({ filtered, data }) => {
           deeper context + recommended actions in a complementary view. */}
       <SectionCard
         title="AI-Powered Analysis"
-        subtitle="Gemini 2.5 Flash · top 10 high-risk orders"
+        subtitle="Gemini 2.5 Flash · top 10 oldest open orders (Phase 1B sample)"
         tag="AI"
         className="mb-4"
       >
@@ -2451,7 +2589,7 @@ const AIRiskPage = ({ filtered, data }) => {
               </span>
             )}
             {aiBatchLoading && (
-              <span className="text-[#1ABC9C]">Analyzing 10 orders with Gemini… (~5–10s)</span>
+              <span className="text-[#1ABC9C]">Analyzing 10 orders with Gemini… (~60–90s)</span>
             )}
             {aiBatchError && (
               <span className="text-[#f5a623]">
@@ -2478,7 +2616,7 @@ const AIRiskPage = ({ filtered, data }) => {
         </div>
       </SectionCard>
 
-      <SectionCard title="At-Risk Orders Feed" subtitle="Predicted to miss delivery promise · click row for CS handoff" tag="LIVE PREDICTIONS">
+      <SectionCard title="At-Risk Orders Feed" subtitle="Top 10 oldest open orders (trailing_status<900) · click row for AI analysis" tag="LIVE PREDICTIONS">
         <div className="flex gap-2 mb-3">
           {['all', 'High', 'Medium', 'Low'].map(r => (
             <button key={r} onClick={() => setFilterRisk(r)}
@@ -2563,8 +2701,8 @@ const AIRiskPage = ({ filtered, data }) => {
                 <div className="text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono flex items-center gap-2">
                   <Brain size={12}/> AI Risk Analysis
                 </div>
-                <div className="text-xl font-semibold font-mono mt-1">{selectedOrder.id}</div>
-                <div className="text-[12px] text-[#8a95a3] mt-0.5">{selectedOrder.customer} · {selectedOrder.state} · ${fmtNum(selectedOrder.orderValue.toFixed(0))}</div>
+                <div className="text-xl font-semibold font-mono mt-1">{selectedOrder.do_num || selectedOrder.id}</div>
+                <div className="text-[12px] text-[#8a95a3] mt-0.5">{selectedOrder.customer} · {selectedOrder.state} · {selectedOrder.orderValue != null ? '$' + fmtNum(Math.round(Number(selectedOrder.orderValue))) : '—'}</div>
               </div>
               <button onClick={() => setSelectedOrder(null)} className="text-[#8a95a3] hover:text-[#e8ecef]">✕</button>
             </div>
@@ -2581,11 +2719,25 @@ const AIRiskPage = ({ filtered, data }) => {
                 <div className="font-mono text-[12px] text-[#8a95a3] mt-0.5">Confidence: {selectedOrder.risk.confidence}%</div>
               </div>
               <div className="bg-[#232c37] rounded p-3">
-                <div className="text-[10px] uppercase tracking-wider font-mono text-[#5d6b7a]">Original Promise</div>
-                <div className="text-sm font-semibold mt-1">{selectedOrder.promiseDeliver.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</div>
-                <div className="font-mono text-[12px] text-[#E74C6F] mt-0.5">
-                  New ETA: {new Date(selectedOrder.promiseDeliver.getTime() + selectedOrder.risk.predictedHoursLate*3600000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                </div>
+                <div className="text-[10px] uppercase tracking-wider font-mono text-[#5d6b7a]">Expected Delivery</div>
+                {(() => {
+                  const exp = getExpectedDeliveryDate(selectedOrder);
+                  if (!exp) {
+                    return <div className="text-sm font-semibold mt-1 text-[#8a95a3]">—</div>;
+                  }
+                  const fmt = (d) => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
+                  const hoursLate = selectedOrder.risk?.predictedHoursLate || 0;
+                  return (
+                    <>
+                      <div className="text-sm font-semibold mt-1">{fmt(exp)}</div>
+                      {hoursLate > 0 && (
+                        <div className="font-mono text-[12px] text-[#E74C6F] mt-0.5">
+                          New ETA: {fmt(new Date(exp.getTime() + hoursLate * 3600000))}
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
 
@@ -2607,6 +2759,14 @@ const AIRiskPage = ({ filtered, data }) => {
                     </div>
                   );
                 }
+                // PR AI-Phase1C: surfaces deeper structured output.
+                // Order: header metrics → Probable Root Cause (top,
+                // red) → Pattern (yellow, conditional) → Key Factors
+                // → Containment Action (WHO/WHAT/WHEN/WHERE, teal) →
+                // Investigation Follow-up (blue, conditional) →
+                // Stakeholders chips. Optional fields use falsy
+                // check to handle either null or empty-string sentinel
+                // from the schema.
                 return (
                   <div className="space-y-3">
                     <div className="flex items-center gap-4 text-[12px] flex-wrap">
@@ -2628,9 +2788,34 @@ const AIRiskPage = ({ filtered, data }) => {
                       )}
                     </div>
 
+                    {aiResult.probable_root_cause && (
+                      <div className="rounded p-3 border-l-2 border-[#E74C6F]"
+                           style={{ background: 'var(--bg-panel-alt)' }}>
+                        <div className="text-[10px] uppercase tracking-wider text-[#E74C6F] font-mono mb-1">
+                          Probable Root Cause
+                        </div>
+                        <div className="text-[13px]" style={{ color: 'var(--text-primary)' }}>
+                          {aiResult.probable_root_cause}
+                        </div>
+                      </div>
+                    )}
+
+                    {aiResult.pattern_observation && (
+                      <div className="rounded p-3 border-l-2 border-[#f5a623]"
+                           style={{ background: 'var(--bg-panel-alt)' }}>
+                        <div className="text-[10px] uppercase tracking-wider text-[#f5a623] font-mono mb-1">
+                          Pattern Detected
+                        </div>
+                        <div className="text-[12px]" style={{ color: 'var(--text-primary)' }}>
+                          {aiResult.pattern_observation}
+                        </div>
+                      </div>
+                    )}
+
                     {Array.isArray(aiResult.key_factors) && aiResult.key_factors.length > 0 && (
                       <div>
-                        <div className="text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono mb-1.5">Key Factors</div>
+                        <div className="text-[11px] uppercase tracking-wider font-mono mb-1.5"
+                             style={{ color: 'var(--text-muted)' }}>Key Factors</div>
                         <div className="space-y-1">
                           {aiResult.key_factors.map((f, i) => (
                             <div key={i} className="flex items-start gap-2 text-[13px]">
@@ -2642,10 +2827,52 @@ const AIRiskPage = ({ filtered, data }) => {
                       </div>
                     )}
 
-                    {aiResult.recommended_action && (
-                      <div className="bg-[#0f1419] rounded p-2.5 border-l-2 border-[#1ABC9C]">
-                        <div className="text-[10px] uppercase tracking-wider text-[#1ABC9C] font-mono mb-1">Recommended Action</div>
-                        <div className="text-[12px] text-[#c5ccd4]">{aiResult.recommended_action}</div>
+                    {aiResult.containment_action && aiResult.containment_action.what && (
+                      <div className="rounded p-3 border-l-2 border-[#1ABC9C]"
+                           style={{ background: 'var(--bg-panel-alt)' }}>
+                        <div className="text-[10px] uppercase tracking-wider text-[#1ABC9C] font-mono mb-2">
+                          Containment Action (Immediate)
+                        </div>
+                        <div className="space-y-1 text-[12px]" style={{ color: 'var(--text-primary)' }}>
+                          <div><span style={{ color: 'var(--text-muted)' }}>WHO:</span> <span className="font-semibold">{aiResult.containment_action.who}</span></div>
+                          <div><span style={{ color: 'var(--text-muted)' }}>WHAT:</span> {aiResult.containment_action.what}</div>
+                          <div><span style={{ color: 'var(--text-muted)' }}>WHEN:</span> <span className="text-[#f5a623]">{aiResult.containment_action.when}</span></div>
+                          {aiResult.containment_action.where && (
+                            <div><span style={{ color: 'var(--text-muted)' }}>WHERE:</span> {aiResult.containment_action.where}</div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {aiResult.investigation_action && (
+                      <div className="rounded p-3 border-l-2 border-[#3d8de6]"
+                           style={{ background: 'var(--bg-panel-alt)' }}>
+                        <div className="text-[10px] uppercase tracking-wider text-[#3d8de6] font-mono mb-1">
+                          Investigation Follow-up
+                        </div>
+                        <div className="text-[12px]" style={{ color: 'var(--text-primary)' }}>
+                          {aiResult.investigation_action}
+                        </div>
+                      </div>
+                    )}
+
+                    {Array.isArray(aiResult.stakeholders_to_notify) &&
+                     aiResult.stakeholders_to_notify.length > 0 && (
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-[10px] uppercase tracking-wider font-mono"
+                              style={{ color: 'var(--text-muted)' }}>
+                          Notify:
+                        </span>
+                        {aiResult.stakeholders_to_notify.map((s, i) => (
+                          <span key={i} className="text-[11px] px-2 py-0.5 rounded border"
+                                style={{
+                                  background: 'var(--bg-panel-alt)',
+                                  color: 'var(--text-primary)',
+                                  borderColor: 'var(--border)',
+                                }}>
+                            {s}
+                          </span>
+                        ))}
                       </div>
                     )}
                   </div>
@@ -2670,14 +2897,37 @@ const AIRiskPage = ({ filtered, data }) => {
                 <Mail size={11}/> Pre-Drafted Customer Notification
               </div>
               <div className="bg-[#0f1419] rounded p-3 font-mono text-[12px] leading-relaxed text-[#c5ccd4]">
-                <div className="text-[#5d6b7a]">To: buyer@{selectedOrder.customer.toLowerCase().replace(/ /g, '')}.com</div>
-                <div className="text-[#5d6b7a]">Subject: Update on Order {selectedOrder.orderId}</div>
-                <div className="border-t border-[#2d3744] my-2"/>
-                Hi {selectedOrder.customer} team,<br/><br/>
-                We wanted to proactively notify you that Order <span className="text-[#e8ecef]">{selectedOrder.orderId}</span> (${fmtNum(selectedOrder.orderValue.toFixed(0))}, {selectedOrder.cartons} cartons) is currently tracking approximately <span className="text-[#E74C6F]">{selectedOrder.risk.predictedHoursLate} hours behind</span> the original delivery promise of {selectedOrder.promiseDeliver.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}.<br/><br/>
-                Revised ETA: <span className="text-[#f5a623]">{new Date(selectedOrder.promiseDeliver.getTime() + selectedOrder.risk.predictedHoursLate*3600000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}</span><br/><br/>
-                We're working actively to minimize the delay. If you need to adjust receiving plans or have questions, please reply directly.<br/><br/>
-                — KDC Customer Service
+                {(() => {
+                  // PR AI-Phase1B: mock-field patches for live data safety.
+                  // orderId → do_num (master query DO #).
+                  // cartons → container_cnt || containers.length.
+                  // promiseDeliver → getExpectedDeliveryDate(selectedOrder).
+                  // orderValue can be null on unbilled DOs — render '—'.
+                  const doNum = selectedOrder.do_num || selectedOrder.id;
+                  const containerCount = selectedOrder.container_cnt != null
+                    ? selectedOrder.container_cnt
+                    : (Array.isArray(selectedOrder.containers) ? selectedOrder.containers.length : '?');
+                  const value = selectedOrder.orderValue != null
+                    ? '$' + fmtNum(Math.round(Number(selectedOrder.orderValue))) : '—';
+                  const exp = getExpectedDeliveryDate(selectedOrder);
+                  const hoursLate = selectedOrder.risk?.predictedHoursLate || 0;
+                  const fmtDate = (d) => d ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : 'TBD';
+                  const expDisplay = fmtDate(exp);
+                  const revisedDisplay = exp && hoursLate > 0 ? fmtDate(new Date(exp.getTime() + hoursLate * 3600000)) : 'TBD';
+                  const customerSlug = (selectedOrder.customer || 'customer').toLowerCase().replace(/ /g, '');
+                  return (
+                    <>
+                      <div className="text-[#5d6b7a]">To: buyer@{customerSlug}.com</div>
+                      <div className="text-[#5d6b7a]">Subject: Update on Order {doNum}</div>
+                      <div className="border-t border-[#2d3744] my-2"/>
+                      Hi {selectedOrder.customer} team,<br/><br/>
+                      We wanted to proactively notify you that Order <span className="text-[#e8ecef]">{doNum}</span> ({value}, {containerCount} containers) is currently tracking approximately <span className="text-[#E74C6F]">{hoursLate} hours behind</span> the expected delivery of {expDisplay}.<br/><br/>
+                      Revised ETA: <span className="text-[#f5a623]">{revisedDisplay}</span><br/><br/>
+                      We're working actively to minimize the delay. If you need to adjust receiving plans or have questions, please reply directly.<br/><br/>
+                      — KDC Customer Service
+                    </>
+                  );
+                })()}
               </div>
               <div className="flex gap-2 mt-3">
                 <button className="px-3 py-1.5 rounded bg-[#1ABC9C] text-[#0a0e12] text-[12px] font-semibold hover:bg-[#3d8de6] flex items-center gap-1.5">

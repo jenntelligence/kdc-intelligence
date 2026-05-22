@@ -1415,38 +1415,129 @@ app.post('/api/ai/risk-analyze-batch', async (req, res) => {
     return rest;
   });
 
-  const prompt = `You are a warehouse operations risk analyst at KDC Savannah, GA.
-Analyze the following batch of ${sanitizedOrders.length} at-risk open orders and produce one structured assessment per order.
+  // PR AI-Phase1C: prompt re-architected around modern ops analytics practice.
+  // Initial AI responses were shallow — Gemini was restating input data
+  // ("status 700, 0/3 manifested" ← we already know that) rather than
+  // analyzing it. The framework below forces RCA / pattern recognition /
+  // containment-first / specificity-in-actions / confidence calibration.
+  // Anti-patterns are called out explicitly. Output schema (extended below
+  // in responseSchema) requires structured actions with WHO/WHAT/WHEN/WHERE.
+  const prompt = `You are a senior warehouse operations analyst at KDC Savannah, GA — a beauty products distribution center. Your role: identify hidden risks in at-risk shipments and translate them into specific actions operations teams can take TODAY.
 
-Context:
-- Window: ${context?.window || 'recent'}
-- Total open orders in scope: ${context?.total_orders ?? 'unknown'}
-- KDC target: D+1 ship confirm.
-- SCALE trailing_status codes: 700 = Ship Confirm Pending, 800 = Load Confirm Pending, 900 = Closed.
-- Carriers: UPS (parcel, calendar-day lead time by zone), TRUCK (LTL, business-day lead time).
-- Each order carries a rule-based score (rule_based_score / rule_based_level / rule_based_reasons) you can corroborate or contradict — explain disagreements explicitly.
-- Dollar amounts are intentionally absent to prevent dollar-bias; assess on operational fundamentals only.
+# Context: How KDC operates
+- Beauty products distribution, primarily wholesale to retailers + DTC consumer shipments
+- Target SLA: D+1 ship confirm from order received
+- Carriers: UPS (parcel, calendar-day lead time by zone) and TRUCK (LTL, business-day lead time)
+- Channels: BS-IVY (institutional buyers), BS-RED (retail), VIVACE (consumer/DTC)
+- SCALE trailing_status codes:
+  - <500: Order received, planning
+  - 500-699: Picking / packing in progress
+  - 700: Ship Confirm Pending (containers manifested, awaiting confirmation)
+  - 800: Load Confirm Pending (in transit to carrier)
+  - 900: Closed (delivered or finalized)
+- Operations team: 1 shift Mon-Fri 6am-3pm ET
+- UPS pickup window: typically 2pm-4pm ET
+- Friday afternoon orders often don't ship until Monday
 
-For each order produce:
-- risk_score (0-100, your own assessment)
-- risk_level: Low (0-30), Medium (31-65), High (66-100)
-- predicted_delay_hours: integer hours past SLA (0 if on-track)
-- confidence_pct: 0-100, your confidence
-- key_factors: 2-4 concrete reasons citing the order's actual data (state, carrier, cycle hours, manifest count, etc.)
-- recommended_action: one concrete operational step Ops can take in the next shift
+# Your analytical framework
+For each order, apply these analysis layers (deepest first):
 
-Orders (JSON):
+## 1. Root cause analysis (5 Whys)
+Don't just describe what's wrong — ask WHY.
+Bad:  "Status 700 with 0 manifested containers"
+Good: "Status 700 + 0/3 manifested suggests pick failure (not transit failure). Compare to typical 8h pick time; this DO has been 16h in queue → likely SKU stock issue or floor team capacity at pick zone."
+
+## 2. Pattern recognition
+Use the context object to compare this order to:
+- Other open orders in the same cohort (which ones share characteristics?)
+- Recent trends by state, channel, carrier
+- Customer-level patterns (this customer's other open orders?)
+
+If you see a pattern affecting multiple orders, FLAG IT EXPLICITLY in key_factors as "Pattern: ..." prefix.
+
+## 3. Containment vs investigation
+Distinguish actions:
+- Containment: stop the immediate impact (force ship confirm, swap carrier, expedite, contact customer)
+- Investigation: understand why (RCA, process review)
+For URGENT orders, prioritize containment in containment_action.
+
+## 4. Specific, attributable actions
+Every containment_action must specify:
+- WHO: role (Floor Supervisor / Pick Lead / CS Lead / Operations Manager / Carrier Dispatcher)
+- WHAT: concrete activity (not "monitor" or "investigate" alone)
+- WHEN: timeframe (next 2 hours / before EOD / by tomorrow morning)
+- WHERE/WHICH: specific location/order/customer when relevant
+
+Bad:  "Investigate the delay"
+Good: "Floor Supervisor: walk pick zone 3 NOW to verify SKU availability for DO 0801964096 — if stock issue confirmed, alert inventory team for cross-warehouse pull"
+
+## 5. Confidence calibration
+Lower confidence_pct when:
+- Limited context to determine root cause
+- Pattern ambiguous (1 order vs many)
+- Multiple plausible causes
+Higher confidence_pct when:
+- Clear root cause signal (e.g., status stuck + manifested containers)
+- Strong pattern (multiple orders same state/carrier showing same symptom)
+
+If confidence is low (<50%), explicitly say so in key_factors and recommend data gathering as first step.
+
+# Output schema (per order)
+{
+  do_num: <echo from input>,
+  risk_score: <0-100>,
+  risk_level: "Low" | "Medium" | "High",
+  predicted_delay_hours: <integer, hours past SLA when delivery is expected>,
+  confidence_pct: <0-100>,
+  probable_root_cause: <1-sentence root cause hypothesis, e.g., "Floor team capacity at pick zone — 0/3 manifested after 16h queue time">,
+  pattern_observation: <string or empty. If you see this order shares characteristics with multiple others in the cohort, describe the pattern. e.g., "3 orders to MI today all stuck at status 700 — possible carrier pickup issue". Empty string if this order is isolated.>,
+  key_factors: [<3-5 strings, each citing specific data + reasoning. Use "Pattern: ..." prefix when applicable.>],
+  containment_action: {
+    who: <role>,
+    what: <specific action>,
+    when: <timeframe>,
+    where: <location/order if relevant, else empty string>
+  },
+  investigation_action: <optional string — investigative follow-up that addresses root cause longer-term. Empty string if containment is sufficient.>,
+  stakeholders_to_notify: [<roles or specific people who should be aware. Often "CS Lead" if customer impact is likely. Empty array if none.>]
+}
+
+# Anti-patterns (avoid these)
+- Don't just restate input data ("status is 700" ← we know that)
+- Don't recommend "monitor" alone — that's not an action
+- Don't claim patterns without 2+ orders supporting them
+- Don't fabricate numbers (only cite what's in input or context)
+- Don't be vague about who acts ("the team" ← which team?)
+
+# The orders to analyze:
 ${JSON.stringify(sanitizedOrders, null, 2)}
 
-Return a JSON array, one object per do_num, in the same order as input.`;
+# Operational context (last 7 days):
+${JSON.stringify(context, null, 2)}
 
-  // 30s timeout via Promise.race — @google/genai SDK doesn't expose
+Return a JSON array, one analysis per order, in the same order as input. Apply the analytical framework above. Be specific, evidence-based, and action-oriented. If you'd genuinely say "I don't know," express it as low confidence rather than fabricating.`;
+
+  // 120s timeout via Promise.race — @google/genai SDK doesn't expose
   // a per-call timeout, so wrap the call and reject on the deadline.
+  // Tuned 30s → 60s → 120s during PR AI-Phase1C. Latency measurement
+  // on a representative 10-order batch with the expanded prompt+schema
+  // came in at ~87s (.git/ai-test-* harness, not committed). 120s gives
+  // ~38% headroom for variance. Sample size top-10 retained because
+  // pattern_observation needs multi-order cohort visibility (verified
+  // MI cluster detection in the same measurement run).
+  // User-triggered button — UX cost of the wait is acceptable.
   const callGemini = genai.models.generateContent({
     model: 'gemini-2.5-flash',
     contents: prompt,
     config: {
       responseMimeType: 'application/json',
+      // PR AI-Phase1C: schema extended for deeper structured output.
+      // probable_root_cause + containment_action become the new
+      // primary surfaces; pattern_observation / investigation_action /
+      // stakeholders_to_notify are emit-when-applicable.
+      // Optional string fields use empty-string sentinel (frontend
+      // uses falsy check) rather than nullable, since SDK nullable
+      // support across response_schema variants is inconsistent.
       responseSchema: {
         type: 'array',
         items: {
@@ -1457,16 +1548,37 @@ Return a JSON array, one object per do_num, in the same order as input.`;
             risk_level: { type: 'string', enum: ['Low', 'Medium', 'High'] },
             predicted_delay_hours: { type: 'integer' },
             confidence_pct: { type: 'integer', minimum: 0, maximum: 100 },
+            probable_root_cause: { type: 'string' },
+            pattern_observation: { type: 'string' },
             key_factors: { type: 'array', items: { type: 'string' } },
-            recommended_action: { type: 'string' },
+            containment_action: {
+              type: 'object',
+              properties: {
+                who: { type: 'string' },
+                what: { type: 'string' },
+                when: { type: 'string' },
+                where: { type: 'string' },
+              },
+              required: ['who', 'what', 'when'],
+            },
+            investigation_action: { type: 'string' },
+            stakeholders_to_notify: { type: 'array', items: { type: 'string' } },
           },
-          required: ['do_num', 'risk_score', 'risk_level', 'confidence_pct', 'key_factors', 'recommended_action'],
+          required: [
+            'do_num',
+            'risk_score',
+            'risk_level',
+            'confidence_pct',
+            'probable_root_cause',
+            'key_factors',
+            'containment_action',
+          ],
         },
       },
     },
   });
   const timeout = new Promise((_, reject) =>
-    setTimeout(() => reject(new Error('Gemini API timeout after 30s')), 30000)
+    setTimeout(() => reject(new Error('Gemini API timeout after 120s')), 120000)
   );
 
   try {
