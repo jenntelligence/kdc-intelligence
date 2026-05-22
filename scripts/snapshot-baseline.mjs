@@ -210,8 +210,12 @@ async function main() {
   page.on('pageerror', (err) => console.error('  [page error]', err.message));
   page.on('console', (msg) => {
     const t = msg.type();
-    if (t === 'error' || t === 'warning') {
-      console.error(`  [console ${t}]`, msg.text());
+    // DIAGNOSE: capture all console output, including info/log
+    if (t === 'error' || t === 'warning' || t === 'log') {
+      const text = msg.text();
+      // Skip noisy ResponsiveContainer warning
+      if (text.includes('ResponsiveContainer')) return;
+      console.error(`  [console ${t}]`, text.slice(0, 200));
     }
   });
   // Track every request to localhost:3001 so we can see if the hook fetch
