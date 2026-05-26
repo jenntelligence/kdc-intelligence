@@ -2054,7 +2054,7 @@ const AIRiskPage = ({ filtered: _mockFiltered, data: _mockData }) => {
                       <span className="text-[#2ECC71]">On-track</span>
                     )}
                   </td>
-                  <td className="py-2 font-mono text-right">${fmtNum(o.orderValue.toFixed(0))}</td>
+                  <td className="py-2 font-mono text-right">{o.orderValue != null ? '$' + fmtNum(Math.round(Number(o.orderValue))) : '—'}</td>
                   <td className="py-2 text-center">
                     {o.risk.riskLevel === 'High' && (
                       <button onClick={(e) => { e.stopPropagation(); setSelectedOrder(o); }}
