@@ -208,6 +208,25 @@ const OverviewPage = ({
     // billed yet; Number(...) || 0 collapses both null and NaN to 0.
     const sumValue = (rows) => rows.reduce((s, r) => s + (Number(r.orderValue) || 0), 0);
 
+    // Backorder aggregates — DO count is per-DO (each DO with backorder is a
+    // row in the Detail Table); SO-level dedupe applied to $/Q totals so a
+    // single SO that split into multiple DOs doesn't double-count. The
+    // backorder_agg CTE pre-aggregated per Sales_document, so every DO of
+    // the same SO carries identical backorderValue/backorderQty values.
+    const seenBackorderSO = new Set();
+    let backorderDOCount = 0;
+    let backorderTotalValue = 0;
+    let backorderTotalQty = 0;
+    for (const r of pageData) {
+      if (!r.hasBackorder) continue;
+      backorderDOCount++;
+      if (r.so_num && !seenBackorderSO.has(r.so_num)) {
+        seenBackorderSO.add(r.so_num);
+        backorderTotalValue += Number(r.backorderValue) || 0;
+        backorderTotalQty   += Number(r.backorderQty)   || 0;
+      }
+    }
+
     return {
       total,
       shippedCount:       shipped.length,
@@ -229,6 +248,10 @@ const OverviewPage = ({
       // Delayed Deliveries KPI, so the count and the dollar figure agree.
       delayedDollars:      sumValue(deliveredDelayed),
       splitDollars:        sumValue(splitRows),
+      backorderDOCount,
+      backorderSOCount:    seenBackorderSO.size,
+      backorderTotalValue,
+      backorderTotalQty,
     };
   }, [pageData, aggregatedPageData]);
 
@@ -278,7 +301,7 @@ const OverviewPage = ({
           { key: 'delayed',      label: 'Delayed Deliveries',   value: fmtNum(m.deliveredDelayed),               delta: `${fmtPct(m.deliveredDelayed/(m.deliveredCount||1))} of ${fmtNum(m.deliveredCount)} delivered`, deltaType: 'bad',              icon: AlertTriangle },
           { key: 'split',        label: 'Split Shipment',       value: fmtPct(m.splitPct),                       delta: `${fmtNum(m.splitCount)} of ${fmtNum(m.splitSettledCount)} settled UPS`, deltaType: 'bad',              icon: Split },
           { key: 'damage',       label: 'Damage / Problem',     value: '—',                                      delta: 'Coming in Phase C',                                  deltaType: 'neutral',                                  icon: AlertTriangle },
-          { key: 'backorder',    label: 'In-Stock Backorders',  value: '—',                                      delta: 'Coming in Phase C',                                  deltaType: 'neutral',                                  icon: Package },
+          { key: 'backorder',    label: 'In-Stock Backorders',  value: fmtNum(m.backorderDOCount),               delta: `${fmtNum(m.backorderSOCount)} unique SOs · $${fmtNum(Math.round(m.backorderTotalValue))} short`, deltaType: m.backorderDOCount > 0 ? 'bad' : 'neutral',  icon: Package },
         ];
 
         const dollarCards = [
@@ -288,7 +311,7 @@ const OverviewPage = ({
           { key: 'delayed',      label: '$ at Risk (Delayed)',    value: `$${fmtNum(Math.round(m.delayedDollars))}`,      delta: `${fmtNum(m.deliveredDelayed)} delayed`,  deltaType: 'bad',     icon: DollarSign },
           { key: 'split',        label: 'Split Volume',           value: `$${fmtNum(Math.round(m.splitDollars))}`,        delta: `${fmtNum(m.splitCount)} split DOs`,      deltaType: 'bad',     icon: DollarSign },
           { key: 'damage',       label: 'Damage Chargebacks',     value: '—',                                              delta: 'Coming in Phase C',                      deltaType: 'neutral', icon: DollarSign },
-          { key: 'backorder',    label: 'Backorder Value',        value: '—',                                              delta: 'Coming in Phase C',                      deltaType: 'neutral', icon: DollarSign },
+          { key: 'backorder',    label: 'Backorder Value',        value: `$${fmtNum(Math.round(m.backorderTotalValue))}`, delta: `${fmtNum(m.backorderTotalQty)} units short`, deltaType: m.backorderTotalValue > 0 ? 'bad' : 'neutral', icon: DollarSign },
         ];
 
         return (
@@ -441,9 +464,27 @@ const OverviewPage = ({
             title: 'Damage / Problem Shipments',
             placeholder: 'Damage tracking requires raid type mapping from Smartsheet — coming in Phase C.',
           },
+          // BACKORDER — DOs with at least one shortage row in the cohort
+          // (company 1100/1400/1900, Domestic, reason 10/30/31). Sorted by
+          // $ short descending. Promise Deliver computed via shared
+          // getExpectedDeliveryDate utility (carrier rules + state lead time).
           'backorder': {
             title: 'In-Stock Backorders (Past Due)',
-            placeholder: 'Backorder detection requires separate logic — coming in Phase C.',
+            filter: (r) => r.hasBackorder,
+            cols: ['do_num', 'customer', 'channel', 'carrier', 'state',
+                   '_promiseDeliver', 'backorderValue', 'backorderQty', '_skuCount'],
+            formatRow: (r) => {
+              const exp = getExpectedDeliveryDate(r);
+              const skuCount = Array.isArray(r.backorders) ? r.backorders.length : 0;
+              return {
+                ...r,
+                _promiseDeliver: exp
+                  ? exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+                  : '—',
+                _skuCount: `${skuCount} SKU${skuCount === 1 ? '' : 's'}`,
+              };
+            },
+            sort: (a, b) => (Number(b.backorderValue) || 0) - (Number(a.backorderValue) || 0),
           },
         };
 
@@ -483,6 +524,10 @@ const OverviewPage = ({
           _status: 'Status',
           _daysLate: 'Days Late',
           _containerCount: 'Containers',
+          _promiseDeliver: 'Promise Deliver',
+          backorderValue: 'Backorder $',
+          backorderQty: 'Backorder Qty',
+          _skuCount: 'SKUs',
         };
 
         return (
@@ -507,7 +552,8 @@ const OverviewPage = ({
                             val = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
                           }
                         }
-                        if (c === 'orderValue') val = (val == null) ? '—' : '$' + Math.round(Number(val) || 0).toLocaleString();
+                        if (c === 'orderValue' || c === 'backorderValue') val = (val == null) ? '—' : '$' + Math.round(Number(val) || 0).toLocaleString();
+                        if (c === 'backorderQty') val = (val == null) ? '—' : Number(val).toLocaleString();
                         if (c === 'splitReason') val = val ? (ROOT_CAUSE_LABELS[val] || val) : '—';
                         if (c === '_status') return (
                           <td key={c} className="py-2 pr-4">

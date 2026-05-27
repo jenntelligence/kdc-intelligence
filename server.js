@@ -375,6 +375,14 @@ function toFactShape(row) {
     // One of: WAVE_LEVEL_SPLIT, MANIFEST_LEVEL_SPLIT, ZONE_LEVEL_SPLIT,
     // UPS_TRAILER_SPLIT, UNCLASSIFIED_SPLIT.
     split_root_cause: row.SPLIT_ROOT_CAUSE,
+
+    // Backorder (backorder_agg CTE; per-SO, propagated to every container
+    // row of the DO via final's LEFT JOIN). All three fields are null when
+    // the SO has no backorder in the cohort. backorder_skus is parsed by
+    // snowflake-sdk as an Array<{sku, material, qty, value}>.
+    backorder_qty: row.BACKORDER_QTY,
+    backorder_value: row.BACKORDER_VALUE,
+    backorder_skus: row.BACKORDER_SKUS,
   };
 }
 
@@ -1084,6 +1092,34 @@ with base as (
     from sap_bw.l0.stage_ztshstus
     group by 1, 2
 )
+, backorder_agg as (
+    -- Backorder cohort per user spec: company 1100/1400/1900, Domestic
+    -- (Customer_group_key = 'TR'), reason_for_rejection 10/30/31, with
+    -- SHORTAGE(Q) > 0. Pre-aggregate at Sales_document level so the
+    -- master LEFT JOIN stays 1:1 with the SO and we can embed the SKU
+    -- list as an ARRAY of {sku, material, qty, value} objects for
+    -- frontend drill-down.
+    --
+    -- Mapping: master.so_num is 10-char zero-padded ("0002127625");
+    -- kdb.pbi_sf.zsd_c13."Sales_document" is unpadded ("2127625").
+    -- Final CTE join uses ltrim(b.so_num, '0') = ba.so_doc.
+    select
+        "Sales_document" as so_doc,
+        sum("SHORTAGE(Q)") as backorder_qty,
+        sum("SHORTAGE($)") as backorder_value,
+        array_agg(object_construct(
+            'sku',      "Material_key",
+            'material', "Material",
+            'qty',      "SHORTAGE(Q)",
+            'value',    "SHORTAGE($)"
+        )) as backorder_skus
+    from kdb.pbi_sf.zsd_c13
+    where "Sales_Organization_key" in ('1100','1400','1900')
+      and "Customer_group_key" = 'TR'
+      and "Reason_for_rejection_key" in ('10','30','31')
+      and "SHORTAGE(Q)" > 0
+    group by "Sales_document"
+)
 , final as (
     select
         b.company,
@@ -1120,7 +1156,12 @@ with base as (
         b.cust_zipcode,
         b.wave_num,
         ls.internal_launch_num,
-        b.internal_shipment_num
+        b.internal_shipment_num,
+        -- Backorder columns (per-SO; same value across container rows of a DO).
+        -- Adapter (utils/serverRows.js) reads from first row of DO group.
+        ba.backorder_qty,
+        ba.backorder_value,
+        ba.backorder_skus
     from base b
     left join ia_work_instruction ia on b.do_num = ia.do and b.container_id = ia.container_id
     left join ups_data ud on b.tracking_number = ud.tracking_num and b.carrier = 'UPS'
@@ -1132,6 +1173,8 @@ with base as (
     -- join) — same intent here. Verified via code-analyzer review.
     left join truck_data td on ltrim(b.do_num, '0') = td.do_num and b.pro_num = td.pronum and b.carrier = 'TRUCK'
     left join sci.l0.launch_statistics ls on b.launch_num = ls.internal_launch_num
+    -- Backorder per SO. master.so_num is 10-char padded; ba.so_doc is unpadded.
+    left join backorder_agg ba on ltrim(b.so_num, '0') = ba.so_doc
 )
 , do_level as (
     select

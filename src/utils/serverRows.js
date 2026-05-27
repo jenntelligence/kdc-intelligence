@@ -117,6 +117,29 @@ export function serverRowsToShipments(rows) {
       distinctContainers.push({ ...c, deliveryStatus });
     }
 
+    // Backorder — server pre-aggregates per Sales_document in backorder_agg
+    // CTE and propagates the same values across every container row of a
+    // DO (1:1 with the SO). Take from doRow; null when the SO has no
+    // backorder in cohort (company 1100/1400/1900, Customer_group_key = 'TR',
+    // reason 10/30/31). backorder_skus is an Array<{sku, material, qty, value}>
+    // from Snowflake ARRAY_AGG(OBJECT_CONSTRUCT(...)).
+    //
+    // Same SO can split into multiple DOs — each DO carries identical
+    // backorder data. Frontend KPI totals must dedupe by so_num to avoid
+    // double-counting (see OverviewPage liveMetrics).
+    const rawSkus = doRow.backorder_skus;
+    const backorders = Array.isArray(rawSkus)
+      ? rawSkus.map(s => ({
+          sku: s.sku,
+          material: s.material,
+          qty: s.qty != null ? Number(s.qty) : null,
+          value: s.value != null ? Number(s.value) : null,
+        }))
+      : [];
+    const hasBackorder = backorders.length > 0;
+    const backorderQty = doRow.backorder_qty != null ? Number(doRow.backorder_qty) : null;
+    const backorderValue = doRow.backorder_value != null ? Number(doRow.backorder_value) : null;
+
     return {
       // Identifiers
       id: doRow.do_num,
@@ -195,6 +218,14 @@ export function serverRowsToShipments(rows) {
       // closure. UI null-check from PR4b2 handles render fallback to '—'.
       splitGapDays,
       orderValue,
+
+      // Backorder — per-SO data from backorder_agg CTE.
+      // hasBackorder=true when this DO's SO has at least one shortage row
+      // in the cohort. backorders[] is the SKU drill-down list.
+      hasBackorder,
+      backorderQty,
+      backorderValue,
+      backorders,
 
       // Mock-only fields → null in live mode (PR4b2 renders as N/A)
       chargeback: null,
