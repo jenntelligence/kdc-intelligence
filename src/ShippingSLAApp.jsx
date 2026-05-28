@@ -74,6 +74,10 @@ const OverviewPage = ({
   }, [source, hookData, filter, onMetaChange]);
   useEffect(() => () => { if (onMetaChange) onMetaChange(null); }, [onMetaChange]);
 
+  // Backorder Detail Table (Q1=B special path): which SO row is expanded for
+  // SKU drill-down. OverviewPage-local; only the backorder render reads it.
+  const [expandedSO, setExpandedSO] = useState(null);
+
   // PR Overview-A hotfix: sample-order filter intentionally omitted to match
   // Geographic page's cohort. Verified: 2 sample-order DOs (VIVACE NJ + VIVACE
   // MI) were fully-delivered + delayed in the May 13-20 test window — exactly
@@ -471,20 +475,12 @@ const OverviewPage = ({
           'backorder': {
             title: 'In-Stock Backorders (Past Due)',
             filter: (r) => r.hasBackorder,
-            cols: ['do_num', 'customer', 'channel', 'carrier', 'state',
-                   '_promiseDeliver', 'backorderValue', 'backorderQty', '_skuCount'],
-            formatRow: (r) => {
-              const exp = getExpectedDeliveryDate(r);
-              const skuCount = Array.isArray(r.backorders) ? r.backorders.length : 0;
-              return {
-                ...r,
-                _promiseDeliver: exp
-                  ? exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
-                  : '—',
-                _skuCount: `${skuCount} SKU${skuCount === 1 ? '' : 's'}`,
-              };
-            },
-            sort: (a, b) => (Number(b.backorderValue) || 0) - (Number(a.backorderValue) || 0),
+            // Q1=B special path: rendered SO-grouped with SKU drill-down (see
+            // groupBackordersBySO + the isBackorder branch below). `cols` drives
+            // only the <thead> labels here; formatRow/sort are handled inline in
+            // the special path, so they're intentionally omitted.
+            cols: ['so_num', '_doCount', 'customer', 'channel', 'carrier', 'state',
+                   '_promiseDeliver', 'backorderValue', 'backorderQty'],
           },
         };
 
@@ -501,11 +497,52 @@ const OverviewPage = ({
           );
         }
 
-        const rows = aggregatedPageData
-          .filter(cfg.filter)
-          .map(cfg.formatRow)
-          .sort(cfg.sort || (() => 0))
-          .slice(0, 50);
+        // Q1=B: backorder is the only metric rendered SO-grouped + expandable.
+        // The else-branch below is byte-identical to the original pipeline, so
+        // the other 4 metrics (cycle/split/delayed/daysLate) are unaffected.
+        const isBackorder = selectedMetric === 'backorder';
+
+        // OverviewPage-inline (Q2): group hasBackorder DO rows by SO. Backorder
+        // $/Q are per-SO (identical across a SO's DOs), so we read them from the
+        // first row — never summed — which is why the total can't double-count.
+        const groupBackordersBySO = (groupRows) => {
+          const bySO = new Map();
+          for (const gr of groupRows) {
+            if (!bySO.has(gr.so_num)) bySO.set(gr.so_num, { so_num: gr.so_num, rows: [] });
+            bySO.get(gr.so_num).rows.push(gr);
+          }
+          return Array.from(bySO.values()).map(({ so_num, rows: soRows }) => {
+            const first = soRows[0];
+            // Domain invariant: a single SO ships on one carrier / to one state.
+            // Surface violations to dev console AND operator UI ("⚠️ Mixed").
+            const carriers = new Set(soRows.map(x => x.carrier).filter(Boolean));
+            if (carriers.size > 1) console.warn(`[backorder] Invariant violation: SO ${so_num} has mixed carriers:`, Array.from(carriers));
+            const states = new Set(soRows.map(x => x.state).filter(Boolean));
+            if (states.size > 1) console.warn(`[backorder] Invariant violation: SO ${so_num} has mixed states:`, Array.from(states));
+            return {
+              so_num,
+              doCount: soRows.length,
+              customer: first.customer,
+              channel: first.channel,
+              carrier: carriers.size > 1 ? `⚠️ Mixed: ${Array.from(carriers).join('/')}` : first.carrier,
+              state: states.size > 1 ? `⚠️ Mixed: ${Array.from(states).join('/')}` : first.state,
+              backorderValue: first.backorderValue,
+              backorderQty: first.backorderQty,
+              backorders: first.backorders,
+              _representativeRow: first,
+            };
+          });
+        };
+
+        const rows = isBackorder
+          ? groupBackordersBySO(aggregatedPageData.filter(cfg.filter))
+              .sort((a, b) => (Number(b.backorderValue) || 0) - (Number(a.backorderValue) || 0))
+              .slice(0, 50)
+          : aggregatedPageData
+              .filter(cfg.filter)
+              .map(cfg.formatRow)
+              .sort(cfg.sort || (() => 0))
+              .slice(0, 50);
 
         const colLabels = {
           do_num: 'DO #',
@@ -528,6 +565,8 @@ const OverviewPage = ({
           backorderValue: 'Backorder $',
           backorderQty: 'Backorder Qty',
           _skuCount: 'SKUs',
+          so_num: 'SO #',
+          _doCount: 'DO Count',
         };
 
         return (
@@ -540,7 +579,60 @@ const OverviewPage = ({
                   </tr>
                 </thead>
                 <tbody>
-                  {rows.map((r, i) => (
+                  {isBackorder ? rows.map((r) => (
+                    <React.Fragment key={r.so_num}>
+                      {/* Parent SO row — mirrors SplitShipmentPage parent shipment
+                          row: ▼/▶ prefix in the first cell, teal highlight while
+                          expanded. Carrier/State turn amber on "⚠️ Mixed" invariant. */}
+                      <tr
+                        onClick={() => setExpandedSO(expandedSO === r.so_num ? null : r.so_num)}
+                        className="cursor-pointer transition-colors"
+                        style={{ borderTop: '1px solid var(--border)', background: expandedSO === r.so_num ? '#1ABC9C10' : 'transparent' }}
+                      >
+                        <td className="py-2.5 pr-3 font-mono font-semibold" style={{ color: 'var(--text-primary)' }}>
+                          <span className="mr-1.5">{expandedSO === r.so_num ? '▼' : '▶'}</span>{r.so_num}
+                        </td>
+                        <td className="py-2.5 pr-3 font-mono" style={{ color: 'var(--text-primary)' }}>{r.doCount}</td>
+                        <td className="py-2.5 pr-3" style={{ color: 'var(--text-primary)' }}>{r.customer ?? '—'}</td>
+                        <td className="py-2.5 pr-3">
+                          {(() => {
+                            const cc = getChannelColor(r.channel || '');
+                            return <span className="text-[10px] px-1.5 py-0.5 rounded font-mono" style={{ background: cc + '20', color: cc }}>{r.channel ?? '—'}</span>;
+                          })()}
+                        </td>
+                        <td className="py-2.5 pr-3 font-mono" style={{ color: (typeof r.carrier === 'string' && r.carrier.startsWith('⚠️')) ? '#f5a623' : 'var(--text-primary)' }}>{r.carrier ?? '—'}</td>
+                        <td className="py-2.5 pr-3 font-mono" style={{ color: (typeof r.state === 'string' && r.state.startsWith('⚠️')) ? '#f5a623' : 'var(--text-primary)' }}>{r.state ?? '—'}</td>
+                        <td className="py-2.5 pr-3 font-mono" style={{ color: 'var(--text-primary)' }}>
+                          {(() => {
+                            const exp = getExpectedDeliveryDate(r._representativeRow);
+                            return exp ? exp.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }) : '—';
+                          })()}
+                        </td>
+                        <td className="py-2.5 pr-3 text-right font-mono" style={{ color: 'var(--text-primary)' }}>{r.backorderValue == null ? '—' : '$' + fmtNum(Math.round(Number(r.backorderValue) || 0))}</td>
+                        <td className="py-2.5 pr-3 text-right font-mono" style={{ color: 'var(--text-primary)' }}>{r.backorderQty == null ? '—' : fmtNum(Number(r.backorderQty) || 0)}</td>
+                      </tr>
+
+                      {/* Expanded SKU rows — mirrors SplitShipmentPage container
+                          rows: tree connector (├─/└─), zebra stripe, left teal
+                          border. No alert banner (no split-day concept here).
+                          Columns align under the parent: SKU→SO#, Material→DO Count,
+                          empty colSpan over customer..promise, $→Backorder $, Qty→Backorder Qty. */}
+                      {expandedSO === r.so_num && Array.isArray(r.backorders) && r.backorders.map((s, si) => {
+                        const isLastSku = si === r.backorders.length - 1;
+                        return (
+                          <tr key={(s.sku ?? 'sku') + '-' + si} style={{ background: si % 2 === 0 ? 'var(--bg-panel-alt)' : 'transparent', borderLeft: '3px solid #1ABC9C' }}>
+                            <td className="py-2 pr-3 pl-8 font-mono text-[11px]" style={{ color: 'var(--text-secondary)' }}>
+                              <span style={{ color: 'var(--text-muted)' }}>{isLastSku ? '└─' : '├─'}</span> {s.sku ?? '—'}
+                            </td>
+                            <td className="py-2 pr-3 text-[11px]" style={{ color: 'var(--text-primary)' }}>{s.material ?? '—'}</td>
+                            <td colSpan={5} />
+                            <td className="py-2 pr-3 text-right font-mono text-[11px]" style={{ color: 'var(--text-primary)' }}>{s.value == null ? '—' : '$' + fmtNum(Math.round(Number(s.value) || 0))}</td>
+                            <td className="py-2 pr-3 text-right font-mono text-[11px]" style={{ color: 'var(--text-primary)' }}>{s.qty == null ? '—' : fmtNum(Number(s.qty) || 0)}</td>
+                          </tr>
+                        );
+                      })}
+                    </React.Fragment>
+                  )) : rows.map((r, i) => (
                     <tr key={r.do_num + '-' + i} style={{ borderTop: '1px solid var(--border)' }}>
                       {cfg.cols.map(c => {
                         let val = r[c];
