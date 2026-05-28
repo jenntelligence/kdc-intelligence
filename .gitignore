@@ -37,6 +37,7 @@ smoke_hotfix.json
 .claude/
 docs/.bkit-memory.json
 docs/.pdca-status.json
+memory/
 
 # Refactor baseline snapshots — local verification artifacts only
 snapshots/
