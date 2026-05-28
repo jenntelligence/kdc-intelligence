@@ -4,7 +4,7 @@
  * Lightweight Express server that proxies Snowflake queries.
  * Uses Manhattan Active SCALE semantic views from kdc_intelligence_foundation.sql.
  *
- * Data source: SCI.PUBLIC — SCALE replicated to Snowflake
+ * Data source: SCI.L0 — SCALE replicated to Snowflake
  * Views: V_SHIPMENT, V_SHIPMENT_DETAIL, V_SHIPPING_CONTAINER, V_WORK_INSTRUCTION,
  *        V_QC_EVENT, V_WAVE, V_CARRIER, V_CONSOL_LOCATION
  *        VOP_*, VPROD_*, VEXC_* (operational, productivity, exception layers)
@@ -190,7 +190,7 @@ app.get('/api/snowflake/config', (_req, res) => {
 
 // ════════════════════════════════════════════════════════════════════════════
 // SCALE RAW TABLE ENDPOINTS
-// Queries against SCI.PUBLIC.SHIPMENT_HEADER, SCI.L0.LAUNCH_STATISTICS, etc.
+// Queries against SCI.L0.SHIPMENT_HEADER, SCI.L0.LAUNCH_STATISTICS, etc.
 // Semantic views (V_*, VOP_*, VPROD_*, VEXC_*) not yet created in Snowflake.
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -398,12 +398,12 @@ app.get('/api/scale/lifecycle-heatmap', async (_req, res) => {
         ${LIFECYCLE_STAGE_EXPR} AS LIFECYCLE_STAGE,
         COUNT(DISTINCT SHIPMENT_ID) AS SHIPMENT_COUNT,
         SUM(CASE WHEN DATEDIFF('HOUR', DATE_TIME_STAMP, CURRENT_TIMESTAMP()) > 24 THEN 1 ELSE 0 END) AS STUCK_COUNT
-      FROM SCI.PUBLIC.SHIPMENT_HEADER
+      FROM SCI.L0.SHIPMENT_HEADER
       WHERE WAREHOUSE = 'KDCGA1' AND IN_DELETION = 'N' AND TRAILING_STS < 900
       GROUP BY COMPANY_NAME, SALES_ORG, LIFECYCLE_STAGE
       ORDER BY COMPANY_NAME, LIFECYCLE_STAGE
     `);
-    res.json({ success: true, data: rows, source: 'snowflake', table: 'SCI.PUBLIC.SHIPMENT_HEADER' });
+    res.json({ success: true, data: rows, source: 'snowflake', table: 'SCI.L0.SHIPMENT_HEADER' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -457,14 +457,14 @@ app.get('/api/scale/otd', async (_req, res) => {
         COUNT(DISTINCT SHIPMENT_ID) AS SHIPMENTS,
         SUM(CASE WHEN ACTUAL_SHIP_DATE_TIME::DATE <= REQUESTED_DELIVERY_DATE::DATE THEN 1 ELSE 0 END) AS ON_TIME,
         ROUND(100.0 * SUM(CASE WHEN ACTUAL_SHIP_DATE_TIME::DATE <= REQUESTED_DELIVERY_DATE::DATE THEN 1 ELSE 0 END) / NULLIF(COUNT(DISTINCT SHIPMENT_ID), 0), 1) AS OTD_PCT
-      FROM SCI.PUBLIC.SHIPMENT_HEADER
+      FROM SCI.L0.SHIPMENT_HEADER
       WHERE WAREHOUSE = 'KDCGA1' AND IN_DELETION = 'N' AND TRAILING_STS >= 800
         AND ACTUAL_SHIP_DATE_TIME IS NOT NULL AND REQUESTED_DELIVERY_DATE IS NOT NULL
         AND ACTUAL_SHIP_DATE_TIME::DATE >= DATEADD('DAY', -30, CURRENT_DATE())
       GROUP BY SHIP_DATE, CARRIER, CARRIER_TYPE, COMPANY_NAME, SALES_ORG
       ORDER BY SHIP_DATE DESC
     `);
-    res.json({ success: true, data: rows, source: 'snowflake', table: 'SCI.PUBLIC.SHIPMENT_HEADER' });
+    res.json({ success: true, data: rows, source: 'snowflake', table: 'SCI.L0.SHIPMENT_HEADER' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -479,13 +479,13 @@ app.get('/api/scale/daily-volume', async (_req, res) => {
         ${COMPANY_NAME_EXPR} AS COMPANY_NAME,
         USER_DEF1 AS SALES_ORG,
         COUNT(DISTINCT SHIPMENT_ID) AS SHIPMENTS
-      FROM SCI.PUBLIC.SHIPMENT_HEADER
+      FROM SCI.L0.SHIPMENT_HEADER
       WHERE WAREHOUSE = 'KDCGA1' AND IN_DELETION = 'N' AND TRAILING_STS >= 800
         AND ACTUAL_SHIP_DATE_TIME::DATE >= DATEADD('DAY', -90, CURRENT_DATE())
       GROUP BY SHIP_DATE, COMPANY_NAME, SALES_ORG
       ORDER BY SHIP_DATE DESC
     `);
-    res.json({ success: true, data: rows, source: 'snowflake', table: 'SCI.PUBLIC.SHIPMENT_HEADER' });
+    res.json({ success: true, data: rows, source: 'snowflake', table: 'SCI.L0.SHIPMENT_HEADER' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -514,14 +514,14 @@ app.get('/api/scale/stuck-shipments', async (_req, res) => {
           WHEN SCHEDULED_SHIP_DATE = CURRENT_DATE() THEN 'SLA_AT_RISK'
           ELSE 'SLOW'
         END AS SEVERITY
-      FROM SCI.PUBLIC.SHIPMENT_HEADER
+      FROM SCI.L0.SHIPMENT_HEADER
       WHERE WAREHOUSE = 'KDCGA1' AND IN_DELETION = 'N'
         AND TRAILING_STS BETWEEN 100 AND 899
         AND DATEDIFF('HOUR', DATE_TIME_STAMP, CURRENT_TIMESTAMP()) > 24
       ORDER BY HOURS_SINCE_LAST_CHANGE DESC
       LIMIT 200
     `);
-    res.json({ success: true, data: rows, source: 'snowflake', table: 'SCI.PUBLIC.SHIPMENT_HEADER' });
+    res.json({ success: true, data: rows, source: 'snowflake', table: 'SCI.L0.SHIPMENT_HEADER' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -575,14 +575,14 @@ app.get('/api/scale/shipments', async (req, res) => {
           CUSTOMER_NAME, SHIP_TO_STATE, SHIP_TO_CITY,
           DATEDIFF('HOUR', DATE_TIME_STAMP, CURRENT_TIMESTAMP()) AS HOURS_SINCE_LAST_CHANGE,
           CREATION_DATE_TIME_STAMP AS CREATE_DATE_TIME
-        FROM SCI.PUBLIC.SHIPMENT_HEADER
+        FROM SCI.L0.SHIPMENT_HEADER
         WHERE ${conditions.join(' AND ')}
       ) sub
       ${havingSql}
       ORDER BY CREATE_DATE_TIME DESC
       LIMIT ${limit}
     `);
-    res.json({ success: true, data: rows, count: rows.length, source: 'snowflake', table: 'SCI.PUBLIC.SHIPMENT_HEADER' });
+    res.json({ success: true, data: rows, count: rows.length, source: 'snowflake', table: 'SCI.L0.SHIPMENT_HEADER' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -796,7 +796,7 @@ app.get('/api/scale/pick-frequency', async (_req, res) => {
     const rows = await executeQuery(`
       SELECT COMPANY, ITEM, LOCATION, WORK_ZONE, PICK_FREQ, ORDER_VOLUME,
         PICK_COUNT, QTY_EA, QTY_IP, LAST_PICK_DATE
-      FROM SCI.PUBLIC.VW_PICK_FREQUENCY
+      FROM SCI.L0.VW_PICK_FREQUENCY
       ORDER BY PICK_COUNT DESC
       LIMIT 500
     `);
