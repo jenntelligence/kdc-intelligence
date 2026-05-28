@@ -1835,7 +1835,7 @@ const AIRiskPage = ({ filtered: _mockFiltered, data: _mockData }) => {
       {/* Detail modal with CS handoff */}
       {selectedOrder && (
         <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-8" onClick={() => setSelectedOrder(null)}>
-          <div className="bg-[#1a2129] border border-[#2d3744] rounded-lg max-w-3xl w-full p-6" onClick={e => e.stopPropagation()}>
+          <div className="bg-[#1a2129] border border-[#2d3744] rounded-lg max-w-3xl w-full p-6 max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
             <div className="flex items-start justify-between mb-4">
               <div>
                 <div className="text-[11px] uppercase tracking-wider text-[#5d6b7a] font-mono flex items-center gap-2">
