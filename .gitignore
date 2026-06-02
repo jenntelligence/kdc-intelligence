@@ -46,3 +46,8 @@ snapshots/
 Thumbs.db
 .idea/
 *.swp
+
+# Power BI PBIP design export — large (5MB+) with a locked binary cache;
+# the readable INBOUND_OPS_PBIP_ANALYSIS.md doc is kept in the repo instead.
+docs/design-docs/inbound-ops-pbip/
+*.abf

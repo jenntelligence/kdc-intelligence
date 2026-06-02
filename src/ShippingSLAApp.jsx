@@ -36,6 +36,7 @@ import { KPI } from './components/common/KPI.jsx';
 import { SearchableDropdown } from './components/common/SearchableDropdown.jsx';
 import { SectionCard } from './components/common/SectionCard.jsx';
 import { useSplitShipments } from './hooks/useSplitShipments.js';
+import { useInboundOps, URGENCY_ORDER, URGENCY_COLOR, URGENCY_TIERS, ymd } from './hooks/useInboundOps.js';
 
 // ============================================================
 // OVERVIEW PAGE — Executive dashboard
@@ -4801,74 +4802,568 @@ const AdminSLAPage = ({ channelSlas, setChannelSlas, kpiTargets, setKpiTargets, 
 // ============================================================
 // INBOUND PAGE
 // ============================================================
-const InboundPage = () => {
-  const activeDocks = MOCK_DOCKS.filter(d => d.status === 'UNLOADING' || d.status === 'LOADING').length;
-  const totalReceived = MOCK_RECEIVING_QUEUE.reduce((s, r) => s + r.receivedQty, 0);
-  const totalExpected = MOCK_RECEIVING_QUEUE.reduce((s, r) => s + r.expectedQty, 0);
-  const recvAccuracy = totalExpected ? ((1 - Math.abs(totalReceived - totalExpected) / totalExpected) * 100).toFixed(1) : '100.0';
+// ============================================================
+// IN-TRANSIT SECTION (Inbound Ops § ②) — PBIP "In-Transit" page
+// ============================================================
+// Filter rail (7 slicers) + "# of Containers" + ETA combo chart + Inbound
+// Schedule grid + vessel locations. Operates on ALL In-Transit shipments —
+// independent of the Today/Tomorrow tab in § ①.
+const InTransitSection = ({ shipments, vessels, loading }) => {
+  const [f, setF] = useState({ company: '', container: '', destination: '', mode: '', trucker: '', vessel: '', eta: '' });
+  const set = (k) => (v) => setF((prev) => ({ ...prev, [k]: v === 'All' ? '' : v }));
+  const clearAll = () => setF({ company: '', container: '', destination: '', mode: '', trucker: '', vessel: '', eta: '' });
+  const fmtInt = (n) => (Number(n) || 0).toLocaleString('en-US');
 
-  const statusColors = { AVAILABLE: '#2ECC71', UNLOADING: '#1ABC9C', LOADING: '#f5a623', SCHEDULED: '#8a95a3', MAINTENANCE: '#E74C6F' };
+  // vessel name (normalized) → latest port call
+  const portByVessel = useMemo(() => {
+    const m = new Map();
+    for (const v of vessels) {
+      const name = v.vesselName ? String(v.vesselName).trim().toUpperCase() : null;
+      if (name && !m.has(name)) m.set(name, v);
+    }
+    return m;
+  }, [vessels]);
+  const portFor = (vesselName) => portByVessel.get(vesselName ? String(vesselName).trim().toUpperCase() : '') || null;
+
+  // distinct sorted option lists per slicer
+  const opts = useMemo(() => {
+    const uniq = (key) => ['All', ...Array.from(new Set(shipments.map((s) => s[key]).filter((x) => x != null && x !== ''))).map(String).sort()];
+    return {
+      company: uniq('CNEE'), container: uniq('CONTAINER#'), destination: uniq('DESTINATION'),
+      mode: uniq('Mode'), trucker: uniq('Trucking Company'), vessel: uniq('VESSEL'), eta: uniq('kdcEtaAdjusted'),
+    };
+  }, [shipments]);
+
+  const filtered = useMemo(() => shipments.filter((s) =>
+    (!f.company || s.CNEE === f.company) &&
+    (!f.container || s['CONTAINER#'] === f.container) &&
+    (!f.destination || s.DESTINATION === f.destination) &&
+    (!f.mode || s.Mode === f.mode) &&
+    (!f.trucker || s['Trucking Company'] === f.trucker) &&
+    (!f.vessel || s.VESSEL === f.vessel) &&
+    (!f.eta || s.kdcEtaAdjusted === f.eta)
+  ), [shipments, f]);
+
+  const containerCount = useMemo(() => new Set(filtered.map((s) => s['CONTAINER#']).filter(Boolean)).size, [filtered]);
+
+  const scheduleRows = useMemo(() =>
+    [...filtered].sort((a, b) =>
+      String(a.kdcEtaAdjusted || '').localeCompare(String(b.kdcEtaAdjusted || '')) ||
+      String(a['CONTAINER#'] || '').localeCompare(String(b['CONTAINER#'] || ''))),
+    [filtered]);
+
+  // ETA combo chart: per ETA day → distinct containers (bar) + sum pallets (line)
+  const chartData = useMemo(() => {
+    const byDate = new Map();
+    for (const s of filtered) {
+      const d = s.kdcEtaAdjusted; if (!d) continue;
+      let g = byDate.get(d);
+      if (!g) { g = { date: d, _set: new Set(), pallets: 0 }; byDate.set(d, g); }
+      if (s['CONTAINER#']) g._set.add(s['CONTAINER#']);
+      g.pallets += Number(s.Pallet) || 0;
+    }
+    return Array.from(byDate.values())
+      .map((g) => ({ date: g.date, containers: g._set.size, pallets: g.pallets }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+  }, [filtered]);
+
+  // Vessel locations for vessels present in the filtered set
+  const vesselRows = useMemo(() => {
+    const names = new Set(filtered.map((s) => (s.VESSEL ? String(s.VESSEL).trim().toUpperCase() : null)).filter(Boolean));
+    const rows = [];
+    for (const name of names) { const p = portByVessel.get(name); if (p) rows.push(p); }
+    return rows.sort((a, b) => String(a.vesselName || '').localeCompare(String(b.vesselName || '')));
+  }, [filtered, portByVessel]);
+
+  const filterDefs = [
+    ['company', 'Company'], ['container', 'Container'], ['destination', 'Destination'],
+    ['mode', 'Shipment Type'], ['trucker', 'Trucker'], ['vessel', 'Vessel'], ['eta', 'KDC ETA'],
+  ];
+  const anyFilter = Object.values(f).some(Boolean);
+
+  return (
+    <SectionCard title="In-Transit" subtitle={`${fmtInt(containerCount)} container${containerCount === 1 ? '' : 's'} in transit${anyFilter ? ' (filtered)' : ''}`} tag="LIVE">
+      {/* Filter rail */}
+      <div className="flex flex-wrap items-end gap-2 mb-4">
+        {filterDefs.map(([key, label]) => (
+          <div key={key} className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase tracking-[0.1em] font-semibold" style={{ color: 'var(--text-muted)' }}>{label}</span>
+            <SearchableDropdown options={opts[key]} value={f[key] || 'All'} onChange={set(key)} placeholder="All" />
+          </div>
+        ))}
+        {anyFilter && (
+          <button onClick={clearAll} className="text-[12px] font-mono px-3 py-1 rounded self-end" style={{ background: '#A01B2D', color: '#fff' }}>
+            Clear all
+          </button>
+        )}
+      </div>
+
+      {/* ETA combo chart */}
+      {chartData.length > 0 && (
+        <div className="mb-4">
+          <div className="text-[11px] font-mono mb-1" style={{ color: 'var(--text-muted)' }}># Containers (bar) &amp; # Pallets (line) by KDC ETA</div>
+          <ResponsiveContainer width="100%" height={220}>
+            <ComposedChart data={chartData} margin={{ top: 8, right: 16, bottom: 24, left: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#2d3744"/>
+              <XAxis dataKey="date" stroke="#5d6b7a" style={{ fontSize: 9, fontFamily: 'IBM Plex Mono' }} angle={-30} textAnchor="end" height={50}/>
+              <YAxis yAxisId="left" stroke="#5d6b7a" style={{ fontSize: 9, fontFamily: 'IBM Plex Mono' }}/>
+              <YAxis yAxisId="right" orientation="right" stroke="#5d6b7a" style={{ fontSize: 9, fontFamily: 'IBM Plex Mono' }}/>
+              <Tooltip contentStyle={{ background: '#1a2129', border: '1px solid #2d3744', fontSize: 11 }}/>
+              <Legend wrapperStyle={{ fontSize: 11 }}/>
+              <Bar yAxisId="left" dataKey="containers" name="# Containers" fill="#2C3E9B" radius={[3, 3, 0, 0]}/>
+              <Line yAxisId="right" type="monotone" dataKey="pallets" name="# Pallets" stroke="#E87149" strokeWidth={2} dot={{ r: 2 }}/>
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+
+      {/* Inbound Schedule grid */}
+      {loading ? (
+        <div className="py-8 text-center font-mono text-[12px]" style={{ color: 'var(--text-muted)' }}>Loading…</div>
+      ) : scheduleRows.length === 0 ? (
+        <div className="py-8 text-center font-mono text-[12px]" style={{ color: 'var(--text-muted)' }}>No in-transit shipments match.</div>
+      ) : (
+        <div className="overflow-auto" style={{ maxHeight: 480 }}>
+          <table className="w-full text-[12px]">
+            <thead className="sticky top-0 z-10" style={{ background: 'var(--bg-panel-alt)' }}>
+              <tr className="text-left border-b font-mono uppercase text-[10px] tracking-wider" style={{ color: 'var(--text-muted)', borderColor: 'var(--border)' }}>
+                <th className="py-2 pr-3">KDC ETA</th>
+                <th className="py-2 pr-3">Container#</th>
+                <th className="py-2 pr-3 text-right">Pallets</th>
+                <th className="py-2 pr-3">Size</th>
+                <th className="py-2 pr-3">Trucker</th>
+                <th className="py-2 pr-3">Company</th>
+                <th className="py-2 pr-3">Vessel</th>
+                <th className="py-2 pr-3">Dep/Arr</th>
+                <th className="py-2 pr-3">Current Location</th>
+                <th className="py-2 pr-3">Destination</th>
+                <th className="py-2 pr-3 text-right">Purch Grp</th>
+                <th className="py-2 pr-3">HBL</th>
+                <th className="py-2">Invoice#</th>
+              </tr>
+            </thead>
+            <tbody>
+              {scheduleRows.map((s, i) => {
+                const p = portFor(s.VESSEL);
+                return (
+                  <tr key={`${s['CONTAINER#']}-${i}`} className="border-b hover:bg-[#1a2129]" style={{ borderColor: 'var(--border)' }}>
+                    <td className="py-1.5 pr-3 font-mono">{s.kdcEtaAdjusted || '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono">{s['CONTAINER#']}</td>
+                    <td className="py-1.5 pr-3 font-mono text-right">{fmtInt(s.Pallet)}</td>
+                    <td className="py-1.5 pr-3 font-mono" style={{ color: 'var(--text-secondary)' }}>{s['Container Size'] ?? '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono" style={{ color: 'var(--text-secondary)' }}>{s['Trucking Company'] || '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono">{s.CNEE || '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono">{s.VESSEL || '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono" style={{ color: 'var(--text-secondary)' }}>{p ? p.EVENT : '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono" style={{ color: 'var(--text-secondary)' }}>{p ? p.PORT : '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono" style={{ color: 'var(--text-secondary)' }}>{s.DESTINATION || '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono text-right">{s.PGR ?? '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono" style={{ color: 'var(--text-secondary)' }}>{s.HBL || '—'}</td>
+                    <td className="py-1.5 font-mono" style={{ color: 'var(--text-secondary)' }}>{s['INVOICE#'] || '—'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Vessel locations */}
+      {vesselRows.length > 0 && (
+        <div className="mt-4 pt-3 border-t" style={{ borderColor: 'var(--border)' }}>
+          <div className="text-[11px] font-mono mb-2" style={{ color: 'var(--text-muted)' }}>Vessel Locations ({vesselRows.length})</div>
+          <div className="overflow-auto" style={{ maxHeight: 240 }}>
+            <table className="w-full text-[12px]">
+              <thead className="sticky top-0 z-10" style={{ background: 'var(--bg-panel-alt)' }}>
+                <tr className="text-left border-b font-mono uppercase text-[10px] tracking-wider" style={{ color: 'var(--text-muted)', borderColor: 'var(--border)' }}>
+                  <th className="py-2 pr-3">Vessel</th>
+                  <th className="py-2 pr-3">IMO</th>
+                  <th className="py-2 pr-3">Port</th>
+                  <th className="py-2 pr-3">Country</th>
+                  <th className="py-2 pr-3">Event</th>
+                  <th className="py-2">Date</th>
+                </tr>
+              </thead>
+              <tbody>
+                {vesselRows.map((v, i) => (
+                  <tr key={`${v.IMO}-${i}`} className="border-b" style={{ borderColor: 'var(--border)' }}>
+                    <td className="py-1.5 pr-3 font-mono">{v.vesselName || '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono" style={{ color: 'var(--text-secondary)' }}>{v.IMO}</td>
+                    <td className="py-1.5 pr-3 font-mono">{v.PORT || '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono" style={{ color: 'var(--text-secondary)' }}>{v.COUNTRY || '—'}</td>
+                    <td className="py-1.5 pr-3 font-mono" style={{ color: 'var(--text-secondary)' }}>{v.EVENT || '—'}</td>
+                    <td className="py-1.5 font-mono" style={{ color: 'var(--text-secondary)' }}>{v.TIMESTAMP_DATE || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </SectionCard>
+  );
+};
+
+// ============================================================
+// CALENDAR SECTION (Inbound Ops § ③) — PBIP "Calendar" page
+// ============================================================
+// Month grid (per-day Pallets/FCL/LCL tags from dayTotals) + ASN list panel
+// (grouped by ETA date) from /api/inbound/calendar-feed. Clicking a day with
+// data filters the ASN list to that date. React reimplementation of the PBIP
+// DAX-generated HTML panels (*html_calendar / *html_asn_list).
+const CalendarSection = ({ calendar, loading, todayStr }) => {
+  const { asnList = [], dayTotals = {} } = calendar || {};
+  const today = useMemo(() => new Date(todayStr + 'T00:00:00'), [todayStr]);
+  const [view, setView] = useState(() => ({ y: today.getFullYear(), m: today.getMonth() }));
+  const [selDate, setSelDate] = useState(null);
+
+  const fmtInt = (n) => (Number(n) || 0).toLocaleString('en-US');
+  const pad = (n) => String(n).padStart(2, '0');
+  const ymdOf = (y, m, d) => `${y}-${pad(m + 1)}-${pad(d)}`;
+  const monthLabel = new Date(view.y, view.m, 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+
+  const prevMonth = () => { setView((v) => { const d = new Date(v.y, v.m - 1, 1); return { y: d.getFullYear(), m: d.getMonth() }; }); setSelDate(null); };
+  const nextMonth = () => { setView((v) => { const d = new Date(v.y, v.m + 1, 1); return { y: d.getFullYear(), m: d.getMonth() }; }); setSelDate(null); };
+  const goToday = () => { setView({ y: today.getFullYear(), m: today.getMonth() }); setSelDate(null); };
+
+  // 6×7 calendar grid (cells null for padding days)
+  const cells = useMemo(() => {
+    const startDow = new Date(view.y, view.m, 1).getDay();        // 0=Sun
+    const daysInMonth = new Date(view.y, view.m + 1, 0).getDate();
+    const out = [];
+    for (let i = 0; i < startDow; i++) out.push(null);
+    for (let d = 1; d <= daysInMonth; d++) out.push({ d, dateStr: ymdOf(view.y, view.m, d) });
+    while (out.length % 7 !== 0) out.push(null);
+    return out;
+  }, [view]);
+
+  // ASN list for the displayed month (or selected day), grouped by ETA date
+  const monthPrefix = `${view.y}-${pad(view.m + 1)}`;
+  const groupedAsns = useMemo(() => {
+    let rows = asnList.filter((a) => (a.kdcEtaAdjusted || '').startsWith(monthPrefix));
+    if (selDate) rows = rows.filter((a) => a.kdcEtaAdjusted === selDate);
+    const byDate = new Map();
+    for (const a of rows) { const d = a.kdcEtaAdjusted; if (!byDate.has(d)) byDate.set(d, []); byDate.get(d).push(a); }
+    return Array.from(byDate.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  }, [asnList, monthPrefix, selDate]);
+
+  const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const DATE_COLORS = ['#4a9eff', '#E74C6F', '#E87149', '#a78bfa', '#2ECC71', '#f5a623', '#1ABC9C', '#E66C37', '#3498DB', '#8E44AD'];
+
+  return (
+    <SectionCard title="Calendar" subtitle={monthLabel} tag="LIVE">
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
+        <button onClick={prevMonth} className="px-2 py-1 rounded" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)' }}><ChevronLeft size={14} style={{ color: 'var(--text-secondary)' }}/></button>
+        <button onClick={nextMonth} className="px-2 py-1 rounded" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)' }}><ChevronRight size={14} style={{ color: 'var(--text-secondary)' }}/></button>
+        <button onClick={goToday} className="px-3 py-1 rounded text-[12px] font-mono" style={{ background: 'var(--bg-input)', border: '1px solid var(--border)', color: 'var(--text-secondary)' }}>Today</button>
+        {selDate && <button onClick={() => setSelDate(null)} className="px-3 py-1 rounded text-[12px] font-mono" style={{ background: '#A01B2D', color: '#fff' }}>Clear day · {selDate}</button>}
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        {/* Month grid */}
+        <div>
+          <div className="grid grid-cols-7 gap-1 mb-1">
+            {DOW.map((d, i) => (
+              <div key={d} className="text-center text-[10px] font-mono uppercase tracking-wider py-1" style={{ color: i === 0 ? '#E74C6F' : i === 6 ? '#4a9eff' : 'var(--text-muted)' }}>{d}</div>
+            ))}
+          </div>
+          <div className="grid grid-cols-7 gap-1">
+            {cells.map((cell, i) => {
+              if (!cell) return <div key={i} style={{ minHeight: 76 }} />;
+              const t = dayTotals[cell.dateStr];
+              const isToday = cell.dateStr === todayStr;
+              const isSel = cell.dateStr === selDate;
+              const hasData = !!t;
+              return (
+                <div key={i} onClick={() => hasData && setSelDate(isSel ? null : cell.dateStr)}
+                  className="rounded p-1 flex flex-col gap-0.5 transition-colors"
+                  style={{
+                    minHeight: 76,
+                    background: isSel ? 'rgba(160,27,45,0.18)' : isToday ? 'rgba(74,158,255,0.10)' : 'var(--bg-panel)',
+                    border: `1px solid ${isToday ? '#4a9eff' : 'var(--border)'}`,
+                    cursor: hasData ? 'pointer' : 'default',
+                  }}>
+                  <div className="text-[11px] font-mono" style={{ color: isToday ? '#4a9eff' : 'var(--text-secondary)' }}>{cell.d}</div>
+                  {t && (
+                    <div className="flex flex-col gap-0.5">
+                      {t.pallets > 0 && <span className="text-[9px] font-mono px-1 rounded" style={{ background: 'rgba(74,158,255,0.15)', color: '#4a9eff' }}>Plt {fmtInt(t.pallets)}</span>}
+                      {t.fcl > 0 && <span className="text-[9px] font-mono px-1 rounded" style={{ background: 'rgba(46,204,113,0.15)', color: '#2ECC71' }}>FCL {t.fcl}</span>}
+                      {t.lcl > 0 && <span className="text-[9px] font-mono px-1 rounded" style={{ background: 'rgba(232,113,73,0.15)', color: '#E87149' }}>LCL {t.lcl}</span>}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* ASN list */}
+        <div className="overflow-auto" style={{ maxHeight: 520 }}>
+          {loading ? (
+            <div className="py-8 text-center font-mono text-[12px]" style={{ color: 'var(--text-muted)' }}>Loading…</div>
+          ) : groupedAsns.length === 0 ? (
+            <div className="py-8 text-center font-mono text-[12px]" style={{ color: 'var(--text-muted)' }}>No ASNs for {selDate || monthLabel}.</div>
+          ) : groupedAsns.map(([date, rows], gi) => (
+            <div key={date} className="mb-3">
+              <div className="text-[12px] font-mono font-semibold px-2 py-1 rounded mb-1"
+                style={{ background: DATE_COLORS[gi % DATE_COLORS.length] + '22', color: DATE_COLORS[gi % DATE_COLORS.length] }}>
+                {date} · {rows.length} ASN{rows.length === 1 ? '' : 's'}
+              </div>
+              <table className="w-full text-[11px]">
+                <thead>
+                  <tr className="text-left font-mono uppercase text-[9px] tracking-wider" style={{ color: 'var(--text-muted)' }}>
+                    <th className="py-1">ASN</th><th className="py-1">TR ID</th><th className="py-1 text-right">SKUs</th><th className="py-1 text-right">Qty</th><th className="py-1">Vendor</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((a, ri) => (
+                    <tr key={`${a.Delivery}-${a['Container Number']}-${ri}`} className="border-b" style={{ borderColor: 'var(--border)' }}>
+                      <td className="py-1 font-mono">{a.Delivery}</td>
+                      <td className="py-1 font-mono" style={{ color: 'var(--text-secondary)' }}>{a['Container Number']}</td>
+                      <td className="py-1 font-mono text-right">{fmtInt(a.lineItems)}</td>
+                      <td className="py-1 font-mono text-right">{fmtInt(a.totalQty)}</td>
+                      <td className="py-1 font-mono" style={{ color: 'var(--text-secondary)' }}>{a['Vendor name'] || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ))}
+        </div>
+      </div>
+    </SectionCard>
+  );
+};
+
+// ============================================================
+// INBOUND OPS PAGE — ASN dashboard (PBIP rebuild)
+// ============================================================
+// Single-page rebuild of the Power BI "ASN Dashboard" (4 pages → 1 page).
+// Section ① (this build): Today/Tomorrow KPI strip + Receiving Summary table
+// + SKU-detail drawer + urgency legend. Sections ② In-Transit and ③ Calendar
+// are added in subsequent passes. Data via useInboundOps (live-only:
+// Smartsheet shipment master + SAP receiving in Snowflake). See
+// docs/design-docs/INBOUND_OPS_PBIP_ANALYSIS.md.
+const InboundPage = () => {
+  const { shipments, receiving, detail, vessels, calendar, loading, error } = useInboundOps();
+  const [dayTab, setDayTab] = useState('today');     // 'today' | 'tomorrow'
+  const [selected, setSelected] = useState(null);     // { delivery, container } → detail drawer
+
+  const todayStr = ymd(new Date());
+  const tomorrowStr = useMemo(() => { const d = new Date(); d.setDate(d.getDate() + 1); return ymd(d); }, []);
+  const day = dayTab === 'today' ? todayStr : tomorrowStr;
+
+  const fmtInt = (n) => (Number(n) || 0).toLocaleString('en-US');
+
+  const metrics = useMemo(() => {
+    const dayShip = shipments.filter((s) => s.kdcEtaAdjusted === day);
+    const dayRecv = receiving.filter((r) => r.kdcEtaAdjusted === day);
+    const dayDetail = detail.filter((r) => r.kdcEtaAdjusted === day);
+    const distinct = (arr, key) => new Set(arr.map((x) => x[key]).filter(Boolean)).size;
+    const sum = (arr, key) => arr.reduce((a, x) => a + (Number(x[key]) || 0), 0);
+    const isUrgent = (u) => u === 'Urgent' || u === 'Super Urgent';
+    return {
+      asns: distinct(dayRecv, 'Delivery'),
+      trailers: distinct(dayShip, 'CONTAINER#'),
+      fcl: distinct(dayShip.filter((s) => s.Mode === 'FCL'), 'CONTAINER#'),
+      lcl: distinct(dayShip.filter((s) => s.Mode === 'LCL'), 'CONTAINER#'),
+      pallets: sum(dayShip, 'Pallet'),
+      skus: sum(dayRecv, 'Total SKUs'),
+      qty: sum(dayRecv, 'Total Qty'),
+      urgentSkus: dayDetail.filter((r) => isUrgent(r.Urgency)).length,
+      urgentAsns: dayRecv.filter((r) => isUrgent(r.Urgency)).length,
+      dayRecv,
+    };
+  }, [shipments, receiving, detail, day]);
+
+  // container → pallet count + Mode (from shipment master) for the receiving table
+  const palletByContainer = useMemo(() => {
+    const m = new Map();
+    for (const s of shipments) if (s['CONTAINER#'] != null) m.set(s['CONTAINER#'], Number(s.Pallet) || 0);
+    return m;
+  }, [shipments]);
+  const modeByContainer = useMemo(() => {
+    const m = new Map();
+    for (const s of shipments) if (s['CONTAINER#'] != null) m.set(s['CONTAINER#'], s.Mode);
+    return m;
+  }, [shipments]);
+  const sizeByContainer = useMemo(() => {
+    const m = new Map();
+    for (const s of shipments) if (s['CONTAINER#'] != null) m.set(s['CONTAINER#'], s['Container Size']);
+    return m;
+  }, [shipments]);
+
+  // receiving rows for the day, sorted by urgency severity (most urgent first)
+  const tableRows = useMemo(
+    () => [...metrics.dayRecv].sort((a, b) => (URGENCY_ORDER[a.Urgency] || 99) - (URGENCY_ORDER[b.Urgency] || 99)),
+    [metrics.dayRecv]
+  );
+
+  // ASN-level urgency tier counts for the legend
+  const tierCounts = useMemo(() => {
+    const c = Object.fromEntries(URGENCY_TIERS.map((t) => [t, 0]));
+    for (const r of metrics.dayRecv) if (c[r.Urgency] != null) c[r.Urgency] += 1;
+    return c;
+  }, [metrics.dayRecv]);
+
+  // SKU-grain detail rows for the selected ASN/container
+  const detailRows = useMemo(() => {
+    if (!selected) return [];
+    return detail.filter(
+      (r) => r.Delivery === selected.delivery && r['Container Number'] === selected.container && r.kdcEtaAdjusted === day
+    );
+  }, [selected, detail, day]);
+
+  const cards = [
+    { label: 'Total ASNs', value: fmtInt(metrics.asns), icon: FileText },
+    { label: 'Total Trailers', value: fmtInt(metrics.trailers), icon: Truck },
+    { label: 'FCL', value: fmtInt(metrics.fcl), icon: Box },
+    { label: 'LCL', value: fmtInt(metrics.lcl), icon: Package },
+    { label: 'Total Pallets', value: fmtInt(metrics.pallets), icon: Layers },
+    { label: 'Total SKUs', value: fmtInt(metrics.skus), icon: Box },
+    { label: 'Total Qty', value: fmtInt(metrics.qty), icon: Package },
+    { label: 'Urgent SKUs', value: fmtInt(metrics.urgentSkus), icon: AlertTriangle, deltaType: metrics.urgentSkus > 0 ? 'bad' : 'neutral' },
+    { label: 'Urgent ASNs', value: fmtInt(metrics.urgentAsns), icon: AlertTriangle, deltaType: metrics.urgentAsns > 0 ? 'bad' : 'neutral' },
+  ];
 
   return (
     <>
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-        <KPI label="Active Docks" value={activeDocks} delta={`of ${MOCK_DOCKS.length} total`} deltaType="neutral" icon={Anchor}/>
-        <KPI label="Receiving Accuracy" value={recvAccuracy} unit="%" delta="vs expected qty" deltaType="good" icon={CheckCircle2}/>
-        <KPI label="Dock-to-Stock" value="2.4" unit="hrs" delta="Avg today" deltaType="neutral" icon={Clock}/>
-        <KPI label="Truck TAT" value="1.8" unit="hrs" delta="Avg turnaround" deltaType="good" icon={Truck}/>
+      {/* Today / Tomorrow tabs + live status */}
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <div className="flex items-center gap-1 rounded-md p-1" style={{ background: 'var(--bg-panel-alt)', border: '1px solid var(--border)' }}>
+          {[['today', 'Today'], ['tomorrow', 'Tomorrow']].map(([k, lbl]) => (
+            <button key={k} onClick={() => { setDayTab(k); setSelected(null); }}
+              className="px-4 py-1.5 rounded text-[13px] font-semibold transition-colors"
+              style={dayTab === k ? { background: '#A01B2D', color: '#fff' } : { color: 'var(--text-secondary)' }}>
+              {lbl}
+            </button>
+          ))}
+          <span className="px-2 font-mono text-[12px]" style={{ color: 'var(--text-muted)' }}>{day}</span>
+        </div>
+        <div className="text-[11px] font-mono">
+          {loading ? <span style={{ color: 'var(--text-muted)' }}>Loading…</span>
+            : error ? <span className="text-[#E74C6F]">Data unavailable — {error.message}</span>
+            : <span className="text-[#2ECC71]">● Live</span>}
+        </div>
       </div>
 
-      <SectionCard title="Dock Door Grid" subtitle="Real-time door status" tag="LIVE" className="mb-4">
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          {MOCK_DOCKS.map(d => (
-            <div key={d.doorId} className="bg-[#232c37] border border-[#2d3744] rounded-md p-3 hover:border-[#1ABC9C] transition-colors">
-              <div className="flex items-center justify-between mb-2">
-                <div className="font-mono text-[13px] font-semibold">{d.doorId}</div>
-                <span className="text-[10px] px-1.5 py-0.5 rounded-full uppercase font-mono tracking-wider" style={{ background: statusColors[d.status]+'20', color: statusColors[d.status] }}>{d.status}</span>
-              </div>
-              <div className="text-[12px] text-[#8a95a3]">{d.carrier}</div>
-              <div className="text-[11px] font-mono text-[#5d6b7a]">{d.trailer}</div>
-              {d.arrival && <div className="text-[11px] font-mono text-[#5d6b7a] mt-1">Arrived {d.arrival.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}</div>}
+      {/* KPI strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-4">
+        {cards.map((c) => <KPI key={c.label} label={c.label} value={c.value} icon={c.icon} deltaType={c.deltaType} />)}
+      </div>
+
+      {/* Receiving Summary table */}
+      <SectionCard title="Receiving Summary" subtitle={`${tableRows.length} ASN${tableRows.length === 1 ? '' : 's'} scheduled · ${dayTab === 'today' ? 'Today' : 'Tomorrow'}`} tag="LIVE">
+        {loading ? (
+          <div className="py-10 text-center font-mono text-[12px]" style={{ color: 'var(--text-muted)' }}>Loading receiving data…</div>
+        ) : tableRows.length === 0 ? (
+          <div className="py-10 text-center font-mono text-[12px]" style={{ color: 'var(--text-muted)' }}>No ASNs scheduled for {day}.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12px]">
+              <thead>
+                <tr className="text-left border-b font-mono uppercase text-[11px] tracking-wider" style={{ color: 'var(--text-muted)', borderColor: 'var(--border)' }}>
+                  <th className="py-2 pr-2">Urg</th>
+                  <th className="py-2">KDC ETA</th>
+                  <th className="py-2">Plant</th>
+                  <th className="py-2">ASN</th>
+                  <th className="py-2">TR ID</th>
+                  <th className="py-2 text-center">Mode</th>
+                  <th className="py-2 text-right">Size</th>
+                  <th className="py-2 text-right">Pallets</th>
+                  <th className="py-2 text-right">SKUs</th>
+                  <th className="py-2 text-right">Qty</th>
+                  <th className="py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {tableRows.map((r, i) => (
+                  <tr key={`${r.Delivery}-${r['Container Number']}-${i}`}
+                    onClick={() => setSelected({ delivery: r.Delivery, container: r['Container Number'] })}
+                    className="border-b cursor-pointer transition-colors hover:bg-[#1a2129]" style={{ borderColor: 'var(--border)' }}>
+                    <td className="py-2 pr-2"><span title={r.Urgency} style={{ color: URGENCY_COLOR[r.Urgency] || 'var(--text-muted)' }}>●</span></td>
+                    <td className="py-2 font-mono">{r.kdcEtaAdjusted}</td>
+                    <td className="py-2 font-mono" style={{ color: 'var(--text-secondary)' }}>{r.Plant}</td>
+                    <td className="py-2 font-mono">{r.Delivery}</td>
+                    <td className="py-2 font-mono" style={{ color: 'var(--text-secondary)' }}>{r['Container Number']}</td>
+                    <td className="py-2 text-center font-mono">
+                      {(() => { const m = modeByContainer.get(r['Container Number']); return m ? <span style={{ color: m === 'FCL' ? '#2ECC71' : '#f5a623' }}>{m}</span> : <span style={{ color: 'var(--text-muted)' }}>—</span>; })()}
+                    </td>
+                    <td className="py-2 font-mono text-right" style={{ color: 'var(--text-secondary)' }}>{sizeByContainer.get(r['Container Number']) ?? '—'}</td>
+                    <td className="py-2 font-mono text-right">{fmtInt(palletByContainer.get(r['Container Number']))}</td>
+                    <td className="py-2 font-mono text-right">{fmtInt(r['Total SKUs'])}</td>
+                    <td className="py-2 font-mono text-right">{fmtInt(r['Total Qty'])}</td>
+                    <td className="py-2 text-right"><ChevronRight size={14} style={{ color: 'var(--text-muted)' }} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Urgency legend */}
+        <div className="flex flex-wrap items-center gap-3 mt-3 pt-3 border-t" style={{ borderColor: 'var(--border)' }}>
+          {URGENCY_TIERS.map((t) => (
+            <div key={t} className="flex items-center gap-1.5 text-[11px] font-mono" style={{ color: 'var(--text-secondary)' }}>
+              <span style={{ color: URGENCY_COLOR[t] }}>●</span>{t}: {tierCounts[t]}
             </div>
           ))}
         </div>
       </SectionCard>
 
-      <SectionCard title="Receiving Queue" subtitle={`${MOCK_RECEIVING_QUEUE.length} pending receipts`} tag="QUEUE">
-        <table className="w-full text-[12px]">
-          <thead>
-            <tr className="text-left text-[#5d6b7a] border-b border-[#2d3744] font-mono uppercase text-[11px] tracking-wider">
-              <th className="py-2">Receipt ID</th>
-              <th className="py-2">Shipment</th>
-              <th className="py-2">SKU</th>
-              <th className="py-2">Dock</th>
-              <th className="py-2 text-right">Expected</th>
-              <th className="py-2 text-right">Received</th>
-              <th className="py-2">Discrepancy</th>
-            </tr>
-          </thead>
-          <tbody>
-            {MOCK_RECEIVING_QUEUE.map(r => (
-              <tr key={r.receiptId} className="border-b border-[#2d3744] hover:bg-[#1a2129]">
-                <td className="py-2 font-mono">{r.receiptId}</td>
-                <td className="py-2 font-mono text-[#8a95a3]">{r.shipmentId}</td>
-                <td className="py-2 font-mono">{r.sku}</td>
-                <td className="py-2 font-mono text-[#8a95a3]">{r.dock}</td>
-                <td className="py-2 font-mono text-right">{r.expectedQty}</td>
-                <td className="py-2 font-mono text-right">{r.receivedQty}</td>
-                <td className="py-2">
-                  {r.discrepancy ? (
-                    <span className="text-[10px] px-1.5 py-0.5 rounded-full uppercase font-mono tracking-wider" style={{
-                      background: (r.discrepancy === 'DAMAGE' ? '#E74C6F' : r.discrepancy === 'SHORTAGE' ? '#f5a623' : '#2C3E9B')+'20',
-                      color: r.discrepancy === 'DAMAGE' ? '#E74C6F' : r.discrepancy === 'SHORTAGE' ? '#f5a623' : '#2C3E9B',
-                    }}>{r.discrepancy}</span>
-                  ) : <span className="text-[#5d6b7a] font-mono text-[11px]">OK</span>}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </SectionCard>
+      {/* Section ② — In-Transit (all In-Transit shipments; independent of the day tab) */}
+      <div className="mt-4">
+        <InTransitSection shipments={shipments} vessels={vessels} loading={loading} />
+      </div>
+
+      {/* Section ③ — Calendar (month grid + ASN list) */}
+      <div className="mt-4">
+        <CalendarSection calendar={calendar} loading={loading} todayStr={todayStr} />
+      </div>
+
+      {/* SKU-detail drawer */}
+      {selected && (
+        <>
+          <div className="fixed inset-0 z-40" style={{ background: 'rgba(0,0,0,0.5)' }} onClick={() => setSelected(null)} />
+          <div className="fixed top-0 right-0 h-full w-full sm:w-[560px] z-50 flex flex-col shadow-2xl" style={{ background: 'var(--bg-panel)', borderLeft: '1px solid var(--border)' }}>
+            <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: 'var(--border)' }}>
+              <div>
+                <div className="text-[13px] font-semibold" style={{ color: 'var(--text-primary)' }}>Receiving Detail</div>
+                <div className="text-[11px] font-mono mt-0.5" style={{ color: 'var(--text-muted)' }}>ASN {selected.delivery} · TR {selected.container}</div>
+              </div>
+              <button onClick={() => setSelected(null)} className="p-1 rounded hover:bg-[#232c37]"><X size={18} style={{ color: 'var(--text-secondary)' }} /></button>
+            </div>
+            <div className="flex-1 overflow-auto p-4">
+              {detailRows.length === 0 ? (
+                <div className="py-10 text-center font-mono text-[12px]" style={{ color: 'var(--text-muted)' }}>No SKU detail rows.</div>
+              ) : (
+                <table className="w-full text-[12px]">
+                  <thead>
+                    <tr className="text-left border-b font-mono uppercase text-[10px] tracking-wider" style={{ color: 'var(--text-muted)', borderColor: 'var(--border)' }}>
+                      <th className="py-2 pr-2">Urg</th>
+                      <th className="py-2">Material</th>
+                      <th className="py-2 text-right">Recv Qty</th>
+                      <th className="py-2 text-right">Stock</th>
+                      <th className="py-2 text-right">ActCov</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detailRows.map((d, i) => (
+                      <tr key={`${d['Material key']}-${i}`} className="border-b" style={{ borderColor: 'var(--border)' }}>
+                        <td className="py-2 pr-2"><span title={d.Urgency} style={{ color: URGENCY_COLOR[d.Urgency] || 'var(--text-muted)' }}>●</span></td>
+                        <td className="py-2 font-mono">{d['Material key']}</td>
+                        <td className="py-2 font-mono text-right">{fmtInt(d['Actual quantity delivered (in sales units)'])}</td>
+                        <td className="py-2 font-mono text-right">{fmtInt(d['Total Stock'])}</td>
+                        <td className="py-2 font-mono text-right">{d.ActCov_modified}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </>
+      )}
     </>
   );
 };

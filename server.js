@@ -1965,6 +1965,423 @@ app.get('/api/smartsheet/issues', async (req, res) => {
   }
 });
 
+// ── Inbound Ops (ASN) ─────────────────────────────────────────────────────
+// Backend for the "Inbound Ops" / ASN dashboard (PBIP rebuild). Combines the
+// Smartsheet shipment master (sheet 5494527893655428) with SAP receiving data
+// in Snowflake. See docs/design-docs/INBOUND_OPS_PBIP_ANALYSIS.md.
+
+const INBOUND_SHIPMENT_SHEET_ID = '5494527893655428';  // Inbound Shipment Detail v.3
+const VESSEL_LIST_SHEET_ID       = '3716376994047876';  // Vessel List (VESSEL/IMO)
+
+// 2026 US holidays observed by the PBIP "KDC ETA Adjusted" custom column.
+const KDC_2026_HOLIDAYS = new Set([
+  '2026-01-01', '2026-05-25', '2026-07-03',
+  '2026-09-07', '2026-11-26', '2026-12-25',
+]);
+
+// Port of the PBIP `KDC ETA Adjusted` rule: if a 'YYYY-MM-DD' string falls on a
+// 2026 US holiday, return date+1 day, else unchanged. UTC-safe (never setHours).
+function adjustKdcEta(dateStr) {
+  if (!dateStr || typeof dateStr !== 'string') return null;
+  const s = dateStr.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return s || null;
+  if (!KDC_2026_HOLIDAYS.has(s)) return s;
+  const d = new Date(s + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
+// Per-sheet Smartsheet cache, keyed by sheetId, 1h TTL (mirrors _smartsheetCache).
+const _smartsheetSheetCache = new Map();  // sheetId → { fetchedAt, value }
+
+// Generic Smartsheet sheet fetcher. Returns { columns: [titles], rows: [{title: value}] }.
+// Paginated (pageSize 5000, cap 20 pages) like fetchSmartsheetIssues. Cached 1h per sheet.
+async function fetchSmartsheetSheet(sheetId) {
+  if (!SMARTSHEET_API_TOKEN) {
+    throw new Error('Missing SMARTSHEET_API_TOKEN — set in .env');
+  }
+  const cached = _smartsheetSheetCache.get(sheetId);
+  if (cached && (Date.now() - cached.fetchedAt) < SMARTSHEET_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
+  const PAGE_SIZE = 5000;
+  let columns = null;
+  const allRows = [];
+  let pageNum = 1;
+
+  while (true) {
+    const url = `https://api.smartsheet.com/2.0/sheets/${sheetId}`
+      + `?include=columnType&pageSize=${PAGE_SIZE}&page=${pageNum}`;
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${SMARTSHEET_API_TOKEN}` },
+    });
+    if (!resp.ok) {
+      throw new Error(`Smartsheet API ${resp.status}: ${await resp.text()}`);
+    }
+    const pageData = await resp.json();
+    if (pageNum === 1) columns = pageData.columns || [];
+    const pageRows = pageData.rows || [];
+    for (const row of pageRows) allRows.push(row);
+
+    const totalRowCount = pageData.totalRowCount;
+    const done = (typeof totalRowCount === 'number' && allRows.length >= totalRowCount)
+      || pageRows.length < PAGE_SIZE;
+    if (done) break;
+    pageNum += 1;
+    if (pageNum > 20) {
+      throw new Error(`Smartsheet pagination exceeded 20 pages for ${sheetId} — investigate`);
+    }
+  }
+
+  const colTitleById = new Map();
+  for (const c of columns || []) colTitleById.set(c.id, (c.title || '').trim());
+
+  const rows = [];
+  for (const row of allRows) {
+    const obj = {};
+    for (const cell of row.cells || []) {
+      const title = colTitleById.get(cell.columnId);
+      if (!title) continue;
+      obj[title] = cell.value ?? cell.displayValue ?? null;
+    }
+    rows.push(obj);
+  }
+
+  const value = { columns: Array.from(colTitleById.values()), rows };
+  _smartsheetSheetCache.set(sheetId, { fetchedAt: Date.now(), value });
+  return value;
+}
+
+// Load the inbound shipment master (Smartsheet 5494527893655428). Maps each row
+// to an object, trims CONTAINER#, and computes kdcEtaAdjusted from "KDC ETA (DASH)".
+// Returns all rows (caller filters by Status === "In Transit" as needed).
+async function getInboundShipments() {
+  const sheet = await fetchSmartsheetSheet(INBOUND_SHIPMENT_SHEET_ID);
+  return sheet.rows.map((r) => {
+    const container = r['CONTAINER#'] != null ? String(r['CONTAINER#']).trim() : null;
+    return {
+      ...r,
+      'CONTAINER#': container,
+      kdcEtaAdjusted: adjustKdcEta(r['KDC ETA (DASH)'] != null ? String(r['KDC ETA (DASH)']) : null),
+    };
+  });
+}
+
+// Build Map<CONTAINER#, kdcEtaAdjusted> from In-Transit shipments only (mirrors
+// the PBIP "Inbound Shipment" shared query, filtered Status === "In Transit").
+function buildInTransitEtaMap(shipments) {
+  const map = new Map();
+  for (const s of shipments) {
+    if (s['Status'] !== 'In Transit') continue;
+    const c = s['CONTAINER#'];
+    if (!c) continue;
+    if (!map.has(c)) map.set(c, s.kdcEtaAdjusted);
+  }
+  return map;
+}
+
+// SQL: ASN-grain receiving summary (Receiving Line Item). SELECT-only.
+const INBOUND_RECEIVING_SUMMARY_SQL = `
+with base as (
+    select "Client", a."Delivery", "Material Number" as "Material key", "Plant",
+        "Actual quantity delivered (in sales units)", "Document number of the reference document",
+        a."Delivery Item", c."Means of Transport ID" as "Container Number"
+    from kdb.pbi_sf.lips a
+    left join ( select "Delivery", "Purchasing Document Number", "Quantity as Per Vendor Confirmation",
+            "Quantity Reduced (MRP)", "Delivery Item" from kdb.pbi_sf.ekes ) b
+      on a."Delivery" = b."Delivery" and a."Document number of the reference document" = b."Purchasing Document Number"
+         and a."Actual quantity delivered (in sales units)" = b."Quantity as Per Vendor Confirmation" and a."Delivery Item" = b."Delivery Item"
+    left join ( select distinct "Delivery", "Means of Transport ID" from kdb.pbi_sf.likp ) c on a."Delivery" = c."Delivery"
+    where a."Delivery" like '018%'
+)
+, total_stock as ( select client_key, material_key, plant_key,
+        sum(unrestricted_qty + transfer_qty + qualityinspection_qty + blocked_qty + blockreturn_qty + consignment_qty) as total_stock
+    from kdb.pbi_sf.sap_inventory_im group by 1,2,3 )
+, daily_req as ( select distinct "Client", "Material Number", "Planning Plant", "Average daily requirements" from kdb.pbi_sf.ztpp_mrplist )
+, line_items as (
+    select b."Client", b."Delivery", b."Material key", b."Plant", b."Actual quantity delivered (in sales units)",
+        b."Document number of the reference document", b."Delivery Item", b."Container Number",
+        s.total_stock as "Total Stock", r."Average daily requirements",
+        floor(s.total_stock / nullif(r."Average daily requirements", 0), 1) as "ActCov",
+        case when s.total_stock / nullif(r."Average daily requirements", 0) < 1 then 'Super Urgent'
+             when s.total_stock / nullif(r."Average daily requirements", 0) >= 1 and (s.total_stock - r."Average daily requirements") / nullif(r."Average daily requirements", 0) < 2 then 'Urgent'
+             when s.total_stock / nullif(r."Average daily requirements", 0) >= 2 and (s.total_stock - r."Average daily requirements") / nullif(r."Average daily requirements", 0) < 3 then 'Expedite'
+             when s.total_stock / nullif(r."Average daily requirements", 0) >= 3 and (s.total_stock - r."Average daily requirements") / nullif(r."Average daily requirements", 0) < 5 then 'High'
+             when s.total_stock / nullif(r."Average daily requirements", 0) > 5 and (s.total_stock - r."Average daily requirements") / nullif(r."Average daily requirements", 0) < 10 then 'Medium'
+             else 'Low' end as "Urgency"
+    from base b
+    left join total_stock s on b."Material key" = s.material_key and b."Plant" = s.plant_key
+    left join daily_req r on b."Material key" = r."Material Number" and b."Plant" = r."Planning Plant"
+)
+select "Client", "Plant", "Delivery", "Container Number",
+    count(distinct "Material key") as "Total SKUs",
+    sum("Actual quantity delivered (in sales units)") as "Total Qty",
+    max("Total Stock") as "Total Stock", max("Average daily requirements") as "Average daily requirements",
+    case min(case "Urgency" when 'Super Urgent' then 1 when 'Urgent' then 2 when 'Expedite' then 3 when 'High' then 4 when 'Medium' then 5 when 'Low' then 6 else 999 end)
+      when 1 then 'Super Urgent' when 2 then 'Urgent' when 3 then 'Expedite' when 4 then 'High' when 5 then 'Medium' when 6 then 'Low' else null end as "Urgency"
+from line_items group by 1,2,3,4
+`;
+
+// SQL: SKU-grain receiving detail (Receiving Line Item Details). SELECT-only.
+const INBOUND_RECEIVING_DETAIL_SQL = `
+with base as (
+    select "Client", a."Delivery", "Material Number" as "Material key", "Plant", "Storage Location",
+        "Actual quantity delivered (in sales units)", "Document number of the reference document",
+        a."Delivery Item", c."Means of Transport ID" as "Container Number"
+    from kdb.pbi_sf.lips a
+    left join ( select "Delivery", "Purchasing Document Number", "Quantity as Per Vendor Confirmation",
+            "Quantity Reduced (MRP)", "Delivery Item" from kdb.pbi_sf.ekes ) b
+      on a."Delivery" = b."Delivery" and a."Document number of the reference document" = b."Purchasing Document Number"
+         and a."Actual quantity delivered (in sales units)" = b."Quantity as Per Vendor Confirmation" and a."Delivery Item" = b."Delivery Item"
+    left join ( select distinct "Delivery", "Means of Transport ID" from kdb.pbi_sf.likp ) c on a."Delivery" = c."Delivery"
+    where a."Delivery" like '018%'
+)
+, total_stock as ( select client_key, material_key, plant_key,
+        sum(unrestricted_qty + transfer_qty + qualityinspection_qty + blocked_qty + blockreturn_qty + consignment_qty) as total_stock
+    from kdb.pbi_sf.sap_inventory_im group by 1,2,3 )
+, daily_req as ( select distinct "Client", "Material Number", "Planning Plant", "Average daily requirements" from kdb.pbi_sf.ztpp_mrplist )
+select b.*, s.total_stock as "Total Stock", r."Average daily requirements",
+    floor(s.total_stock / nullif(r."Average daily requirements", 0), 1) as "ActCov",
+    case when s.total_stock / nullif(r."Average daily requirements", 0) < 1 then 'Super Urgent'
+         when s.total_stock / nullif(r."Average daily requirements", 0) >= 1 and (s.total_stock - r."Average daily requirements") / nullif(r."Average daily requirements", 0) < 2 then 'Urgent'
+         when s.total_stock / nullif(r."Average daily requirements", 0) >= 2 and (s.total_stock - r."Average daily requirements") / nullif(r."Average daily requirements", 0) < 3 then 'Expedite'
+         when s.total_stock / nullif(r."Average daily requirements", 0) >= 3 and (s.total_stock - r."Average daily requirements") / nullif(r."Average daily requirements", 0) < 5 then 'High'
+         when s.total_stock / nullif(r."Average daily requirements", 0) > 5 and (s.total_stock - r."Average daily requirements") / nullif(r."Average daily requirements", 0) < 10 then 'Medium'
+         else 'Low' end as "Urgency"
+from base b
+left join total_stock s on b."Material key" = s.material_key and b."Plant" = s.plant_key
+left join daily_req r on b."Material key" = r."Material Number" and b."Plant" = r."Planning Plant"
+`;
+
+// SQL: vendor-confirmation base feeding the calendar / ASN list. SELECT-only.
+const INBOUND_CALENDAR_SQL = `
+with base as (
+  select "Client", plant_key, a."Purchasing Document Number", "Sequential Number of Vendor Confirmation",
+    "Confirmation Category", "Reference Document Number (for Dependencies see Long Text)", a."Delivery",
+    "Means of Transport ID" as "Container Number", "Vendor name", material_key, "Delivery Date of Vendor Confirmation",
+    sum("Quantity as Per Vendor Confirmation") as "Quantity as Per Vendor Confirmation",
+    sum("Quantity Reduced (MRP)") as "Quantity Reduced (MRP)"
+  from kdb.pbi_sf.ekes a
+  left join ( select distinct "Delivery", "Means of Transport ID" from kdb.pbi_sf.likp ) b on a."Delivery" = b."Delivery"
+  left join ( select plant_key, material_key, "Vendor name", left(mrpelementdata,10) as "Purchasing Document Number",
+        right(mrpelementdata,5) as "Item Number of Purchasing Document", QUANTITYRECEIVED_QUANTITYREQUIRED
+      from kdb.pbi_sf.sap_mrplist where ABBREVMRPELEMENT = 'ShpgNt' ) c
+    on a."Purchasing Document Number" = c."Purchasing Document Number"
+       and a."Material Number Corresponding to Manufacturer Part Number" = c.material_key
+       and a."Quantity as Per Vendor Confirmation" = c.QUANTITYRECEIVED_QUANTITYREQUIRED
+  where "Creation Date of Confirmation" >= '2025-01-01'
+    and ("Quantity as Per Vendor Confirmation" - "Quantity Reduced (MRP)") != 0
+    and material_key is not null
+  group by 1,2,3,4,5,6,7,8,9,10,11
+  order by a."Delivery"
+)
+select "Client", b.plant_key, "Purchasing Document Number", "Sequential Number of Vendor Confirmation",
+    "Confirmation Category", "Reference Document Number (for Dependencies see Long Text)", "Delivery",
+    "Container Number", "Vendor name", b.material_key, "Delivery Date of Vendor Confirmation",
+    "Quantity as Per Vendor Confirmation", "Quantity Reduced (MRP)"
+from base b
+left join ( select client_key, material_key, plant_key,
+        sum(unrestricted_qty + transfer_qty + qualityinspection_qty + blocked_qty + blockreturn_qty + consignment_qty) as total_stock
+    from kdb.pbi_sf.sap_inventory_im group by 1,2,3 ) i
+  on b."Client" = i.client_key and b.plant_key = i.plant_key and b.material_key = i.material_key
+`;
+
+// SQL: latest vessel port call per IMO. SELECT-only.
+const INBOUND_VESSEL_PORTCALLS_SQL = `
+SELECT TO_VARCHAR(IMO) AS IMO, "PORTCALL.LOCODE" AS LOCODE, "PORTCALL.EVENT" AS EVENT,
+    TO_DATE(SPLIT_PART("PORTCALL.TIMESTAMP", ' ', 1)) AS TIMESTAMP_DATE,
+    SPLIT_PART("PORTCALL.TIMESTAMP", ' ', -2) AS TIMESTAMP_TIME,
+    "PORTCALL.PORT" AS PORT, "PORTCALL.COUNTRY" AS COUNTRY
+FROM EMP.INVENTORY."VF_VesselPortcalls"
+QUALIFY ROW_NUMBER() OVER ( PARTITION BY IMO ORDER BY DATA_UPDATE_DATE DESC, "PORTCALL.TIMESTAMP" DESC ) = 1
+ORDER BY IMO DESC
+`;
+
+// Exact Smartsheet source column titles used (echoed by /api/inbound/shipments).
+const INBOUND_SOURCE_COLUMNS = {
+  status: 'Status', container: 'CONTAINER#', mode: 'Mode', pallet: 'Pallet',
+  cnee: 'CNEE', vessel: 'VESSEL', destination: 'DESTINATION',
+  truckingCompany: 'Trucking Company', containerSize: 'Container Size',
+  pgr: 'PGR', hbl: 'HBL', invoice: 'INVOICE#',
+  kdcEta: 'KDC ETA', kdcEtaDash: 'KDC ETA (DASH)',
+};
+
+// GET /api/inbound/shipments — Smartsheet shipment master, In-Transit only.
+app.get('/api/inbound/shipments', async (_req, res) => {
+  try {
+    const all = await getInboundShipments();
+    const data = all
+      .filter((s) => s['Status'] === 'In Transit')
+      .map((s) => {
+        const pallet = s['Pallet'] != null && s['Pallet'] !== '' ? Number(s['Pallet']) : null;
+        return {
+          'Status': s['Status'],
+          'CONTAINER#': s['CONTAINER#'],
+          'Mode': s['Mode'] ?? null,
+          'Pallet': Number.isFinite(pallet) ? pallet : null,
+          'CNEE': s['CNEE'] ?? null,
+          'VESSEL': s['VESSEL'] ?? null,
+          'DESTINATION': s['DESTINATION'] ?? null,
+          'Trucking Company': s['Trucking Company'] ?? 'Not Assigned',
+          'Container Size': s['Container Size'] ?? null,
+          'PGR': s['PGR'] ?? null,
+          'HBL': s['HBL'] ?? null,
+          'INVOICE#': s['INVOICE#'] ?? null,
+          'KDC ETA': s['KDC ETA'] ?? null,
+          'KDC ETA (DASH)': s['KDC ETA (DASH)'] ?? null,
+          kdcEtaAdjusted: s.kdcEtaAdjusted,
+        };
+      });
+    res.json({ success: true, data, count: data.length, source: 'smartsheet', sourceColumns: INBOUND_SOURCE_COLUMNS });
+  } catch (err) {
+    console.error('GET /api/inbound/shipments failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/inbound/receiving-summary — ASN-grain receiving, joined to In-Transit ETA.
+app.get('/api/inbound/receiving-summary', async (_req, res) => {
+  try {
+    const [rows, shipments] = await Promise.all([
+      executeQuery(INBOUND_RECEIVING_SUMMARY_SQL),
+      getInboundShipments(),
+    ]);
+    const etaMap = buildInTransitEtaMap(shipments);
+    const seen = new Set();
+    const data = [];
+    for (const r of rows) {
+      const container = r['Container Number'] != null ? String(r['Container Number']).trim() : null;
+      const eta = container ? etaMap.get(container) : null;
+      if (!eta) continue;  // drop rows with null ETA (matches PBIP merge)
+      const key = `${r['Delivery']}|${container}|${eta}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      data.push({ ...r, kdcEtaAdjusted: eta });
+    }
+    res.json({ success: true, data, count: data.length, source: 'snowflake+smartsheet' });
+  } catch (err) {
+    console.error('GET /api/inbound/receiving-summary failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/inbound/receiving-detail — SKU-grain receiving; attach ETA, keep nulls.
+app.get('/api/inbound/receiving-detail', async (_req, res) => {
+  try {
+    const [rows, shipments] = await Promise.all([
+      executeQuery(INBOUND_RECEIVING_DETAIL_SQL),
+      getInboundShipments(),
+    ]);
+    const etaMap = buildInTransitEtaMap(shipments);
+    // Scope to In-Transit-matched containers only. The detail slide-over always
+    // drills into a receiving-summary ASN (which requires an ETA), mirroring the
+    // PBIP `Is Today/Is Tomorrow` visual filter. Without this the SKU-grain query
+    // returns ~198k rows (the full '018%' delivery history) — too large to ship.
+    const data = [];
+    for (const r of rows) {
+      const container = r['Container Number'] != null ? String(r['Container Number']).trim() : null;
+      const eta = container ? etaMap.get(container) : null;
+      if (!eta) continue;
+      const actCov = r['ActCov'];
+      const actCovModified = (actCov === null || actCov === undefined || actCov === '')
+        ? '–' : String(actCov);
+      data.push({ ...r, kdcEtaAdjusted: eta, ActCov_modified: actCovModified });
+    }
+    res.json({ success: true, data, count: data.length, source: 'snowflake+smartsheet' });
+  } catch (err) {
+    console.error('GET /api/inbound/receiving-detail failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/inbound/calendar-feed — grouped ASN list + per-day pallet/FCL/LCL totals.
+app.get('/api/inbound/calendar-feed', async (_req, res) => {
+  try {
+    const [rows, shipments] = await Promise.all([
+      executeQuery(INBOUND_CALENDAR_SQL),
+      getInboundShipments(),
+    ]);
+    const etaMap = buildInTransitEtaMap(shipments);
+
+    // Attach ETA, drop nulls, dedup, then group by Delivery/Container/ETA/Vendor.
+    const groups = new Map();
+    const seen = new Set();
+    for (const r of rows) {
+      const container = r['Container Number'] != null ? String(r['Container Number']).trim() : null;
+      const eta = container ? etaMap.get(container) : null;
+      if (!eta) continue;
+      const delivery = r['Delivery'];
+      const vendor = r['Vendor name'] ?? null;
+      // Dedup identical source rows before grouping.
+      const rowKey = `${delivery}|${container}|${eta}|${vendor}|${r['Purchasing Document Number']}|${r['Sequential Number of Vendor Confirmation']}|${r['material_key'] ?? r['MATERIAL_KEY']}`;
+      if (seen.has(rowKey)) continue;
+      seen.add(rowKey);
+
+      const gKey = `${delivery}|${container}|${eta}|${vendor}`;
+      let g = groups.get(gKey);
+      if (!g) {
+        g = { Delivery: delivery, 'Container Number': container, kdcEtaAdjusted: eta, 'Vendor name': vendor, totalQty: 0, lineItems: 0 };
+        groups.set(gKey, g);
+      }
+      const qty = Number(r['Quantity as Per Vendor Confirmation'] ?? r['QUANTITY AS PER VENDOR CONFIRMATION'] ?? 0);
+      g.totalQty += Number.isFinite(qty) ? qty : 0;
+      g.lineItems += 1;
+    }
+    const asnList = Array.from(groups.values());
+
+    // Per-day rollup from In-Transit shipments: pallets sum, distinct FCL/LCL containers.
+    const dayAgg = new Map();  // date → { pallets, fclSet, lclSet }
+    for (const s of shipments) {
+      if (s['Status'] !== 'In Transit') continue;
+      const date = s.kdcEtaAdjusted;
+      if (!date) continue;
+      let d = dayAgg.get(date);
+      if (!d) { d = { pallets: 0, fclSet: new Set(), lclSet: new Set() }; dayAgg.set(date, d); }
+      const pallet = Number(s['Pallet']);
+      if (Number.isFinite(pallet)) d.pallets += pallet;
+      const container = s['CONTAINER#'];
+      if (container && s['Mode'] === 'FCL') d.fclSet.add(container);
+      if (container && s['Mode'] === 'LCL') d.lclSet.add(container);
+    }
+    const dayTotals = {};
+    for (const [date, d] of dayAgg) {
+      dayTotals[date] = { pallets: d.pallets, fcl: d.fclSet.size, lcl: d.lclSet.size };
+    }
+
+    res.json({ success: true, data: { asnList, dayTotals }, count: asnList.length, source: 'snowflake+smartsheet' });
+  } catch (err) {
+    console.error('GET /api/inbound/calendar-feed failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /api/inbound/vessel-portcalls — latest port call per IMO, enriched w/ VESSEL name.
+app.get('/api/inbound/vessel-portcalls', async (_req, res) => {
+  try {
+    const rows = await executeQuery(INBOUND_VESSEL_PORTCALLS_SQL);
+    // Best-effort vessel-name enrichment from Smartsheet Vessel List (IMO → VESSEL).
+    const imoToName = new Map();
+    try {
+      const vessel = await fetchSmartsheetSheet(VESSEL_LIST_SHEET_ID);
+      for (const v of vessel.rows) {
+        const imo = v['IMO'] != null ? String(v['IMO']).trim() : null;
+        if (imo && !imoToName.has(imo)) imoToName.set(imo, v['VESSEL'] ?? null);
+      }
+    } catch (e) {
+      console.error('vessel-portcalls: Vessel List enrichment skipped:', e.message);
+    }
+    const data = rows.map((r) => {
+      const imo = r['IMO'] != null ? String(r['IMO']).trim() : null;
+      return { ...r, vesselName: imo ? (imoToName.get(imo) ?? null) : null };
+    });
+    res.json({ success: true, data, count: data.length, source: 'snowflake+smartsheet' });
+  } catch (err) {
+    console.error('GET /api/inbound/vessel-portcalls failed:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // ── Start server ────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`\n  KDC Operations Intelligence — API Server`);
@@ -2016,6 +2433,12 @@ app.listen(PORT, () => {
   console.log('  POST /api/ai/risk-analyze-batch      Batch risk analysis (top-N at-risk orders)');
   console.log(`\n  ── Smartsheet Integration (PR Geo-5) ──`);
   console.log(`  GET  /api/smartsheet/issues          Issue types overlay (1h cache; ?refresh=true to force)`);
+  console.log(`\n  ── Inbound Ops (ASN) ──`);
+  console.log(`  GET  /api/inbound/shipments          Smartsheet shipment master (In-Transit, +kdcEtaAdjusted)`);
+  console.log(`  GET  /api/inbound/receiving-summary  ASN-grain receiving + ETA (Snowflake+Smartsheet)`);
+  console.log(`  GET  /api/inbound/receiving-detail   SKU-grain receiving + ETA + ActCov_modified`);
+  console.log(`  GET  /api/inbound/calendar-feed      Grouped ASN list + per-day pallet/FCL/LCL totals`);
+  console.log(`  GET  /api/inbound/vessel-portcalls   Latest port call per IMO (+vesselName)`);
   console.log(`\n  ── Utility ──`);
   console.log(`  GET  /api/health                     Health check`);
   console.log(`  POST /api/snowflake/test             Test connection`);
