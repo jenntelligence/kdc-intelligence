@@ -6967,7 +6967,9 @@ export default function ShippingSLAApp() {
     : activePage === 'geo'  ? geoMeta
     : activePage === 'exec' ? overviewMeta
     : null;
-  const currentSource = currentMeta?.source ?? null;
+  // Inbound Ops fetches live data directly (Smartsheet + Snowflake), independent
+  // of the global mock/live toggle — so its header badge is always LIVE.
+  const currentSource = activePage === 'inbound' ? 'live' : (currentMeta?.source ?? null);
   // PR4b3: drives the header summary dropdown on the Split page.
   const [datePickerOpen, setDatePickerOpen] = useState(false);
   const datePickerRef = useRef(null);
@@ -7580,7 +7582,9 @@ export default function ShippingSLAApp() {
                 {currentSource === 'mock-fallback' ? 'MOCK-FALLBACK' : currentSource.toUpperCase()}
               </span>
             )}
-            {/* Data source toggle */}
+            {/* Data source toggle — global mock/live switch. Hidden on Inbound Ops,
+                which always fetches live data (the LIVE badge above covers it). */}
+            {activePage !== 'inbound' && (
             <button onClick={handleDataSourceToggle} disabled={isConnecting}
               title={dataSource === 'mock' ? 'Switch to Live Snowflake data' : 'Switch to Mock data'}
               className="h-8 flex items-center gap-1.5 px-2.5 rounded transition-colors"
@@ -7593,6 +7597,7 @@ export default function ShippingSLAApp() {
                 <><div className="w-1.5 h-1.5 rounded-full bg-[#2ECC71] animate-pulse"/><span style={{ color: theme === 'light' ? '#ffffff' : THEME.textPrimary }}>{uploadedData ? 'CSV' : 'MOCK'}</span></>
               )}
             </button>
+            )}
             {liveToast && (
               <div className="fixed top-12 right-4 z-50 px-3 py-2 rounded-md text-[12px] font-medium shadow-lg"
                 style={liveToast.type === 'success' ? { background: '#2ECC7115', border: '1px solid #2ECC7130', color: '#2ECC71' } : { background: '#E74C6F15', border: '1px solid #E74C6F30', color: '#E74C6F' }}>
@@ -8196,7 +8201,7 @@ export default function ShippingSLAApp() {
       <div className="border-t border-[#2d3744] mt-8">
         <div className="max-w-[2560px] mx-auto px-3 sm:px-4 md:px-6 py-3 flex items-center justify-between text-[11px] font-mono text-[#5d6b7a]">
           <div className="flex items-center gap-4">
-            <span>KDC Shipping SLA · v0.1 Prototype</span>
+            <span>KDC Operations Intelligence · v0.1 Prototype</span>
             <span>·</span>
             <span className="flex items-center gap-1"><Database size={10}/> {uploadedData ? 'User CSV' : 'Mock Data'}</span>
           </div>
