@@ -5214,16 +5214,17 @@ const InboundPage = () => {
     );
   }, [selected, detail, day]);
 
+  // Order: capacity headline (Trailers/Pallets) → urgency (sequencing) → rest.
   const cards = [
-    { label: 'Total ASNs', value: fmtInt(metrics.asns), icon: FileText },
     { label: 'Total Trailers', value: fmtInt(metrics.trailers), icon: Truck },
+    { label: 'Total Pallets', value: fmtInt(metrics.pallets), icon: Layers },
+    { label: 'Urgent ASNs', value: fmtInt(metrics.urgentAsns), icon: AlertTriangle, deltaType: metrics.urgentAsns > 0 ? 'bad' : 'neutral' },
+    { label: 'Urgent SKUs', value: fmtInt(metrics.urgentSkus), icon: AlertTriangle, deltaType: metrics.urgentSkus > 0 ? 'bad' : 'neutral' },
+    { label: 'Total ASNs', value: fmtInt(metrics.asns), icon: FileText },
     { label: 'FCL', value: fmtInt(metrics.fcl), icon: Box },
     { label: 'LCL', value: fmtInt(metrics.lcl), icon: Package },
-    { label: 'Total Pallets', value: fmtInt(metrics.pallets), icon: Layers },
     { label: 'Total SKUs', value: fmtInt(metrics.skus), icon: Box },
     { label: 'Total Qty', value: fmtInt(metrics.qty), icon: Package },
-    { label: 'Urgent SKUs', value: fmtInt(metrics.urgentSkus), icon: AlertTriangle, deltaType: metrics.urgentSkus > 0 ? 'bad' : 'neutral' },
-    { label: 'Urgent ASNs', value: fmtInt(metrics.urgentAsns), icon: AlertTriangle, deltaType: metrics.urgentAsns > 0 ? 'bad' : 'neutral' },
   ];
 
   return (
